@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
+import Topbar from "@/components/Topbar";
 import { getSavedUser, isAuthenticated, logout, changePassword, revokeAllSessions, fetchCompanyProfile, updateCompanyProfile } from "@/lib/api";
 import { useRole } from "@/lib/useRole";
 
@@ -311,13 +312,7 @@ export default function SettingsPage() {
       <div className="main">
 
         {/* Top bar */}
-        <div className="topbar">
-          <div className="topbar-title">Settings</div>
-          <div className="topbar-user">
-            <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>{user?.email}</span>
-            <div className="topbar-avatar">{(user?.name?.[0] ?? "S").toUpperCase()}</div>
-          </div>
-        </div>
+        <Topbar title="Settings" right={<span style={{ fontSize: 13, color: "var(--text-secondary)" }}>{user?.email}</span>} />
 
         {/* Two-column layout */}
         <div className="page-body" style={{ display: "grid", gridTemplateColumns: "210px 1fr", gap: 24, alignItems: "start" }}>
@@ -637,13 +632,10 @@ export default function SettingsPage() {
                 <Row label="Compliance" sub="Privacy Act 1988 (AU) · Privacy Act 2020 (NZ) · WHS/HSWA 2015">
                   <span style={{ fontSize: 12, background: "#F0FDF4", color: "#22C55E", padding: "4px 12px", borderRadius: 8, fontWeight: 700 }}>AU & NZ</span>
                 </Row>
-                <Row label="Support" sub="Technical support and billing queries">
+                <Row label="Support" sub="Technical support and billing queries" last>
                   <a href="mailto:support@getsitesnapai.com" style={{ fontSize: 13, color: "var(--accent)", fontWeight: 600 }}>
                     support@getsitesnapai.com
                   </a>
-                </Row>
-                <Row label="Documentation" sub="Setup guides, API reference and integration docs" last>
-                  <a href="#" style={{ fontSize: 13, color: "var(--accent)", fontWeight: 600 }}>Docs →</a>
                 </Row>
               </Panel>
             )}

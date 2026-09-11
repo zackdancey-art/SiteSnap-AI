@@ -3,6 +3,7 @@
 import { useState, useMemo } from "react";
 import Link from "next/link";
 import Sidebar from "@/components/Sidebar";
+import Topbar from "@/components/Topbar";
 import { SkeletonCard } from "@/components/Skeleton";
 import { getSavedUser } from "@/lib/api";
 import { useBootstrap } from "@/lib/useBootstrap";
@@ -49,12 +50,7 @@ export default function SitesPage() {
     <div className="app-shell">
       <Sidebar userName={user?.name ?? user?.email ?? "Supervisor"} />
       <div className="main">
-        <div className="topbar">
-          <div className="topbar-title">Sites</div>
-          <div className="topbar-user">
-            <div className="topbar-avatar">{(user?.name?.[0] ?? "S").toUpperCase()}</div>
-          </div>
-        </div>
+        <Topbar title="Sites" />
         <div className="page-body">
           {/* Filter bar */}
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>

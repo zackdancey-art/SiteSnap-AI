@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
+import Topbar from "@/components/Topbar";
 import { SkeletonCard } from "@/components/Skeleton";
 import {
   getSavedUser, isAuthenticated,
@@ -152,13 +153,7 @@ export default function TeamPage() {
     <div className="app-shell">
       <Sidebar userName={user?.name ?? user?.email ?? "Supervisor"} />
       <div className="main">
-        <div className="topbar">
-          <div className="topbar-title">Team</div>
-          <div className="topbar-user">
-            <RoleBadge role={companyRole} />
-            <div className="topbar-avatar">{(user?.name?.[0] ?? "T").toUpperCase()}</div>
-          </div>
-        </div>
+        <Topbar title="Team" right={<RoleBadge role={companyRole} />} />
 
         <div className="page-body" style={{ display: "flex", flexDirection: "column", gap: 24 }}>
           {error && (

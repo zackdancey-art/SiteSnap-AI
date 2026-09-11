@@ -4,6 +4,7 @@ import { useState, useMemo, useCallback } from "react";
 import { useSearchParams } from "next/navigation";
 import { Suspense } from "react";
 import Sidebar from "@/components/Sidebar";
+import Topbar from "@/components/Topbar";
 import EmailServicePicker from "@/components/EmailServicePicker";
 import { getSavedUser, generateDiary, approveDiary } from "@/lib/api";
 import type { Diary, Site } from "@/lib/api";
@@ -386,19 +387,11 @@ function ReportsPageInner() {
     <div className="app-shell">
       <Sidebar userName={user?.name ?? user?.email ?? "Supervisor"} />
       <div className="main">
-        <div className="topbar">
-          <div className="topbar-title">Reports</div>
-          <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-            {data && (
-              <button className="btn-ghost" style={{ fontSize: 13 }} onClick={() => exportCsv(visibleDiaries, data.sites)}>
-                ⬇ Export CSV
-              </button>
-            )}
-            <div className="topbar-user">
-              <div className="topbar-avatar">{(user?.name?.[0] ?? "S").toUpperCase()}</div>
-            </div>
-          </div>
-        </div>
+        <Topbar title="Reports" right={data ? (
+          <button className="btn-ghost" style={{ fontSize: 13 }} onClick={() => exportCsv(visibleDiaries, data.sites)}>
+            ⬇ Export CSV
+          </button>
+        ) : undefined} />
 
         <div className="page-body">
           {/* KPI strip */}

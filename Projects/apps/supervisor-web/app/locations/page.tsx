@@ -4,6 +4,7 @@ import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import Sidebar from "@/components/Sidebar";
+import Topbar from "@/components/Topbar";
 import { getSavedUser, isAuthenticated } from "@/lib/api";
 
 const WorkerMap = dynamic(() => import("@/components/WorkerMap"), { ssr: false });
@@ -72,15 +73,13 @@ export default function LocationsPage() {
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
   }, []);
 
-  const firstName = user?.name?.split(" ")[0] ?? "Supervisor";
 
   return (
     <div className="app-shell">
       <Sidebar userName={user?.name ?? user?.email ?? "Supervisor"} />
       <div className="main">
-        <div className="topbar">
-          <div className="topbar-title">Live Locations</div>
-          <div className="topbar-user">
+        <Topbar title="Live Locations" right={
+          <>
             <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
               Refreshed {lastRefresh.toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
             </span>
@@ -91,9 +90,8 @@ export default function LocationsPage() {
             >
               ↻ Refresh
             </button>
-            <div className="topbar-avatar">{firstName[0]?.toUpperCase()}</div>
-          </div>
-        </div>
+          </>
+        } />
 
         <div className="page-body">
           {/* Legend */}
