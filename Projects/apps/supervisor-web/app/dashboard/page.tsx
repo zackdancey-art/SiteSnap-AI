@@ -2,6 +2,7 @@
 
 import { useState, useMemo } from "react";
 import Sidebar from "@/components/Sidebar";
+import Topbar from "@/components/Topbar";
 import { SkeletonMetrics, SkeletonTable } from "@/components/Skeleton";
 import { getSavedUser } from "@/lib/api";
 import { useBootstrap } from "@/lib/useBootstrap";
@@ -82,13 +83,7 @@ export default function DashboardPage() {
 
       <div className="main">
         {/* Top bar */}
-        <div className="topbar">
-          <div className="topbar-title">Dashboard</div>
-          <div className="topbar-user">
-            <span>{formatDate()}</span>
-            <div className="topbar-avatar">{firstName[0]?.toUpperCase()}</div>
-          </div>
-        </div>
+        <Topbar title="Dashboard" right={<span style={{ fontSize: 13, color: "var(--text-secondary)" }}>{formatDate()}</span>} />
 
         <div className="page-body">
           {/* Greeting header */}

@@ -2,6 +2,7 @@
 
 import { useState, useMemo } from "react";
 import Sidebar from "@/components/Sidebar";
+import Topbar from "@/components/Topbar";
 import { SkeletonTable } from "@/components/Skeleton";
 import { getSavedUser } from "@/lib/api";
 import type { Entry } from "@/lib/api";
@@ -43,12 +44,7 @@ export default function ActivityPage() {
     <div className="app-shell">
       <Sidebar userName={user?.name ?? user?.email ?? "Supervisor"} />
       <div className="main">
-        <div className="topbar">
-          <div className="topbar-title">Activity</div>
-          <div className="topbar-user">
-            <div className="topbar-avatar">{(user?.name?.[0] ?? "S").toUpperCase()}</div>
-          </div>
-        </div>
+        <Topbar title="Activity" />
         <div className="page-body">
           {/* Controls */}
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
