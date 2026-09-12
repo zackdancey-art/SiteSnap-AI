@@ -147,6 +147,16 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   flex-direction: column;
   gap: 20px;
 }
+/* Flex-column scroll fix (Team-tab text clipping, and every page using .page-body).
+   .page-body is a flex column inside a viewport-height, overflow:hidden chrome. A
+   flex item's `min-height:auto` — which normally stops it shrinking below its
+   content — resolves to 0 when the item has `overflow:hidden`, which every .card
+   does. So when the stacked panels exceed the viewport they SHRINK and clip their
+   own content (the ~84px header, the cut third line) instead of .page-body
+   scrolling. Pinning the stacked cards to their content height makes them grow to
+   fit and lets .page-body scroll. flex-shrink is main-axis (vertical) only, so no
+   horizontal effect; non-card children (e.g. the locations map) are untouched. */
+.page-body > .card { flex-shrink: 0; }
 
 /* ── Cards ── */
 .card {
