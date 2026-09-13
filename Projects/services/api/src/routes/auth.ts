@@ -1,5 +1,6 @@
 import { Request, Response, Router } from "express";
 import { createHash, randomBytes, randomInt } from "crypto";
+import { z } from "zod";
 import {
   createCompany,
   createPasswordResetToken,
@@ -8,6 +9,8 @@ import {
   deletePendingRegistration,
   deleteUserAccount,
   findUserByEmail,
+  getUserSettings,
+  updateUserSettings,
   findUserByIdentifier,
   getPasswordResetToken,
   getPendingRegistration,
@@ -393,6 +396,55 @@ router.get("/auth/me", requireAuth, async (req: Request, res: Response) => {
       companyId: user.companyId, companyRole: user.companyRole,
     },
   });
+});
+
+// ─── Account settings (personal prefs, migration 028) ───────────────────────────
+// Strict at EVERY level: unknown keys are rejected (400), not passed through —
+// JSONB has no column constraints, so Zod is the only guard. `.partial()` makes
+// fields optional (partial PATCH); `.strict()` closes the object to unknowns. Only
+// personal settings live here — timezone and the live-map thresholds are company-
+// level and are deliberately NOT accepted (an unknown key here → 400). The strict
+// root also rejects any stray `email` in the body, on top of the identity always
+// coming from the verified token.
+const NotifSettingsSchema = z.object({
+  weeklyDigest: z.boolean(),
+  approvalAlerts: z.boolean(),
+  newEntryAlerts: z.boolean(),
+  incidentAlerts: z.boolean(),
+  pushEnabled: z.boolean(),
+}).partial().strict();
+const DisplaySettingsSchema = z.object({
+  dateFormat: z.enum(["dd/mm/yyyy", "mm/dd/yyyy", "yyyy-mm-dd"]),
+  defaultPeriod: z.enum(["daily", "weekly", "monthly"]),
+  compactTables: z.boolean(),
+}).partial().strict();
+const ExportSettingsSchema = z.object({
+  defaultFormat: z.enum(["pdf", "word", "html", "csv"]),
+  includePhotos: z.boolean(),
+  includeSafetyChecklist: z.boolean(),
+  includeSignature: z.boolean(),
+}).partial().strict();
+const AccountSettingsPatchSchema = z.object({
+  notifs: NotifSettingsSchema,
+  display: DisplaySettingsSchema,
+  export: ExportSettingsSchema,
+}).partial().strict();
+
+router.get("/account/settings", requireAuth, async (req: Request, res: Response) => {
+  const auth = (req as AuthenticatedRequest).auth;
+  const settings = await getUserSettings(auth.email);
+  return res.json({ settings });
+});
+
+router.patch("/account/settings", requireAuth, async (req: Request, res: Response) => {
+  const auth = (req as AuthenticatedRequest).auth;
+  const parsed = AccountSettingsPatchSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid settings payload.", details: parsed.error.flatten() });
+  }
+  // Identity is auth.email (verified token) — never req.body/query/params.
+  const settings = await updateUserSettings(auth.email, parsed.data as Record<string, Record<string, unknown>>);
+  return res.json({ settings });
 });
 
 router.patch("/auth/profile", requireAuth, async (req: Request, res: Response) => {

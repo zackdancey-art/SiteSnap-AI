@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import Topbar from "@/components/Topbar";
-import { getSavedUser, isAuthenticated, logout, changePassword, revokeAllSessions, fetchCompanyProfile, updateCompanyProfile } from "@/lib/api";
+import { getSavedUser, isAuthenticated, logout, changePassword, revokeAllSessions, fetchCompanyProfile, updateCompanyProfile, getAccountSettings, updateAccountSettings, type AccountSettings } from "@/lib/api";
 import { useRole } from "@/lib/useRole";
 
 // ── Dev-tools gate ───────────────────────────────────────────────────────────
@@ -207,14 +207,19 @@ export default function SettingsPage() {
     if (!isAuthenticated()) { router.replace("/"); return; }
     const stored = localStorage.getItem("sitesnap.apiUrl");
     if (stored) setApiUrl(stored);
-    const sn = localStorage.getItem("sitesnap.notifPrefs");
-    if (sn) { try { setNotifs(JSON.parse(sn) as NotifPrefs); } catch { /* */ } }
+    // timezone (inside display) and the map thresholds are company-level and stay
+    // local-only until they get a company home — read just those from localStorage.
     const sd = localStorage.getItem("sitesnap.displayPrefs");
-    if (sd) { try { setDisplay(JSON.parse(sd) as DisplayPrefs); } catch { /* */ } }
-    const se = localStorage.getItem("sitesnap.exportPrefs");
-    if (se) { try { setExportPrefs(JSON.parse(se) as ExportPrefs); } catch { /* */ } }
+    if (sd) { try { const p = JSON.parse(sd) as Partial<DisplayPrefs>; if (p.timezone) setDisplay((d) => ({ ...d, timezone: p.timezone as string })); } catch { /* */ } }
     const sm = localStorage.getItem("sitesnap.mapPrefs");
     if (sm) { try { setMapPrefs(JSON.parse(sm) as MapPrefs); } catch { /* */ } }
+    // Personal settings (notifs, export, display minus timezone) come from the
+    // account via the API, so they persist across devices — not localStorage.
+    getAccountSettings().then((s) => {
+      if (s.notifs) setNotifs((n) => ({ ...n, ...s.notifs }));
+      if (s.display) setDisplay((d) => ({ ...d, ...s.display }));
+      if (s.export) setExportPrefs((e) => ({ ...e, ...s.export }));
+    }).catch(() => { /* keep defaults if the account has none yet / offline */ });
     fetchCompanyProfile().then((c) => setOrgName(c.name)).catch(() => {
       const stored = localStorage.getItem("sitesnap.orgName");
       if (stored) setOrgName(stored);
@@ -233,21 +238,24 @@ export default function SettingsPage() {
   };
 
   const updateNotif = (key: keyof NotifPrefs, val: boolean) => {
-    const next = { ...notifs, [key]: val };
-    setNotifs(next);
-    localStorage.setItem("sitesnap.notifPrefs", JSON.stringify(next));
+    setNotifs({ ...notifs, [key]: val });
+    void updateAccountSettings({ notifs: { [key]: val } as AccountSettings["notifs"] });
   };
 
   const updateDisplay = <K extends keyof DisplayPrefs>(key: K, val: DisplayPrefs[K]) => {
     const next = { ...display, [key]: val };
     setDisplay(next);
-    localStorage.setItem("sitesnap.displayPrefs", JSON.stringify(next));
+    if (key === "timezone") {
+      // Company-level, not yet server-persisted — keep the local mirror for now.
+      localStorage.setItem("sitesnap.displayPrefs", JSON.stringify(next));
+    } else {
+      void updateAccountSettings({ display: { [key]: val } as AccountSettings["display"] });
+    }
   };
 
   const updateExport = <K extends keyof ExportPrefs>(key: K, val: ExportPrefs[K]) => {
-    const next = { ...exportPrefs, [key]: val };
-    setExportPrefs(next);
-    localStorage.setItem("sitesnap.exportPrefs", JSON.stringify(next));
+    setExportPrefs({ ...exportPrefs, [key]: val });
+    void updateAccountSettings({ export: { [key]: val } as AccountSettings["export"] });
   };
 
   const updateMap = <K extends keyof MapPrefs>(key: K, val: MapPrefs[K]) => {
