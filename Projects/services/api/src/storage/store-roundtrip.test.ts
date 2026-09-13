@@ -193,4 +193,27 @@ if (!process.env.TEST_DATABASE_URL) {
     assert.ok(row, "created signature not read back");
     assert.equal(row!.status, "active");
   });
+
+  test("auth_users.settings: personal settings round-trip + partial JSONB merge (migration 028)", async () => {
+    const { getUserSettings, updateUserSettings } = await import("./authStore");
+    assert.deepEqual(await getUserSettings(OWNER), {}, "no settings before any write");
+
+    await updateUserSettings(OWNER, {
+      notifs: { weeklyDigest: false, pushEnabled: true },
+      display: { dateFormat: "yyyy-mm-dd" },
+      export: { defaultFormat: "csv" },
+    });
+    let s = await getUserSettings(OWNER) as Record<string, Record<string, unknown>>;
+    assert.equal(s.notifs.weeklyDigest, false);
+    assert.equal(s.notifs.pushEnabled, true);
+    assert.equal(s.display.dateFormat, "yyyy-mm-dd");
+    assert.equal(s.export.defaultFormat, "csv");
+
+    // Patch one field of a group; the group's other fields survive the JSONB write.
+    await updateUserSettings(OWNER, { notifs: { approvalAlerts: false } });
+    s = await getUserSettings(OWNER) as Record<string, Record<string, unknown>>;
+    assert.equal(s.notifs.weeklyDigest, false, "preserved across partial patch");
+    assert.equal(s.notifs.approvalAlerts, false, "updated");
+    assert.equal(s.display.dateFormat, "yyyy-mm-dd", "other groups preserved");
+  });
 }

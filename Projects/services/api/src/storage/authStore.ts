@@ -39,6 +39,9 @@ type AuthMemoryJson = {
 const memoryUsers = new Map<string, AuthUser>();
 const memoryPending = new Map<string, PendingRegistration>();
 const memoryResetTokens = new Map<string, PasswordResetRecord>();
+// Per-user personal settings bag (migration 028), keyed by email. Kept separate
+// from AuthUser so the general user object/columns are untouched.
+const memorySettings = new Map<string, Record<string, unknown>>();
 
 function useDatabase() {
   return Boolean(process.env.DATABASE_URL && process.env.DATABASE_URL.trim());
@@ -202,6 +205,48 @@ export async function findUserByEmail(email: string): Promise<AuthUser | null> {
     return null;
   }
   return mapUser(result.rows[0]);
+}
+
+/** Read the caller's personal settings bag (migration 028). `{}` if none set. */
+export async function getUserSettings(email: string): Promise<Record<string, unknown>> {
+  if (!useDatabase()) {
+    await ensureMemoryLoaded();
+    return memorySettings.get(email) ?? {};
+  }
+  const result = await getPgPool().query<{ settings: Record<string, unknown> }>(
+    `SELECT settings FROM auth_users WHERE email = $1 LIMIT 1`,
+    [email]
+  );
+  return result.rows[0]?.settings ?? {};
+}
+
+/**
+ * Merge a validated partial settings patch into the caller's bag and persist it,
+ * returning the merged result. Two-level deep merge so patching one field of a
+ * group (e.g. display.dateFormat) does not drop the group's other fields. `email`
+ * ALWAYS comes from the verified token — never from request input — so a caller can
+ * only ever write their own row.
+ */
+export async function updateUserSettings(
+  email: string,
+  patch: Record<string, Record<string, unknown>>
+): Promise<Record<string, unknown>> {
+  const current = await getUserSettings(email);
+  const merged: Record<string, unknown> = { ...current };
+  for (const [group, vals] of Object.entries(patch)) {
+    const existingGroup = (current[group] as Record<string, unknown> | undefined) ?? {};
+    merged[group] = { ...existingGroup, ...vals };
+  }
+  if (!useDatabase()) {
+    await ensureMemoryLoaded();
+    memorySettings.set(email, merged);
+    return merged;
+  }
+  await getPgPool().query(
+    `UPDATE auth_users SET settings = $2::jsonb WHERE email = $1`,
+    [email, JSON.stringify(merged)]
+  );
+  return merged;
 }
 
 export async function findUserByIdentifier(identifier: string, normalizedPhone: string): Promise<AuthUser | null> {
@@ -735,6 +780,7 @@ export async function resetAuthStoreForTests() {
     return;
   }
   memoryUsers.clear();
+  memorySettings.clear();
   memoryPending.clear();
   memoryResetTokens.clear();
   memoryCompanies.clear();

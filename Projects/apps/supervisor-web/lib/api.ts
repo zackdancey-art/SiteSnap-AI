@@ -100,6 +100,26 @@ export async function forgotPassword(identifier: string): Promise<void> {
   await request<{ ok: boolean }>("POST", "/api/auth/forgot-password", { identifier, channel: "email" });
 }
 
+// Account-scoped personal settings (migration 028). Persist per-account via the API
+// (not localStorage), so they follow the user across devices. Only personal groups
+// live here — timezone and the live-map thresholds are company-level and stay local
+// until they get a company home.
+export type AccountSettings = {
+  notifs?: Partial<{ weeklyDigest: boolean; approvalAlerts: boolean; newEntryAlerts: boolean; incidentAlerts: boolean; pushEnabled: boolean }>;
+  display?: Partial<{ dateFormat: "dd/mm/yyyy" | "mm/dd/yyyy" | "yyyy-mm-dd"; defaultPeriod: "daily" | "weekly" | "monthly"; compactTables: boolean }>;
+  export?: Partial<{ defaultFormat: "pdf" | "word" | "html" | "csv"; includePhotos: boolean; includeSafetyChecklist: boolean; includeSignature: boolean }>;
+};
+
+export async function getAccountSettings(): Promise<AccountSettings> {
+  const { settings } = await request<{ settings: AccountSettings }>("GET", "/api/account/settings");
+  return settings ?? {};
+}
+
+export async function updateAccountSettings(patch: AccountSettings): Promise<AccountSettings> {
+  const { settings } = await request<{ settings: AccountSettings }>("PATCH", "/api/account/settings", patch);
+  return settings ?? {};
+}
+
 export async function resetPassword(token: string, newPassword: string): Promise<void> {
   await request<{ ok: boolean }>("POST", "/api/auth/reset-password", { token, newPassword });
 }

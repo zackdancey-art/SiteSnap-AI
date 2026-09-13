@@ -1,0 +1,25 @@
+-- 028: per-user personal settings bag on auth_users.
+--
+-- The supervisor dashboard's personal preferences (notification toggles, export
+-- defaults, personal display prefs) were only ever written to browser localStorage
+-- — no column, no endpoint — so they never persisted for the account (finding #3,
+-- settings persistence). This adds a single JSONB bag on the account row.
+--
+-- Why ONE JSONB column, not typed columns: these prefs are a small, evolving set.
+-- A JSONB bag is drift-proof — adding a preference never needs a new column, so the
+-- store can never write a column the schema lacks (the class behind incidents /
+-- timecards / diaries; see L10-L12). Zod validates the shape at the API boundary
+-- (strict, unknown keys rejected at every level) since JSONB carries no column
+-- constraints.
+--
+-- Scope: PERSONAL settings ONLY (notifs, export, display.dateFormat/defaultPeriod/
+-- compactTables). Company/operational settings — the live-map staleness thresholds,
+-- and the company timezone (which carries legal weight on record timestamps and
+-- must render consistently across viewers) — get a separate companies-scoped home
+-- later (docs/AUDIT.md L16). timezone is deliberately NOT stored here, so users are
+-- never migrated off a personal value once the company default lands.
+--
+-- Additive + idempotent. auth_users is NOT RLS-forced; settings are application-
+-- scoped by the authenticated email from the verified token, never from request input.
+
+ALTER TABLE auth_users ADD COLUMN IF NOT EXISTS settings JSONB NOT NULL DEFAULT '{}'::jsonb;
