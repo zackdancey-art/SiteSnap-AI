@@ -59,10 +59,16 @@ let phoneCounter = 7000;
 const nextPhone = () => `+614${String(phoneCounter++).padStart(8, "0")}`;
 
 async function registerAndLogin(email: string): Promise<string> {
-  const reg = await req<{ devCodes?: { emailCode: string; smsCode: string } }>(
+  const reg = await req<{ devCodes?: { emailCode: string } }>(
     "POST", "/auth/register", { email, password: "Password123!", phone: nextPhone(), fullName: "Test User" });
-  const { emailCode, smsCode } = reg.body.devCodes!;
-  const verify = await req<{ token: string }>("POST", "/auth/register/verify", { email, emailCode, smsCode });
+  const { emailCode } = reg.body.devCodes!;
+  // Two-stage verification: the SMS is only minted once the email code
+  // is accepted, so the sms code comes from THIS response, not register.
+  const veRes = await req<{ devCodes?: { smsCode: string } }>(
+    "POST", "/auth/register/verify-email", { email: email, emailCode }
+  );
+  const { smsCode } = veRes.body.devCodes!;
+  const verify = await req<{ token: string }>("POST", "/auth/register/verify", { email, smsCode });
   return verify.body.token;
 }
 

@@ -14,6 +14,8 @@ import {
   findUserByIdentifier,
   getPasswordResetToken,
   getPendingRegistration,
+  markPendingEmailVerified,
+  touchPendingSmsSentAt,
   incrementPendingAttempts,
   purgeExpiredAuthRecords,
   upsertPendingRegistration,
@@ -51,6 +53,9 @@ function clearSessionCookie(res: Response) {
 
 const router: Router = Router();
 const verificationTtlMs = Number(process.env.ACCOUNT_VERIFICATION_TTL_MS ?? 10 * 60 * 1000);
+// Minimum gap between verification SMS sends for one pending signup. Bounds the
+// cost of the resend path for someone who has already proven their mailbox.
+const smsResendCooldownMs = Number(process.env.SMS_RESEND_COOLDOWN_MS ?? 60 * 1000);
 const isProd = process.env.NODE_ENV === "production";
 const hasDatabase = Boolean(process.env.DATABASE_URL && process.env.DATABASE_URL.trim());
 
@@ -153,9 +158,26 @@ async function initiateRegistration(req: Request, res: Response) {
     }
 
     const emailCode = makeCode();
-    const smsCode = makeCode();
     const warnings: string[] = [];
 
+    // Persist BEFORE sending. If the row write fails after a send, the user has
+    // a code that verifies nothing; this ordering can only produce the harmless
+    // case (a pending row whose email never arrived, expiring in 10 minutes).
+    const passwordHash = await hashPassword(password);
+    // Pending blob format (:: delimited), backward compatible — companyName is
+    // the new 4th field and defaults to '' when absent (mobile signup).
+    await upsertPendingRegistration(
+      email,
+      `${passwordHash}::${fullName}::${role}::${companyName ?? ""}`,
+      phone,
+      emailCode,
+      new Date(Date.now() + verificationTtlMs)
+    );
+
+    // STAGE 1 — email only. No SMS is sent here, and none can be until this
+    // code comes back verified at /auth/register/verify-email. That is what
+    // stops an anonymous POST from costing a Twilio message, and what stops a
+    // stranger's phone being used as a target.
     if (emailChannel.ok) {
       const emailDelivery = await sendAccountVerification({ channel: "email", email, code: emailCode });
       if (!emailDelivery.ok) {
@@ -169,39 +191,15 @@ async function initiateRegistration(req: Request, res: Response) {
       warnings.push(emailChannel.reason || "Email provider unavailable in dev mode.");
     }
 
-    if (smsChannel.ok) {
-      const smsDelivery = await sendAccountVerification({ channel: "sms", phone, code: smsCode });
-      if (!smsDelivery.ok) {
-        console.error(`[auth] SMS verification delivery failed: ${smsDelivery.error}`);
-        if (isProd) {
-          return res.status(502).json({ error: smsDelivery.error || "Failed to send SMS verification code." });
-        }
-        warnings.push("SMS provider unavailable in dev mode.");
-      }
-    } else {
-      warnings.push(smsChannel.reason || "SMS provider unavailable in dev mode.");
-    }
-
-    const passwordHash = await hashPassword(password);
-    // Pending blob format (:: delimited), backward compatible — companyName is
-    // the new 4th field and defaults to '' when absent (mobile signup).
-    await upsertPendingRegistration(
-      email,
-      `${passwordHash}::${fullName}::${role}::${companyName ?? ""}`,
-      phone,
-      emailCode,
-      smsCode,
-      new Date(Date.now() + verificationTtlMs)
-    );
-
     const isDevFallback = warnings.length > 0;
     return res.status(200).json({
       ok: true,
+      stage: "email",
       message: isDevFallback
-        ? "Dev mode: provider not configured, using local verification codes."
-        : "Verification codes sent to your email and phone.",
+        ? "Dev mode: provider not configured, using local verification code."
+        : "Verification code sent to your email.",
       warnings: isDevFallback ? warnings : undefined,
-      devCodes: !isProd && isDevFallback ? { emailCode, smsCode } : undefined,
+      devCodes: !isProd && isDevFallback ? { emailCode } : undefined,
       expiresInSeconds: Math.floor(verificationTtlMs / 1000),
     });
   } catch (error) {
@@ -213,36 +211,151 @@ async function initiateRegistration(req: Request, res: Response) {
 router.post("/auth/register", initiateRegistration);
 router.post("/auth/register/initiate", initiateRegistration);
 
-router.post("/auth/register/verify", async (req, res) => {
+/**
+ * STAGE 2 — prove the mailbox, then (and only then) spend an SMS.
+ *
+ * This is the gate that makes the whole reorder worth doing: reaching it costs
+ * an attacker a deliverable mailbox that received a 6-digit code, per phone
+ * number they want to target. Calling it again after success re-sends the SAME
+ * code under a cooldown rather than minting a new one, so the resend path is
+ * not a second cost vector.
+ */
+router.post("/auth/register/verify-email", async (req, res) => {
   if (await isRateLimitedByIp(req, "register-verify", LIMITS.registerVerifyPerIp.max, LIMITS.registerVerifyPerIp.windowMs)) {
     return res.status(429).json({ error: "Too many verification attempts. Please try again shortly." });
   }
 
   const email = String(req.body?.email ?? "").trim().toLowerCase();
   const emailCode = String(req.body?.emailCode ?? "").trim();
-  const smsCode = String(req.body?.smsCode ?? "").trim();
 
-  if (!email || !emailCode || !smsCode) {
-    return res.status(400).json({ error: "Email, emailCode, and smsCode are required." });
+  if (!email || !emailCode) {
+    return res.status(400).json({ error: "Email and emailCode are required." });
   }
 
   try {
     await purgeExpiredAuthRecords();
     const pending = await getPendingRegistration(email);
     if (!pending) {
-      return res.status(404).json({ error: "No pending signup found. Please register again." });
+      return res.status(404).json({ error: "No pending signup found. Please register again.", restart: true });
+    }
+    if (Date.now() > new Date(pending.expiresAt).getTime()) {
+      await deletePendingRegistration(email);
+      return res.status(400).json({ error: "Verification code has expired. Please register again.", restart: true });
+    }
+
+    if (pending.emailCode !== emailCode) {
+      const attempts = await incrementPendingAttempts(email);
+      if (attempts >= LIMITS.otpVerifyMaxAttempts) {
+        await deletePendingRegistration(email);
+        return res.status(429).json({ error: "Too many invalid verification attempts. Please register again.", restart: true });
+      }
+      return res.status(401).json({ error: "Verification code is incorrect." });
+    }
+
+    const smsChannel = isChannelConfigured("sms");
+    if (isProd && !smsChannel.ok) {
+      return res.status(500).json({ error: smsChannel.reason });
+    }
+
+    // Mint + claim first. The UPDATE is guarded on email_verified_at IS NULL, so
+    // two concurrent correct verifications cannot both send: the loser falls
+    // through to the resend branch and is cooldown-limited like any other.
+    const now = new Date();
+    const smsCode = makeCode();
+    const claimed = await markPendingEmailVerified(email, smsCode, now);
+
+    let codeToSend = smsCode;
+    if (!claimed) {
+      // Already verified — this is a resend, not a new stage.
+      const current = await getPendingRegistration(email);
+      if (!current?.smsCode) {
+        return res.status(409).json({ error: "Verification is already in progress. Please register again.", restart: true });
+      }
+      const lastSent = current.smsSentAt ? new Date(current.smsSentAt).getTime() : 0;
+      const sinceLast = Date.now() - lastSent;
+      if (lastSent && sinceLast < smsResendCooldownMs) {
+        return res.status(429).json({
+          error: "A code was just sent. Please wait before requesting another.",
+          retryAfterSeconds: Math.ceil((smsResendCooldownMs - sinceLast) / 1000),
+        });
+      }
+      codeToSend = current.smsCode;
+      await touchPendingSmsSentAt(email, now);
+    }
+
+    const warnings: string[] = [];
+    if (smsChannel.ok) {
+      const smsDelivery = await sendAccountVerification({ channel: "sms", phone: pending.phone, code: codeToSend });
+      if (!smsDelivery.ok) {
+        console.error(`[auth] SMS verification delivery failed: ${smsDelivery.error}`);
+        if (isProd) {
+          // Only undo the cooldown when the caller is TOLD it failed. Otherwise
+          // the stamp must stand: dev/test report success (the send is faked),
+          // and clearing it there would advertise a cooldown that doesn't hold.
+          await touchPendingSmsSentAt(email, null);
+          return res.status(502).json({ error: smsDelivery.error || "Failed to send SMS verification code." });
+        }
+        warnings.push("SMS provider unavailable in dev mode.");
+      }
+    } else {
+      warnings.push(smsChannel.reason || "SMS provider unavailable in dev mode.");
+    }
+
+    const isDevFallback = warnings.length > 0;
+    return res.status(200).json({
+      ok: true,
+      stage: "sms",
+      message: isDevFallback
+        ? "Dev mode: provider not configured, using local verification code."
+        : "Verification code sent to your phone.",
+      warnings: isDevFallback ? warnings : undefined,
+      devCodes: !isProd && isDevFallback ? { smsCode: codeToSend } : undefined,
+      expiresInSeconds: Math.max(0, Math.floor((new Date(pending.expiresAt).getTime() - Date.now()) / 1000)),
+    });
+  } catch (error) {
+    console.error("[auth] verify-email failed", error);
+    return res.status(500).json({ error: "Unable to verify email code." });
+  }
+});
+
+router.post("/auth/register/verify", async (req, res) => {
+  if (await isRateLimitedByIp(req, "register-verify", LIMITS.registerVerifyPerIp.max, LIMITS.registerVerifyPerIp.windowMs)) {
+    return res.status(429).json({ error: "Too many verification attempts. Please try again shortly." });
+  }
+
+  const email = String(req.body?.email ?? "").trim().toLowerCase();
+  const smsCode = String(req.body?.smsCode ?? "").trim();
+
+  if (!email || !smsCode) {
+    return res.status(400).json({ error: "Email and smsCode are required." });
+  }
+
+  try {
+    await purgeExpiredAuthRecords();
+    const pending = await getPendingRegistration(email);
+    if (!pending) {
+      return res.status(404).json({ error: "No pending signup found. Please register again.", restart: true });
     }
 
     if (Date.now() > new Date(pending.expiresAt).getTime()) {
       await deletePendingRegistration(email);
-      return res.status(400).json({ error: "Verification codes have expired. Please register again." });
+      return res.status(400).json({ error: "Verification codes have expired. Please register again.", restart: true });
     }
 
-    if (pending.emailCode !== emailCode || pending.smsCode !== smsCode) {
+    // The email stage is not optional and not skippable: without it there is no
+    // sms_code to match, so this fails closed rather than falling through.
+    if (!pending.emailVerifiedAt || !pending.smsCode) {
+      return res.status(409).json({
+        error: "Verify your email code first.",
+        stage: "email",
+      });
+    }
+
+    if (pending.smsCode !== smsCode) {
       const attempts = await incrementPendingAttempts(email);
       if (attempts >= LIMITS.otpVerifyMaxAttempts) {
         await deletePendingRegistration(email);
-        return res.status(429).json({ error: "Too many invalid verification attempts. Please register again." });
+        return res.status(429).json({ error: "Too many invalid verification attempts. Please register again.", restart: true });
       }
       return res.status(401).json({ error: "Verification codes are incorrect." });
     }

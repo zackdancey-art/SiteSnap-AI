@@ -159,10 +159,20 @@ async function incrementRedis(redis: unknown, key: string, windowMs: number): Pr
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
+/**
+ * The client IP every per-IP limit is keyed on.
+ *
+ * This deliberately does NOT read `X-Forwarded-For` itself. The previous version
+ * took the FIRST entry of that header, which is the one furthest from us and
+ * entirely attacker-supplied: varying one header gave a fresh counter per
+ * request and made every per-IP limit in this file decorative.
+ *
+ * `req.ip` is Express's proxy-aware value, resolved by walking in from the
+ * socket end and skipping exactly `trust proxy` hops (set in server.ts). Forged
+ * entries sit beyond that boundary and cannot move it, however many are sent.
+ */
 function getClientIp(req: Request): string {
-  const xff = req.headers["x-forwarded-for"];
-  const forwarded = Array.isArray(xff) ? xff[0] : xff;
-  return String(forwarded || req.ip || "unknown").split(",")[0].trim();
+  return req.ip || "unknown";
 }
 
 /**

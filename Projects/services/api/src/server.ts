@@ -87,10 +87,53 @@ const allowedOrigins = String(process.env.CORS_ALLOWED_ORIGINS ?? "")
   .map((origin) => origin.trim())
   .filter(Boolean);
 
+/**
+ * How many reverse proxies sit in front of this process.
+ *
+ * Every per-IP rate limit depends on this being right. Express counts hops from
+ * the RIGHT of `X-Forwarded-For` (the socket end) inward, so the count is what
+ * makes the client IP unspoofable: a client can prepend as many fake entries as
+ * it likes and they all stay to the LEFT of the real one.
+ *
+ * Measured against the live deployment (2026-09-16), not assumed:
+ *   dig api.getsitesnapai.com -> sitesap-ai.onrender.com
+ *                             -> gcp-us-west1-1.origin.onrender.com
+ *                             -> ...origin.onrender.com.cdn.cloudflare.net
+ *   response headers carry BOTH `cf-ray`/`server: cloudflare` AND
+ *   `x-render-origin-server: Render`.
+ * So the chain is client -> Cloudflare (Render's own, not ours) -> Render
+ * router -> this process: TWO hops. Render's docs do not state the count and
+ * the community answer of `1` is for services without the CDN in front, which
+ * is why this was measured rather than copied.
+ *
+ * Getting it wrong is asymmetric, so the direction of error matters:
+ *   too LOW  -> req.ip is a Cloudflare/Render address, every user shares one
+ *               bucket, limits over-block. Annoying, still fail-closed.
+ *   too HIGH -> req.ip is read from client-supplied XFF -> every per-IP limit
+ *               is bypassable. Fail-open. Never raise this to "just make it
+ *               work".
+ * Confirm with `GET /api/health/client-ip` (authenticated) after any change to
+ * the hosting or domain setup; do not re-derive it from memory.
+ */
+const TRUST_PROXY_HOPS = (() => {
+  const raw = process.env.TRUST_PROXY_HOPS;
+  if (raw === undefined || raw.trim() === "") return 2;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(
+      `TRUST_PROXY_HOPS must be a non-negative integer (got ${JSON.stringify(raw)}). ` +
+        "It is the number of proxies in front of the API; see server.ts for how to measure it."
+    );
+  }
+  return parsed;
+})();
+
 export function createApp(): express.Express {
   const app = express();
   const isProdMode = process.env.NODE_ENV === "production";
   app.disable("x-powered-by");
+  // Must be set before any middleware reads req.ip — rate limiting keys on it.
+  app.set("trust proxy", TRUST_PROXY_HOPS);
   app.use(
     helmet({
       // CSP is intentionally disabled — the API serves JSON, not HTML.

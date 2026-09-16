@@ -359,7 +359,7 @@ async function createUsersViaHttp(metrics: MetricsCollector): Promise<TestUser[]
     });
 
     const ok = result.status === 200;
-    const devCodes = (result.data as { devCodes?: { emailCode: string; smsCode: string } }).devCodes;
+    const devCodes = (result.data as { devCodes?: { emailCode: string } }).devCodes;
     metrics.record({
       operation: "http:register-initiate",
       status: result.status,
@@ -371,15 +371,37 @@ async function createUsersViaHttp(metrics: MetricsCollector): Promise<TestUser[]
     return { user, devCodes, ok };
   });
 
-  // Step B: verify (only for users whose initiate succeeded and returned devCodes)
-  const verifiable = registerResults.filter((r) => r.ok && r.devCodes);
-  log(`  Initiate: ${verifiable.length}/${users.length} succeeded, proceeding to verify...`);
+  // Step B: verify the email code. This is what releases the SMS — registration
+  // no longer sends one, so the sms code comes from THIS response (migration 029).
+  const emailVerifiable = registerResults.filter((r) => r.ok && r.devCodes);
+  log(`  Initiate: ${emailVerifiable.length}/${users.length} succeeded, verifying email...`);
 
-  const verifyResults = await poolMap(verifiable, CONCURRENCY, async ({ user, devCodes }) => {
-    const result = await apiRequest("POST", "/auth/register/verify", {
+  const emailVerifyResults = await poolMap(emailVerifiable, CONCURRENCY, async ({ user, devCodes }) => {
+    const result = await apiRequest("POST", "/auth/register/verify-email", {
       email: user.email,
       emailCode: devCodes!.emailCode,
-      smsCode: devCodes!.smsCode,
+    });
+
+    const ok = result.status === 200;
+    const smsCode = (result.data as { devCodes?: { smsCode: string } }).devCodes?.smsCode;
+    metrics.record({
+      operation: "http:register-verify-email",
+      status: result.status,
+      durationMs: result.durationMs,
+      ok,
+      error: ok ? undefined : (result.data as { error?: string }).error,
+    });
+    return { user, smsCode, ok };
+  });
+
+  // Step C: verify the SMS code and claim the account.
+  const verifiable = emailVerifyResults.filter((r) => r.ok && r.smsCode);
+  log(`  Email verify: ${verifiable.length}/${emailVerifiable.length} succeeded, proceeding to verify...`);
+
+  const verifyResults = await poolMap(verifiable, CONCURRENCY, async ({ user, smsCode }) => {
+    const result = await apiRequest("POST", "/auth/register/verify", {
+      email: user.email,
+      smsCode: smsCode!,
     });
 
     const ok = result.status === 201;

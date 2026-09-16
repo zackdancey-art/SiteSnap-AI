@@ -66,13 +66,19 @@ function nextPhone() { return `+614${String(++_phoneSeq).padStart(8, "0")}`; }
 async function registerUser(email: string, name: string, companyName?: string): Promise<string> {
   const regBody: Record<string, string> = { email, phone: nextPhone(), fullName: name, password: "Password123!!" };
   if (companyName) regBody.companyName = companyName;
-  const regRes = await req<{ ok: boolean; devCodes?: { emailCode: string; smsCode: string } }>(
+  const regRes = await req<{ ok: boolean; devCodes?: { emailCode: string } }>(
     "POST", "/auth/register", regBody
   );
   assert.equal(regRes.status, 200, `register ${email} failed: ${JSON.stringify(regRes.body)}`);
-  const { emailCode, smsCode } = regRes.body.devCodes!;
+  const { emailCode } = regRes.body.devCodes!;
+  // Two-stage verification: the SMS is only minted once the email code
+  // is accepted, so the sms code comes from THIS response, not register.
+  const veRes = await req<{ devCodes?: { smsCode: string } }>(
+    "POST", "/auth/register/verify-email", { email: email, emailCode }
+  );
+  const { smsCode } = veRes.body.devCodes!;
   const verRes = await req<{ token: string }>(
-    "POST", "/auth/register/verify", { email, emailCode, smsCode }
+    "POST", "/auth/register/verify", { email, smsCode }
   );
   assert.equal(verRes.status, 201, `verify ${email} failed: ${JSON.stringify(verRes.body)}`);
   return verRes.body.token;
