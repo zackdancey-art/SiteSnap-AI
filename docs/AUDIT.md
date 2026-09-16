@@ -8,7 +8,11 @@
 
 ## CRITICAL
 
-### C1 — Generated diaries carry no provenance, and AI→fallback downgrade is silent
+### C1 — Generated diaries carry no provenance, and AI→fallback downgrade is silent — PARTIALLY FIXED (boot check closed by X2; provenance still OPEN)
+
+**STATUS — read this before acting on anything below.** The **boot half is closed**: `OPENAI_API_KEY` is now validated by `validateProviderConfig()` and production **hard-fails** without it (X2, commit `8e88844`, PR #21), so the "the Render env var is missing and every report silently degrades" scenario described below can no longer reach production. The rule-based generator was deliberately retained as a **runtime** fallback for a reachable-but-erroring API (bad key, 401, 429, 5xx, timeout), which returns 200 with a `warning`.
+
+The **provenance half remains OPEN and is now the whole of this finding**: a saved diary still records no generator, model, prompt version, or warning, the mobile client still discards the exception-path `warning`, and `response.usage` is still never read. A *wrong* key therefore still degrades quietly — the warning exists on that path but nothing surfaces or stores it.
 
 **Where:**
 - `Projects/services/api/src/routes/ai.ts:425-427` — if `OPENAI_API_KEY` is unset, `tryGenerateWithOpenAI()` returns the rule-based fallback **with no `warning` field**; the response is byte-for-byte indistinguishable from an AI-generated one.
@@ -17,7 +21,7 @@
 - `Projects/services/api/src/routes/projects.ts:62-70` (`DiarySchema`) and `storage/projectsStore.ts:652-663` (`createDiary`) — the persisted diary record has **no field for generator, model, prompt version, or generation warnings**. Answering the direct question: **no, a saved diary records nothing about which generator, model, or prompt produced it.**
 - `Projects/services/api/src/routes/ai.ts` — no logging of model used, token usage, or latency on the success path (`response.usage` is never read).
 
-**Why it matters here:** the product's entire value proposition is a trustworthy, auditable site record. Today, if the Render env var is missing, expired, or over quota, *every production report silently degrades* to the rule-based generator and neither the user, the client receiving the report, nor you can tell — not at generation time, not a week later from the DB, not from logs. A QS report's evidentiary value depends on being able to say how it was produced. This is also operationally live risk, not theoretical: `OPENAI_API_KEY` is the one provider `validateProviderConfig()` (`server.ts:20-72`) does **not** validate at boot, and it was recently populated on Render as part of an env-var sweep — if that value is wrong, you would not know.
+**Why it matters here:** the product's entire value proposition is a trustworthy, auditable site record. Today, if the Render env var is missing, expired, or over quota, *every production report silently degrades* to the rule-based generator and neither the user, the client receiving the report, nor you can tell — not at generation time, not a week later from the DB, not from logs. A QS report's evidentiary value depends on being able to say how it was produced. This was also operationally live risk, not theoretical: **at the time of this audit** `OPENAI_API_KEY` was the one provider `validateProviderConfig()` did **not** validate at boot, and it had recently been populated on Render as part of an env-var sweep. **That specific gap is now closed — see STATUS above.** The residual risk is narrower and still real: a key that is present but *wrong* takes the runtime-fallback path, and you would still not know, because nothing persists or displays the warning.
 
 **Fix (concrete):**
 1. Add a `generation` JSONB column to `project_diaries` (migration 019) and matching fields through `DiarySchema` → `createDiary`: `{ generator: "openai" | "fallback", model: string | null, promptVersion: string, warning: string | null, generatedAtMs: number, tokenUsage?: {input, output} }`.
@@ -32,7 +36,17 @@
 
 ## HIGH
 
-### H1 — Multi-tenancy is enforced by convention only; one missed WHERE clause is a silent cross-tenant breach
+### H1 — Multi-tenancy is enforced by convention only; one missed WHERE clause is a silent cross-tenant breach — FIXED (H1a + H1b)
+
+**STATUS — read this before acting on anything below. This finding is closed; the text that follows is a historical decision record, not a live recommendation.**
+
+**Option A was the option taken, staged exactly as recommended.** `worker_locations` got its `company_id` (migration 020), then the `withTenant(actor, fn)` transaction wrapper (`storage/tenant.ts`, sets `app.company_id` with `SET LOCAL` semantics), then `FORCE ROW LEVEL SECURITY` table-by-table across migrations 019–025 with `USING (company_id = current_setting('app.company_id', true))`. H1b (migration 025) covered the remaining tenant tables. A query that skips the wrapper now fails **closed** — zero rows, or a `WITH CHECK` violation on write — rather than leaking.
+
+**The proposed matrix test was built**: `routes/tenant-isolation-matrix.test.ts`, including the completeness assertion — it walks the routers mounted in `routes/index.ts` and fails if a tenant-scoped resource is added without being added to the matrix, so the inventory cannot silently drift. RLS itself is proven separately against real Postgres (`storage/rls-h1b.test.ts`, `storage/rls-integration.test.ts`), which **must** use a `NOBYPASSRLS` probe role — the app's owner connection carries `BYPASSRLS` and would pass whether or not RLS existed.
+
+**Not done from Option B:** the ESLint rule banning `getPgPool()` imports outside `storage/` was never added. That remains the one open scrap of this finding.
+
+**Still true, and why `CLAUDE.md` §3 keeps both layers:** the hand-written `WHERE company_id` filters were deliberately retained as belt-and-braces, and **the in-memory / JSON fallback store has no RLS at all**, so hand-scoping is the only protection on the dev and test paths.
 
 **Where:**
 - Isolation is re-implemented by hand in every store: `storage/projectsStore.ts:375-385, 436-441, 462-474, 548-560, 607-612`, `storage/incidentStore.ts:71-72, 110-111, 125-126`, `storage/crewStore.ts:29-39`, etc. — each query must remember `company_id = $N` or a `canAccessRow`/`canAccess` filter.
@@ -164,6 +178,8 @@ Known and logged at boot (`server.ts:51-54`); `ioredis` support already exists b
 ---
 
 ## Prioritised backlog
+
+**STATUS — this table is the plan as written at audit time and is NOT maintained as work lands.** Shipped since: **#1's boot check** (X2 — the provenance work in that row is still open), **#5** (`/health/ready` with DB + migration-count check), **#6** (H1a — `worker_locations.company_id` in migration 020 and the isolation matrix test; the ESLint pool-import rule in that row was **not** built), **#12** (H1b — RLS across migrations 019–025). Check git before starting any row here — do not treat an item as un-started because this table still lists it.
 
 Ordered by impact-to-effort, not severity alone. Effort: S ≤ half a day, M ≤ 2 days, L > 2 days.
 
