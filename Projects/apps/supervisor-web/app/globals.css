@@ -421,7 +421,7 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 }
 @media (max-width: 640px) {
   .sidebar { display: none; }
-  .metrics-grid { grid-template-columns: 1fr 1fr; }
+  .metrics-grid { grid-template-columns: 1fr; }
 }
 
 /* Hide scrollbar on tab bars */
