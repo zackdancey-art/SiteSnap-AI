@@ -69,7 +69,7 @@ test("health endpoint returns ok", async () => {
 });
 
 test("register → verify → login flow", async () => {
-  const registerRes = await req<{ ok: boolean; devCodes?: { emailCode: string; smsCode: string } }>(
+  const registerRes = await req<{ ok: boolean; devCodes?: { emailCode: string } }>(
     "POST",
     "/auth/register",
     { email: "test@example.com", password: "password123", phone: "+447911123456", fullName: "Test User" }
@@ -78,11 +78,17 @@ test("register → verify → login flow", async () => {
   assert.ok(registerRes.body.ok);
   assert.ok(registerRes.body.devCodes, "dev codes should be present in non-production");
 
-  const { emailCode, smsCode } = registerRes.body.devCodes!;
+  const { emailCode } = registerRes.body.devCodes!;
+  // Two-stage verification: the SMS is only minted once the email code
+  // is accepted, so the sms code comes from THIS response, not register.
+  const veRes = await req<{ devCodes?: { smsCode: string } }>(
+    "POST", "/auth/register/verify-email", { email: "test@example.com", emailCode }
+  );
+  const { smsCode } = veRes.body.devCodes!;
   const verifyRes = await req<{ ok: boolean; token: string; user: { email: string; role: string } }>(
     "POST",
     "/auth/register/verify",
-    { email: "test@example.com", emailCode, smsCode }
+    { email: "test@example.com", smsCode }
   );
   assert.equal(verifyRes.status, 201);
   assert.ok(verifyRes.body.token);
@@ -116,16 +122,22 @@ test("auth/me requires valid token", async () => {
 // ─── Projects ────────────────────────────────────────────────────────────────
 
 async function createWorkerToken() {
-  const reg = await req<{ devCodes?: { emailCode: string; smsCode: string } }>(
+  const reg = await req<{ devCodes?: { emailCode: string } }>(
     "POST",
     "/auth/register",
     { email: "worker@example.com", password: "password123", phone: "+447911000001", fullName: "Worker" }
   );
-  const { emailCode, smsCode } = reg.body.devCodes!;
+  const { emailCode } = reg.body.devCodes!;
+  // Two-stage verification: the SMS is only minted once the email code
+  // is accepted, so the sms code comes from THIS response, not register.
+  const veRes = await req<{ devCodes?: { smsCode: string } }>(
+    "POST", "/auth/register/verify-email", { email: "worker@example.com", emailCode }
+  );
+  const { smsCode } = veRes.body.devCodes!;
   const verify = await req<{ token: string }>(
     "POST",
     "/auth/register/verify",
-    { email: "worker@example.com", emailCode, smsCode }
+    { email: "worker@example.com", smsCode }
   );
   return verify.body.token;
 }

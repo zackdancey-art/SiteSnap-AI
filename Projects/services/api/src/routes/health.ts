@@ -2,6 +2,7 @@ import { Router } from "express";
 import fs from "fs";
 import path from "path";
 import { Sentry } from "../instrument";
+import { requireAuth } from "../middleware/auth";
 import { getPgPool } from "../storage/postgres";
 
 export const healthRouter: Router = Router();
@@ -9,6 +10,30 @@ export const healthRouter: Router = Router();
 // Liveness — the process is up. Never touches the DB.
 healthRouter.get("/health", (_req, res) => {
   res.json({ status: "ok" });
+});
+
+// Proxy-chain diagnostic: confirms `trust proxy` is set to the right hop count.
+//
+// Every per-IP rate limit keys on req.ip, and req.ip is only trustworthy if the
+// hop count matches the real deployment. That count cannot be verified from
+// outside the network, so this reports what the running process actually sees
+// for YOUR request. Authenticated because the raw forwarding chain is other
+// people's IP addresses when it appears in logs — and because it should not be
+// a free oracle for probing the edge.
+//
+// Reading it: `clientIp` must equal your real public IP (check against any
+// "what is my IP" service). If it shows a Cloudflare or Render address, the hop
+// count is too LOW. If it echoes a value you injected via X-Forwarded-For, it is
+// too HIGH — that is the fail-open direction; fix it immediately.
+healthRouter.get("/health/client-ip", requireAuth, (req, res) => {
+  const xff = req.headers["x-forwarded-for"];
+  res.json({
+    clientIp: req.ip,
+    // Left-to-right, as received. The rightmost entries are the trusted proxies.
+    forwardedChain: Array.isArray(xff) ? xff : typeof xff === "string" ? xff.split(",").map((v) => v.trim()) : [],
+    trustProxySetting: req.app.get("trust proxy fn") ? String(process.env.TRUST_PROXY_HOPS ?? 2) : "unset",
+    hint: "clientIp must be your real public IP. A Cloudflare/Render address means TRUST_PROXY_HOPS is too low; an IP you injected means it is too high.",
+  });
 });
 
 // Readiness — can the app actually serve? Verifies the DB is reachable AND every

@@ -19,7 +19,14 @@ export type PendingRegistration = {
   passwordHash: string;
   phone: string;
   emailCode: string;
-  smsCode: string;
+  /**
+   * NULL until the email code is verified. The SMS is only minted and sent at
+   * that point (migration 029), so a pending signup that never proves control
+   * of its mailbox never costs a Twilio message.
+   */
+  smsCode: string | null;
+  emailVerifiedAt: string | null;
+  smsSentAt: string | null;
   expiresAt: string;
   attempts: number;
 };
@@ -167,7 +174,9 @@ function mapPending(row: {
   password_hash: string;
   phone: string;
   email_code: string;
-  sms_code: string;
+  sms_code: string | null;
+  email_verified_at: Date | null;
+  sms_sent_at: Date | null;
   expires_at: Date;
   attempts: number;
 }): PendingRegistration {
@@ -177,6 +186,8 @@ function mapPending(row: {
     phone: row.phone,
     emailCode: row.email_code,
     smsCode: row.sms_code,
+    emailVerifiedAt: row.email_verified_at ? row.email_verified_at.toISOString() : null,
+    smsSentAt: row.sms_sent_at ? row.sms_sent_at.toISOString() : null,
     expiresAt: row.expires_at.toISOString(),
     attempts: row.attempts,
   };
@@ -327,12 +338,18 @@ export async function createUser(
   );
 }
 
+/**
+ * Start (or restart) a pending signup at the EMAIL stage.
+ *
+ * Always resets the row to unverified with no SMS code: re-initiating must not
+ * inherit a previously verified state, or an attacker could re-point a verified
+ * pending signup at a new phone number and get a free SMS.
+ */
 export async function upsertPendingRegistration(
   email: string,
   passwordHash: string,
   phone: string,
   emailCode: string,
-  smsCode: string,
   expiresAt: Date
 ) {
   if (!useDatabase()) {
@@ -342,7 +359,9 @@ export async function upsertPendingRegistration(
       passwordHash,
       phone,
       emailCode,
-      smsCode,
+      smsCode: null,
+      emailVerifiedAt: null,
+      smsSentAt: null,
       expiresAt: expiresAt.toISOString(),
       attempts: 0,
     });
@@ -352,19 +371,85 @@ export async function upsertPendingRegistration(
 
   await getPgPool().query(
     `
-    INSERT INTO auth_pending_registrations (email, password_hash, phone, email_code, sms_code, expires_at, attempts)
-    VALUES ($1, $2, $3, $4, $5, $6, 0)
+    INSERT INTO auth_pending_registrations
+      (email, password_hash, phone, email_code, sms_code, email_verified_at, sms_sent_at, expires_at, attempts)
+    VALUES ($1, $2, $3, $4, NULL, NULL, NULL, $5, 0)
     ON CONFLICT (email)
     DO UPDATE SET
-      password_hash = EXCLUDED.password_hash,
-      phone = EXCLUDED.phone,
-      email_code = EXCLUDED.email_code,
-      sms_code = EXCLUDED.sms_code,
-      expires_at = EXCLUDED.expires_at,
-      attempts = 0
+      password_hash     = EXCLUDED.password_hash,
+      phone             = EXCLUDED.phone,
+      email_code        = EXCLUDED.email_code,
+      sms_code          = NULL,
+      email_verified_at = NULL,
+      sms_sent_at       = NULL,
+      expires_at        = EXCLUDED.expires_at,
+      attempts          = 0
   `,
-    [email, passwordHash, phone, emailCode, smsCode, expiresAt.toISOString()]
+    [email, passwordHash, phone, emailCode, expiresAt.toISOString()]
   );
+}
+
+/**
+ * Promote a pending signup to the SMS stage: record that the mailbox is proven
+ * and store the code that is about to be texted.
+ *
+ * Guarded on `email_verified_at IS NULL` in SQL so two concurrent verifications
+ * of the same email cannot both win and send two messages — the second updates
+ * zero rows and is told to use the existing code. Attempts reset, because the
+ * SMS code is a fresh secret and shouldn't inherit the email stage's failures.
+ */
+export async function markPendingEmailVerified(
+  email: string,
+  smsCode: string,
+  sentAt: Date
+): Promise<boolean> {
+  if (!useDatabase()) {
+    await ensureMemoryLoaded();
+    const record = memoryPending.get(email);
+    if (!record || record.emailVerifiedAt) return false;
+    memoryPending.set(email, {
+      ...record,
+      smsCode,
+      emailVerifiedAt: sentAt.toISOString(),
+      smsSentAt: sentAt.toISOString(),
+      attempts: 0,
+    });
+    await persistMemory();
+    return true;
+  }
+
+  const result = await getPgPool().query(
+    `
+    UPDATE auth_pending_registrations
+       SET sms_code = $2, email_verified_at = $3, sms_sent_at = $3, attempts = 0
+     WHERE email = $1
+       AND email_verified_at IS NULL
+  `,
+    [email, smsCode, sentAt.toISOString()]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/**
+ * Record (or clear) the moment the verification SMS was last sent.
+ *
+ * Passing null clears it, which is what a FAILED send does: the cooldown must
+ * not lock a user out of retrying a message that never arrived.
+ */
+export async function touchPendingSmsSentAt(email: string, sentAt: Date | null) {
+  if (!useDatabase()) {
+    await ensureMemoryLoaded();
+    const record = memoryPending.get(email);
+    if (!record) return;
+    memoryPending.set(email, { ...record, smsSentAt: sentAt ? sentAt.toISOString() : null });
+    await persistMemory();
+    return;
+  }
+
+  await getPgPool().query(`UPDATE auth_pending_registrations SET sms_sent_at = $2 WHERE email = $1`, [
+    email,
+    sentAt ? sentAt.toISOString() : null,
+  ]);
 }
 
 export async function getPendingRegistration(email: string): Promise<PendingRegistration | null> {
@@ -378,12 +463,15 @@ export async function getPendingRegistration(email: string): Promise<PendingRegi
     password_hash: string;
     phone: string;
     email_code: string;
-    sms_code: string;
+    sms_code: string | null;
+    email_verified_at: Date | null;
+    sms_sent_at: Date | null;
     expires_at: Date;
     attempts: number;
   }>(
     `
-    SELECT email, password_hash, phone, email_code, sms_code, expires_at, attempts
+    SELECT email, password_hash, phone, email_code, sms_code,
+           email_verified_at, sms_sent_at, expires_at, attempts
     FROM auth_pending_registrations
     WHERE email = $1
     LIMIT 1

@@ -71,14 +71,20 @@ beforeEach(async () => {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 async function registerAndLogin(email: string, phone: string, fullName: string): Promise<string> {
-  const reg = await req<{ devCodes?: { emailCode: string; smsCode: string } }>(
+  const reg = await req<{ devCodes?: { emailCode: string } }>(
     "POST", "/auth/register",
     { email, password: "Password123!", phone, fullName }
   );
-  const { emailCode, smsCode } = reg.body.devCodes!;
+  const { emailCode } = reg.body.devCodes!;
+  // Two-stage verification: the SMS is only minted once the email code
+  // is accepted, so the sms code comes from THIS response, not register.
+  const veRes = await req<{ devCodes?: { smsCode: string } }>(
+    "POST", "/auth/register/verify-email", { email: email, emailCode }
+  );
+  const { smsCode } = veRes.body.devCodes!;
   const verify = await req<{ token: string }>(
     "POST", "/auth/register/verify",
-    { email, emailCode, smsCode }
+    { email, smsCode }
   );
   return verify.body.token;
 }

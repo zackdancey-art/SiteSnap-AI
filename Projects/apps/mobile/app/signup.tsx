@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
@@ -47,7 +47,10 @@ function normalizeLocalPhone(phone: string) {
 
 export default function SignUpScreen() {
   const insets = useSafeAreaInsets();
-  const [step, setStep] = useState<"details" | "verify">("details");
+  // Three stages, not two: the SMS is only minted once the email code is
+  // accepted (API migration 029), so "check your email" and "check your phone"
+  // are genuinely separate waits and cannot share a screen.
+  const [step, setStep] = useState<"details" | "email" | "sms">("details");
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -60,12 +63,40 @@ export default function SignUpScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const [devCodes, setDevCodes] = useState<{ emailCode: string; smsCode: string } | null>(null);
+  const [devCodes, setDevCodes] = useState<{ emailCode?: string; smsCode?: string } | null>(null);
+  // Seconds left on the SMS resend cooldown, from the API's retryAfterSeconds.
+  const [resendCooldown, setResendCooldown] = useState(0);
 
   const normalizedPhone = useMemo(
     () => `${phonePrefix}${normalizeLocalPhone(phoneLocal)}`,
     [phoneLocal, phonePrefix]
   );
+
+  // Tick the resend cooldown down to zero.
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const id = setTimeout(() => setResendCooldown((n) => Math.max(0, n - 1)), 1000);
+    return () => clearTimeout(id);
+  }, [resendCooldown]);
+
+  /**
+   * Send the user back to the start without making them retype anything.
+   *
+   * Reached when the pending signup is gone for good — expired, or burned
+   * through its attempts. The name, email, phone and password stay in state
+   * deliberately: they are already in memory (the form collected them and the
+   * first request sent them), they are never written to storage, and clearing
+   * them would cost a real user the longest field on the form to no benefit.
+   */
+  const restartFromDetails = (reason: string) => {
+    setStep("details");
+    setEmailCode("");
+    setSmsCode("");
+    setDevCodes(null);
+    setResendCooldown(0);
+    setMessage("");
+    setError(reason);
+  };
 
   const selectedPrefixLabel = useMemo(() => {
     const found = PREFIX_OPTIONS.find((item) => item.code === phonePrefix);
@@ -109,19 +140,19 @@ export default function SignUpScreen() {
       const data = (await res.json()) as {
         error?: string;
         message?: string;
-        devCodes?: { emailCode?: string; smsCode?: string };
+        devCodes?: { emailCode?: string };
       };
       if (!res.ok) {
         throw new Error(data.error || "Could not start registration.");
       }
-      setStep("verify");
-      setMessage(data.message || "Verification codes sent.");
-      if (data.devCodes?.emailCode && data.devCodes?.smsCode) {
-        setDevCodes({
-          emailCode: data.devCodes.emailCode,
-          smsCode: data.devCodes.smsCode,
-        });
-      }
+      // No SMS has been sent at this point, and none will be until the email
+      // code below comes back verified.
+      setStep("email");
+      setEmailCode("");
+      setSmsCode("");
+      setResendCooldown(0);
+      setMessage(data.message || "We sent a code to your email.");
+      setDevCodes(data.devCodes?.emailCode ? { emailCode: data.devCodes.emailCode } : null);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Could not start registration.");
     } finally {
@@ -129,10 +160,80 @@ export default function SignUpScreen() {
     }
   };
 
+  /**
+   * Stage 2 — submit the email code. Success is what mints and sends the SMS,
+   * so this is also the resend path: calling it again with the same accepted
+   * code re-sends the existing SMS code under the server's cooldown, and never
+   * mints a second one.
+   */
+  const handleVerifyEmail = async (options?: { resend?: boolean }) => {
+    if (submitting) return;
+    const code = emailCode.trim();
+    if (!code) {
+      setError("Enter the 6-digit code from your email.");
+      return;
+    }
+
+    setError("");
+    setMessage("");
+    setSubmitting(true);
+    try {
+      const res = await apiRequest("POST", "/api/auth/register/verify-email", {
+        email: email.trim().toLowerCase(),
+        emailCode: code,
+      });
+      const data = (await res.json()) as {
+        error?: string;
+        message?: string;
+        restart?: boolean;
+        retryAfterSeconds?: number;
+        devCodes?: { smsCode?: string };
+      };
+
+      if (res.ok) {
+        setStep("sms");
+        setSmsCode("");
+        setResendCooldown(0);
+        setMessage(options?.resend ? "New code sent." : data.message || "We sent a code to your phone.");
+        if (data.devCodes?.smsCode) {
+          setDevCodes((prev) => ({ ...prev, smsCode: data.devCodes?.smsCode }));
+        }
+        return;
+      }
+
+      // The pending signup is gone for good — expired, or out of attempts.
+      // Back to step 1 with everything they typed still in the form.
+      if (data.restart) {
+        restartFromDetails(data.error || "That signup expired. Please try again.");
+        return;
+      }
+
+      // Cooldown. The code is already on its way, so move them forward rather
+      // than stranding them on a step whose work is done, and count down the
+      // resend button from the server's own number.
+      if (res.status === 429 && typeof data.retryAfterSeconds === "number") {
+        setStep("sms");
+        setResendCooldown(data.retryAfterSeconds);
+        setMessage("We already sent you a code. Check your messages.");
+        return;
+      }
+
+      // Wrong code (401), or a transient 429/500/502. Stay put; clear the field
+      // only when it was the field that was wrong.
+      if (res.status === 401) setEmailCode("");
+      setError(data.error || "Verification failed.");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Verification failed.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  /** Stage 3 — submit the SMS code and create the account. */
   const handleVerify = async () => {
     if (submitting) return;
-    if (!emailCode.trim() || !smsCode.trim()) {
-      setError("Enter both the email code and SMS code.");
+    if (!smsCode.trim()) {
+      setError("Enter the 6-digit code from the text message.");
       return;
     }
 
@@ -142,14 +243,28 @@ export default function SignUpScreen() {
     try {
       const res = await apiRequest("POST", "/api/auth/register/verify", {
         email: email.trim().toLowerCase(),
-        emailCode: emailCode.trim(),
         smsCode: smsCode.trim(),
       });
-      const data = (await res.json()) as { error?: string };
-      if (!res.ok) {
-        throw new Error(data.error || "Verification failed.");
+      const data = (await res.json()) as { error?: string; restart?: boolean; stage?: string };
+      if (res.ok) {
+        router.replace("/login");
+        return;
       }
-      router.replace("/login");
+      if (data.restart) {
+        restartFromDetails(data.error || "That signup expired. Please try again.");
+        return;
+      }
+      // 409 + stage "email": the server has no verified email on file, so the
+      // SMS step cannot be satisfied. Send them back one step rather than
+      // letting them retype a code that can never match.
+      if (data.stage === "email") {
+        setStep("email");
+        setSmsCode("");
+        setError("Please enter your email code first.");
+        return;
+      }
+      if (res.status === 401) setSmsCode("");
+      setError(data.error || "Verification failed.");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Verification failed.");
     } finally {
@@ -166,13 +281,26 @@ export default function SignUpScreen() {
         <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
           <View style={styles.logoSection}>
             <View style={styles.logoContainer}>
-              <Ionicons name={step === "details" ? "person-add" : "shield-checkmark"} size={36} color={Colors.white} />
+              <Ionicons
+                name={step === "details" ? "person-add" : step === "email" ? "mail-open" : "chatbubble-ellipses"}
+                size={36}
+                color={Colors.white}
+              />
             </View>
-            <Text style={styles.appName}>{step === "details" ? "Create Account" : "Verify Account"}</Text>
+            <Text style={styles.appName}>
+              {step === "details" ? "Create Account" : step === "email" ? "Check your email" : "Check your phone"}
+            </Text>
             <Text style={styles.tagline}>
-              {step === "details"
-                ? "Register with email and mobile verification"
-                : `Enter the codes sent to ${email.trim().toLowerCase() || "your email"}`}
+              {step === "details" ? (
+                "We'll email you a code, then text you one"
+              ) : (
+                <>
+                  We sent a 6-digit code to{" "}
+                  <Text style={styles.taglineStrong}>
+                    {step === "email" ? email.trim().toLowerCase() : normalizedPhone}
+                  </Text>
+                </>
+              )}
             </Text>
           </View>
 
@@ -197,14 +325,18 @@ export default function SignUpScreen() {
             {!!devCodes && (
               <View style={styles.devCodeCard}>
                 <Text style={styles.devCodeCardTitle}>Verification Codes (Dev)</Text>
-                <View style={styles.devCodeRow}>
-                  <Text style={styles.devCodeLabel}>Email code</Text>
-                  <Text style={styles.devCodeValue}>{devCodes.emailCode}</Text>
-                </View>
-                <View style={styles.devCodeRow}>
-                  <Text style={styles.devCodeLabel}>SMS code</Text>
-                  <Text style={styles.devCodeValue}>{devCodes.smsCode}</Text>
-                </View>
+                {!!devCodes.emailCode && (
+                  <View style={styles.devCodeRow}>
+                    <Text style={styles.devCodeLabel}>Email code</Text>
+                    <Text style={styles.devCodeValue}>{devCodes.emailCode}</Text>
+                  </View>
+                )}
+                {!!devCodes.smsCode && (
+                  <View style={styles.devCodeRow}>
+                    <Text style={styles.devCodeLabel}>SMS code</Text>
+                    <Text style={styles.devCodeValue}>{devCodes.smsCode}</Text>
+                  </View>
+                )}
               </View>
             )}
 
@@ -288,27 +420,69 @@ export default function SignUpScreen() {
                   )}
                 </Pressable>
               </>
-            ) : (
+            ) : step === "email" ? (
               <>
                 <View style={styles.inputGroup}>
-                  <Text style={styles.label}>Email Verification Code</Text>
+                  <Text style={styles.label}>Email code</Text>
                   <TextInput
                     style={styles.input}
-                    placeholder="Enter 6-digit email code"
+                    placeholder="123456"
                     value={emailCode}
                     onChangeText={setEmailCode}
                     keyboardType="number-pad"
+                    autoFocus
                   />
                 </View>
 
+                <Pressable
+                  style={({ pressed }) => [styles.primaryButton, pressed && styles.primaryButtonPressed]}
+                  onPress={() => handleVerifyEmail()}
+                  disabled={submitting}
+                >
+                  {submitting ? (
+                    <ActivityIndicator color={Colors.white} />
+                  ) : (
+                    <>
+                      <Text style={styles.primaryButtonText}>Continue</Text>
+                      <Ionicons name="arrow-forward" size={20} color={Colors.white} />
+                    </>
+                  )}
+                </Pressable>
+
+                {/* Tell them the phone step is coming BEFORE it arrives, so a
+                    second code isn't a surprise that reads like a failure. */}
+                <Text style={styles.nextStepHint}>Next, we&apos;ll text a code to {normalizedPhone}</Text>
+
+                <View style={styles.linkRow}>
+                  <Pressable onPress={() => handleStartRegistration()} disabled={submitting}>
+                    <Text style={styles.secondaryButtonText}>Resend email</Text>
+                  </Pressable>
+                  <Text style={styles.linkSeparator}>·</Text>
+                  {/* Pure navigation — no request, so tapping it costs nothing. */}
+                  <Pressable
+                    onPress={() => {
+                      setStep("details");
+                      setEmailCode("");
+                      setError("");
+                      setMessage("");
+                    }}
+                    disabled={submitting}
+                  >
+                    <Text style={styles.secondaryButtonText}>Change email address</Text>
+                  </Pressable>
+                </View>
+              </>
+            ) : (
+              <>
                 <View style={styles.inputGroup}>
-                  <Text style={styles.label}>SMS Verification Code</Text>
+                  <Text style={styles.label}>SMS code</Text>
                   <TextInput
                     style={styles.input}
-                    placeholder="Enter 6-digit SMS code"
+                    placeholder="123456"
                     value={smsCode}
                     onChangeText={setSmsCode}
                     keyboardType="number-pad"
+                    autoFocus
                   />
                 </View>
 
@@ -321,30 +495,40 @@ export default function SignUpScreen() {
                     <ActivityIndicator color={Colors.white} />
                   ) : (
                     <>
-                      <Text style={styles.primaryButtonText}>Verify and Create Account</Text>
+                      <Text style={styles.primaryButtonText}>Create account</Text>
                       <Ionicons name="checkmark-circle" size={20} color={Colors.white} />
                     </>
                   )}
                 </Pressable>
 
-                <Pressable style={styles.secondaryButton} onPress={handleStartRegistration} disabled={submitting}>
-                  <Ionicons name="refresh" size={16} color={Colors.accent} />
-                  <Text style={styles.secondaryButtonText}>Resend Codes</Text>
-                </Pressable>
-
-                <Pressable
-                  style={styles.backButton}
-                  onPress={() => {
-                    setStep("details");
-                    setError("");
-                    setMessage("");
-                    setDevCodes(null);
-                    setEmailCode("");
-                    setSmsCode("");
-                  }}
-                >
-                  <Text style={styles.backButtonText}>Back</Text>
-                </Pressable>
+                <View style={styles.linkRow}>
+                  {/* Resend goes through verify-email, the cooldown path — NOT
+                      initiate, which would restart the flow and bill a fresh
+                      email send on every tap. */}
+                  <Pressable
+                    onPress={() => handleVerifyEmail({ resend: true })}
+                    disabled={submitting || resendCooldown > 0}
+                  >
+                    <Text style={[styles.secondaryButtonText, resendCooldown > 0 && styles.linkDisabled]}>
+                      {resendCooldown > 0 ? `Resend in ${resendCooldown}s` : "Resend text"}
+                    </Text>
+                  </Pressable>
+                  <Text style={styles.linkSeparator}>·</Text>
+                  {/* Back to the email step, not to step 1: the pending signup
+                      is still valid, and re-entering the email code lands on
+                      the cooldown path rather than minting a second SMS. */}
+                  <Pressable
+                    onPress={() => {
+                      setStep("email");
+                      setSmsCode("");
+                      setError("");
+                      setMessage("");
+                    }}
+                    disabled={submitting}
+                  >
+                    <Text style={styles.secondaryButtonText}>Back</Text>
+                  </Pressable>
+                </View>
               </>
             )}
           </View>
@@ -401,6 +585,7 @@ const styles = StyleSheet.create({
   },
   appName: { fontSize: 28, fontFamily: "Inter_700Bold", color: Colors.primary },
   tagline: { marginTop: 4, fontSize: 14, fontFamily: "Inter_400Regular", color: Colors.textSecondary, textAlign: "center" },
+  taglineStrong: { fontFamily: "Inter_600SemiBold", color: Colors.text },
   formSection: { gap: 14 },
   inputGroup: { gap: 6 },
   label: { fontSize: 14, fontFamily: "Inter_600SemiBold", color: Colors.text, marginLeft: 4 },
@@ -443,20 +628,18 @@ const styles = StyleSheet.create({
   },
   primaryButtonPressed: { opacity: 0.9, transform: [{ scale: 0.98 }] },
   primaryButtonText: { fontSize: 16, fontFamily: "Inter_600SemiBold", color: Colors.white },
-  secondaryButton: {
-    flexDirection: "row",
-    gap: 6,
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-    borderColor: Colors.accent,
-    borderRadius: 14,
-    paddingVertical: 12,
-    backgroundColor: Colors.surface,
-  },
   secondaryButtonText: { fontSize: 14, fontFamily: "Inter_600SemiBold", color: Colors.accent },
-  backButton: { alignItems: "center", paddingVertical: 6 },
-  backButtonText: { fontSize: 14, fontFamily: "Inter_600SemiBold", color: Colors.textSecondary },
+  linkRow: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 6 },
+  linkSeparator: { fontSize: 14, color: Colors.textSecondary },
+  linkDisabled: { color: Colors.textSecondary },
+  nextStepHint: {
+    marginTop: 12,
+    fontSize: 13,
+    fontFamily: "Inter_400Regular",
+    fontStyle: "italic",
+    color: Colors.textSecondary,
+    textAlign: "center",
+  },
   footer: { marginTop: 26, flexDirection: "row", justifyContent: "center", gap: 6 },
   footerText: { fontSize: 14, fontFamily: "Inter_400Regular", color: Colors.textSecondary },
   linkText: { fontSize: 14, fontFamily: "Inter_600SemiBold", color: Colors.accent },

@@ -216,6 +216,23 @@ async function sendSms(to: string, bodyText: string): Promise<DeliveryResult> {
 }
 
 export function isChannelConfigured(channel: DeliveryChannel): { ok: boolean; reason?: string } {
+  // Structural guard, third of three — sendEmail() and sendSms() already have
+  // the matching pair. In test mode a channel is ALWAYS configured, because the
+  // transport that serves it is the in-process fake above, which needs no
+  // credentials and makes no network call.
+  //
+  // Without this branch the predicate reads live RESEND_*/TWILIO_* while the
+  // transports ignore them, so callers that gate on it (routes/auth.ts's
+  // registration flow) take a DIFFERENT code path depending on whether a
+  // developer's .env happens to hold real provider keys: locally the send runs
+  // and records into fakeSends, in CI it is skipped entirely. That made every
+  // "no SMS was sent" assertion pass vacuously in CI — true there no matter
+  // what the code under test does. The channel check is about configuration,
+  // and in test mode configuration is satisfied by the fake.
+  if (isTestMode()) {
+    return { ok: true };
+  }
+
   if (channel === "email") {
     const provider = getEmailProvider();
     return provider
