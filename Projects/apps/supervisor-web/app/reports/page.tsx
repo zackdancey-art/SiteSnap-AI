@@ -11,6 +11,7 @@ import type { Diary, Site } from "@/lib/api";
 import { useBootstrap } from "@/lib/useBootstrap";
 import { analytics } from "@/lib/analytics";
 import { SkeletonTable } from "@/components/Skeleton";
+import { describeGeneration } from "@/lib/provenance";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -33,6 +34,10 @@ function fmtDateShort(iso: string) {
 function buildHtml(diary: Diary, site: Site, orgName: string): string {
   const sections = diary.sections ?? [];
   const checklist = diary.safetyChecklist ?? [];
+  // The in-app banner does not travel. Once this is a PDF on a QS's or an
+  // insurer's desk it is the only copy they will ever see, so the marking has to
+  // be in the document itself, next to the generated date.
+  const provenance = describeGeneration(diary.generation);
 
   const sectionsHtml = sections.map((s, i) => `
     <div class="section">
@@ -81,13 +86,15 @@ function buildHtml(diary: Diary, site: Site, orgName: string): string {
   .badge { display: inline-block; padding: 2px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; }
   .approved { background: #F0FDF4; color: #22C55E; }
   .pending  { background: #FFFBEB; color: #F59E0B; }
+  .provenance-detail { margin-top: 4px; font-size: 11px; opacity: 0.85; }
   @media print { body { padding: 20px; } .header { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
 </style>
 </head>
 <body>
   <div class="header">
     <h1>${esc(site.name)} — Site Diary</h1>
-    <p>${orgName ? esc(orgName) + " · " : ""}Generated ${fmtDate(diary.generatedAt)}</p>
+    <p>${orgName ? esc(orgName) + " · " : ""}Generated ${fmtDate(diary.generatedAt)} · ${esc(provenance.label)}</p>
+    ${provenance.detail ? `<p class="provenance-detail">${esc(provenance.detail)}</p>` : ""}
   </div>
   <div class="meta">
     <div><dt>Site</dt><dd>${esc(site.name)}</dd></div>
@@ -136,12 +143,15 @@ function exportHtml(html: string, filename: string) {
 function exportCsv(diaries: Diary[], sites: Site[]) {
   const siteName = (id: string) => sites.find((s) => s.id === id)?.name ?? id;
   const rows = [
-    ["Site", "Period", "Status", "Generated", "Summary"],
+    // Generator column for the same reason the HTML header carries one: a CSV
+    // leaves the app just as unmarked as a PDF does.
+    ["Site", "Period", "Status", "Generated", "Generator", "Summary"],
     ...diaries.map((d) => [
       `"${siteName(d.siteId)}"`,
       d.reportPeriod ?? "daily",
       d.status,
       fmtDateShort(d.generatedAt),
+      `"${describeGeneration(d.generation).label}"`,
       `"${(d.summary ?? "").replace(/"/g, "'")}"`,
     ]),
   ];
@@ -162,6 +172,7 @@ function DiaryModal({ diary, site, orgName, onClose }: {
   const filename = `sitediary-${site.name.replace(/\s+/g, "-").toLowerCase()}-${diary.generatedAt.slice(0, 10)}`;
   const html = buildHtml(diary, site, orgName);
   const sections = diary.sections ?? [];
+  const provenance = describeGeneration(diary.generation);
   const [showEmailPicker, setShowEmailPicker] = useState(false);
 
   const emailSubject = `Site Diary — ${site.name} (${diary.reportPeriod ?? "Daily"} — ${fmtDateShort(diary.generatedAt)})`;
@@ -210,6 +221,27 @@ function DiaryModal({ diary, site, orgName, onClose }: {
 
         {/* Diary content */}
         <div style={{ flex: 1, overflow: "auto", padding: "24px" }}>
+          {/* Provenance banner. Deliberately a banner and not a toast: a toast is
+              gone by the time anyone reads the diary, and "was this written by
+              the AI?" is a question asked of the document, not of the moment it
+              was generated. */}
+          <div style={{
+            display: "flex", gap: 10, alignItems: "flex-start",
+            background: provenance.tone === "ai" ? "#F0FDF4" : provenance.tone === "fallback" ? "#FFFBEB" : "var(--surface-secondary)",
+            borderLeft: `3px solid ${provenance.tone === "ai" ? "#22C55E" : provenance.tone === "fallback" ? "#F59E0B" : "#9EAFC2"}`,
+            borderRadius: "0 10px 10px 0", padding: "12px 14px", marginBottom: 20,
+          }}>
+            <span style={{ fontSize: 15, lineHeight: 1.2 }}>
+              {provenance.tone === "ai" ? "✨" : provenance.tone === "fallback" ? "⚠️" : "❔"}
+            </span>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)" }}>{provenance.label}</div>
+              {provenance.detail && (
+                <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 3 }}>{provenance.detail}</div>
+              )}
+            </div>
+          </div>
+
           {/* Meta pills */}
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 20 }}>
             {[

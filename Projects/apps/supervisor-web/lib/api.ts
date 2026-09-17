@@ -1,3 +1,4 @@
+import type { DiaryGeneration } from "./provenance";
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 export type User = { email: string; name: string; role: string; companyId?: string; companyRole?: string };
@@ -16,6 +17,8 @@ export type Diary = {
   fullReport?: string; sections?: DiarySection[];
   safetyChecklist?: string[];
   signedBy?: string; signedAt?: string;
+  /** Which generator wrote this diary; null/absent means unknown. See lib/provenance.ts. */
+  generation?: DiaryGeneration | null;
 };
 
 export interface BootstrapData {
@@ -174,14 +177,16 @@ export async function approveDiary(diaryId: string): Promise<Diary> {
 }
 
 export async function generateDiary(payload: { siteId: string; period: string; entries: Entry[] }): Promise<Diary> {
-  const data = await request<{ success: boolean; diary: Diary }>("POST", `/api/generate-diary`, {
+  // `generation` rides along so the preview and the exports can mark the diary
+  // honestly even before it is persisted.
+  const data = await request<{ success: boolean; diary: Diary; generation?: DiaryGeneration | null }>("POST", `/api/generate-diary`, {
     period: payload.period,
     entries: payload.entries.map((e) => ({
       date: e.date, notes: e.notes, weather: e.weather, crewCount: e.crewCount, photos: [],
     })),
     siteId: payload.siteId,
   });
-  return data.diary;
+  return { ...data.diary, generation: data.generation ?? null };
 }
 
 export async function signUploadPaths(paths: string[]): Promise<{ path: string; url: string | null }[]> {

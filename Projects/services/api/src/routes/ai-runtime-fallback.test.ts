@@ -107,9 +107,25 @@ const DIARY_BODY = {
 type DiaryResponse = {
   success: boolean;
   diary?: { fullReport: string; sections: unknown[] };
+  generation?: {
+    generator: string;
+    model: string | null;
+    promptVersion: string;
+    warning: string | null;
+    signature: string;
+  };
   warning?: string;
   error?: string;
 };
+
+// Every degraded path must say so in the provenance record too, not only in the
+// transient `warning` field — the record is what gets stored and exported.
+function assertFallbackProvenance(r: { body: DiaryResponse }) {
+  assert.equal(r.body.generation?.generator, "fallback", "provenance names the rule-based generator");
+  assert.equal(r.body.generation?.model, null, "no model ran, so none is claimed");
+  assert.ok((r.body.generation?.warning ?? "").length > 0, "provenance carries the reason");
+  assert.ok((r.body.generation?.signature ?? "").length > 0, "provenance is signed");
+}
 
 let phoneCounter = 5000;
 const nextPhone = () => `+614${String(phoneCounter++).padStart(8, "0")}`;
@@ -130,7 +146,8 @@ test("401 (invalid key): 200 with rule-based fallback diary + a key-specific war
   assert.equal(r.status, 200);
   assert.equal(r.body.success, true);
   assert.ok(r.body.diary && r.body.diary.fullReport.length > 20, "fallback produced a real diary from the entries");
-  assert.match(r.body.warning ?? "", /Invalid OPENAI_API_KEY \(401\)/);
+  assert.match(r.body.warning ?? "", /OpenAI API key was rejected \(401\)/);
+  assertFallbackProvenance(r);
 });
 
 test("500 (server error): 200 with fallback diary + a generic AI-unavailable warning", async () => {
@@ -142,7 +159,8 @@ test("500 (server error): 200 with fallback diary + a generic AI-unavailable war
   assert.equal(r.status, 200);
   assert.equal(r.body.success, true);
   assert.ok(r.body.diary && r.body.diary.fullReport.length > 20, "fallback produced a real diary from the entries");
-  assert.match(r.body.warning ?? "", /AI unavailable, used local generator/);
+  assert.match(r.body.warning ?? "", /AI service was unavailable/);
+  assertFallbackProvenance(r);
 });
 
 test("timeout (no HTTP status): 200 with fallback diary + a generic warning", async () => {
@@ -156,5 +174,6 @@ test("timeout (no HTTP status): 200 with fallback diary + a generic warning", as
   assert.equal(r.status, 200);
   assert.equal(r.body.success, true);
   assert.ok(r.body.diary && r.body.diary.fullReport.length > 20, "fallback produced a real diary from the entries");
-  assert.match(r.body.warning ?? "", /AI unavailable, used local generator/);
+  assert.match(r.body.warning ?? "", /AI service was unavailable/);
+  assertFallbackProvenance(r);
 });
