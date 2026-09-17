@@ -4,6 +4,7 @@ import * as Sharing from "expo-sharing";
 import * as FileSystem from "expo-file-system";
 import { Paths } from "expo-file-system";
 import type { DiarySection, GeneratedDiary, HourlyNote, Photo, Site } from "@/lib/types";
+import { describeGeneration } from "@/lib/provenance";
 import { LOGO_DATA_URI } from "@/lib/logo";
 
 export type ReportExportFormat = "pdf" | "doc";
@@ -339,7 +340,7 @@ function csvCell(value: string) {
 
 export function buildDiariesCsv(diaries: GeneratedDiary[], sites: Site[]): string {
   const siteById = new Map(sites.map((s) => [s.id, s]));
-  const header = ["Site", "Client", "Address", "Report Period", "Status", "Generated", "Summary", "Safety Checklist Items", "Sections"];
+  const header = ["Site", "Client", "Address", "Report Period", "Status", "Generated", "Generator", "Summary", "Safety Checklist Items", "Sections"];
   const rows = diaries.map((diary) => {
     const site = siteById.get(diary.siteId);
     return [
@@ -349,6 +350,7 @@ export function buildDiariesCsv(diaries: GeneratedDiary[], sites: Site[]): strin
       csvCell(diary.reportPeriod ?? "daily"),
       csvCell(diary.status),
       csvCell(new Date(diary.generatedAt).toLocaleDateString("en-AU")),
+      csvCell(describeGeneration(diary.generation).label),
       csvCell(diary.summary ?? ""),
       csvCell(String(diary.safetyChecklist?.length ?? 0)),
       csvCell(String(diary.sections.length)),
@@ -375,6 +377,7 @@ export function buildDiariesText(diaries: GeneratedDiary[], sites: Site[]) {
         `Status: ${diary.status}`,
         `Period: ${(diary.reportPeriod || "daily").toUpperCase()}`,
         `Generated: ${new Date(diary.generatedAt).toLocaleString("en-AU")}`,
+        `Generator: ${describeGeneration(diary.generation).label}`,
         "",
         "Summary:",
         diary.summary || "No summary",
@@ -433,6 +436,9 @@ export function buildDiaryReportHtml(args: { diary: GeneratedDiary; site: Site; 
     meta: [
       { label: "Status", value: diary.status.toUpperCase() },
       { label: "Generated", value: new Date(diary.generatedAt).toLocaleString("en-AU") },
+      // The in-app banner does not travel. Once this is a PDF on a QS's or an
+      // insurer's desk it is the only copy they will ever see.
+      { label: "Generator", value: describeGeneration(diary.generation).label },
       { label: "Client", value: site.client },
       { label: "Report Period", value: (diary.reportPeriod || "daily").toUpperCase() },
     ],
@@ -455,6 +461,7 @@ export function buildDiariesReportHtml(diaries: GeneratedDiary[], sites: Site[],
             <tr><th>Status</th><td>${escapeHtml(diary.status.toUpperCase())}</td></tr>
             <tr><th>Period</th><td>${escapeHtml((diary.reportPeriod || "daily").toUpperCase())}</td></tr>
             <tr><th>Generated</th><td>${escapeHtml(new Date(diary.generatedAt).toLocaleString("en-AU"))}</td></tr>
+            <tr><th>Generator</th><td>${escapeHtml(describeGeneration(diary.generation).label)}</td></tr>
             <tr><th>Sections</th><td>${escapeHtml(String(diary.sections.length))}</td></tr>
           </table>
         </section>

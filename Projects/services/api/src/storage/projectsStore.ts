@@ -7,6 +7,7 @@ import { Actor, isCrew } from "./actor";
 import { FileBackedStore } from "./fileStore";
 import { findUserByEmail, setUserCompany } from "./authStore";
 import { withTenant } from "./tenant";
+import { DiaryProvenance } from "../services/diaryProvenance";
 
 type SiteStatus = "active" | "completed" | "on-hold";
 type DiaryStatus = "draft" | "approved";
@@ -67,6 +68,12 @@ export type DiaryRecord = {
   safetyChecklist: string[];
   sections: Array<Record<string, unknown>>;
   editLog: DiaryEditLogEntry[];
+  /**
+   * Which generator wrote this diary. NULL on every row created before
+   * migration 030 — genuinely unknown, never assumed. Written only from a
+   * server-verified signature (see services/diaryProvenance.ts); never patchable.
+   */
+  generation: DiaryProvenance | null;
 };
 
 export type TemplateRecord = {
@@ -258,7 +265,8 @@ export async function initProjectSchema() {
     ALTER TABLE project_diaries
       ADD COLUMN IF NOT EXISTS report_period TEXT NOT NULL DEFAULT 'daily',
       ADD COLUMN IF NOT EXISTS full_report TEXT NOT NULL DEFAULT '',
-      ADD COLUMN IF NOT EXISTS safety_checklist_json JSONB NOT NULL DEFAULT '[]'::jsonb
+      ADD COLUMN IF NOT EXISTS safety_checklist_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+      ADD COLUMN IF NOT EXISTS generation JSONB
   `);
 }
 
@@ -337,6 +345,7 @@ function mapDiary(row: {
   safety_checklist_json: string[] | null;
   sections_json: Array<Record<string, unknown>>;
   edit_log?: DiaryEditLogEntry[] | null;
+  generation?: DiaryProvenance | null;
 }): DiaryRecord {
   const period: ReportPeriod =
     row.report_period === "weekly" || row.report_period === "monthly" ? row.report_period : "daily";
@@ -353,6 +362,7 @@ function mapDiary(row: {
     safetyChecklist: Array.isArray(row.safety_checklist_json) ? row.safety_checklist_json : [],
     sections: row.sections_json,
     editLog: Array.isArray(row.edit_log) ? row.edit_log : [],
+    generation: row.generation ?? null,
   };
 }
 
@@ -692,7 +702,11 @@ export async function listDiaries(actor: Actor, siteId?: string, limit = 200, of
 
 export async function createDiary(
   actor: Actor,
-  payload: Omit<DiaryRecord, "id" | "ownerEmail" | "generatedAt" | "editLog" | "companyId">
+  // `generation` is optional on the way in — callers that never generated
+  // anything (tests, imports) simply omit it and the row records NULL.
+  payload: Omit<DiaryRecord, "id" | "ownerEmail" | "generatedAt" | "editLog" | "companyId" | "generation"> & {
+    generation?: DiaryProvenance | null;
+  }
 ): Promise<DiaryRecord> {
   const diary: DiaryRecord = {
     id: uuidv7(),
@@ -701,6 +715,7 @@ export async function createDiary(
     generatedAt: new Date().toISOString(),
     editLog: [],
     ...payload,
+    generation: payload.generation ?? null,
   };
   if (!useDatabase()) {
     await ensureMemoryLoaded();
@@ -711,9 +726,9 @@ export async function createDiary(
   const result = await withTenant(actor, (client) =>
     client.query(
       `INSERT INTO project_diaries (
-        id, owner_email, company_id, site_id, status, summary, report_period, full_report, safety_checklist_json, sections_json
+        id, owner_email, company_id, site_id, status, summary, report_period, full_report, safety_checklist_json, sections_json, generation
       )
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11::jsonb)
        RETURNING *`,
       [
         diary.id,
@@ -726,6 +741,7 @@ export async function createDiary(
         diary.fullReport,
         JSON.stringify(diary.safetyChecklist),
         JSON.stringify(diary.sections),
+        diary.generation ? JSON.stringify(diary.generation) : null,
       ]
     )
   );
@@ -811,6 +827,7 @@ export async function updateDiary(
       generatedAt: "",
       status: existing.status,
       summary: existing.summary,
+      generation: null,
       reportPeriod: "daily",
       fullReport: existing.full_report,
       safetyChecklist: [],

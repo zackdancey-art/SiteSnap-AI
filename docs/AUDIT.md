@@ -8,9 +8,19 @@
 
 ## CRITICAL
 
-### C1 — Generated diaries carry no provenance, and AI→fallback downgrade is silent — PARTIALLY FIXED (boot check closed by X2; provenance still OPEN)
+### C1 — Generated diaries carry no provenance, and AI→fallback downgrade is silent — FIXED
 
-**STATUS — read this before acting on anything below.** The **boot half is closed**: `OPENAI_API_KEY` is now validated by `validateProviderConfig()` and production **hard-fails** without it (X2, commit `8e88844`, PR #21), so the "the Render env var is missing and every report silently degrades" scenario described below can no longer reach production. The rule-based generator was deliberately retained as a **runtime** fallback for a reachable-but-erroring API (bad key, 401, 429, 5xx, timeout), which returns 200 with a `warning`.
+**STATUS — read this before acting on anything below.** **Both halves are now closed.** The boot half was closed by X2 (below). The provenance half is closed by migration `030` + `services/diaryProvenance.ts`: every generation is stamped with `{ generator, model, promptVersion, warning, generatedAtMs, tokenUsage }`, HMAC-signed (bound to `companyId`), verified server-side on save, and stored in `project_diaries.generation`. Pre-030 rows are **NULL** — deliberately not backfilled, because their generator is genuinely unknown; a heuristic over the template's summary wording could prove "rule-based" for some rows but never prove "AI" for any, and any user edit erases the signature. Readers render NULL as "Generator unknown".
+
+What the fix covers, beyond the original list:
+- **`ai.ts` no-key path no longer returns silently.** It was the *quietest* of the three degraded paths — the 401/429 paths at least set a `warning`, this one set nothing — so a missing key looked identical to a clean AI run. It now stamps `generator: "fallback"` with an explicit reason.
+- **Exports carry the marking, not just the app.** An unmarked PDF on a QS's or an insurer's desk is the real version of this problem, and an in-app banner does not travel with the document. The provenance line is in the supervisor-web `buildHtml()` header next to "Generated {date}" (so PDF/Word/HTML all inherit it), in the CSV export, and in the mobile HTML/CSV/text/share exports.
+- **Provenance is unforgeable.** The client generates and saves in two separate requests, so an unverified `generation` field would let any authenticated user stamp `generator: "openai"` onto template output. `DiaryPatchSchema` never accepts `generation`; anything that fails verification is stored as NULL, never as the generator it claimed. Proven red-on-revert (`routes/diary-provenance.test.ts`).
+- **The banner is a banner, not a toast.** "Did AI write this?" is a question asked of the document, months later — so it renders from the *stored* provenance, every time the diary is opened.
+
+Original finding follows, for the record.
+
+**STATUS (historical, X2).** The **boot half is closed**: `OPENAI_API_KEY` is now validated by `validateProviderConfig()` and production **hard-fails** without it (X2, commit `8e88844`, PR #21), so the "the Render env var is missing and every report silently degrades" scenario described below can no longer reach production. The rule-based generator was deliberately retained as a **runtime** fallback for a reachable-but-erroring API (bad key, 401, 429, 5xx, timeout), which returns 200 with a `warning`.
 
 The **provenance half remains OPEN and is now the whole of this finding**: a saved diary still records no generator, model, prompt version, or warning, the mobile client still discards the exception-path `warning`, and `response.usage` is still never read. A *wrong* key therefore still degrades quietly — the warning exists on that path but nothing surfaces or stores it.
 

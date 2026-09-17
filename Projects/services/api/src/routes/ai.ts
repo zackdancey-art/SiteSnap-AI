@@ -7,6 +7,7 @@ import { listEntries, listSites } from "../storage/projectsStore";
 import { uploadBelongsToActorCompany } from "../storage/uploadsStore";
 import { Actor } from "../storage/actor";
 import { getOpenAIClient } from "../services/openaiClient";
+import { DiaryProvenance, signProvenance } from "../services/diaryProvenance";
 
 /** Extract the upload id (<digits>-<hex>) from a storageKey or storagePath. */
 function extractUploadId(ref: string): string | null {
@@ -80,6 +81,22 @@ type DiaryOutput = {
   reportPeriod: ReportPeriod;
   sections: DiarySection[];
 };
+
+/** A diary plus the record of what actually produced it. */
+type GenerationResult = {
+  diary: DiaryOutput;
+  provenance: DiaryProvenance;
+};
+
+/**
+ * Bumped whenever SYSTEM_PROMPT changes in a way that could alter output.
+ * Stamped into every generated diary so a report can be traced to the prompt
+ * that wrote it.
+ */
+export const PROMPT_VERSION = "2026-09-v1";
+
+const FALLBACK_NOTICE =
+  "Written by the built-in template generator, not AI.";
 
 type OpenAIContentItem =
   | { type: "input_text"; text: string }
@@ -431,12 +448,33 @@ Return strict JSON with exactly these fields:
   ]
 }`;
 
-async function tryGenerateWithOpenAI(body: GenerateDiaryBody, actor: Pick<Actor, "companyId">): Promise<DiaryOutput> {
+function fallbackProvenance(warning: string): DiaryProvenance {
+  return {
+    generator: "fallback",
+    model: null,
+    promptVersion: PROMPT_VERSION,
+    warning,
+    generatedAtMs: Date.now(),
+    tokenUsage: null,
+  };
+}
+
+async function tryGenerateWithOpenAI(
+  body: GenerateDiaryBody,
+  actor: Pick<Actor, "companyId">
+): Promise<GenerationResult> {
   const entries = Array.isArray(body.entries) ? body.entries : [];
   const period = normalizePeriod(body.period);
 
   if (!process.env.OPENAI_API_KEY) {
-    return buildDiaryFromEntries(entries, period);
+    // Previously this returned the template output with NO warning at all —
+    // byte-for-byte indistinguishable from an AI report, and quieter than the
+    // error paths below, which at least set one. A missing key is a
+    // misconfiguration, not a non-event.
+    return {
+      diary: buildDiaryFromEntries(entries, period),
+      provenance: fallbackProvenance(`${FALLBACK_NOTICE} No OpenAI API key is configured.`),
+    };
   }
 
   const fallback = buildDiaryFromEntries(entries, period);
@@ -489,14 +527,26 @@ async function tryGenerateWithOpenAI(body: GenerateDiaryBody, actor: Pick<Actor,
     text: { format: { type: "json_object" } },
   });
 
+  const usage = response.usage
+    ? { input: response.usage.input_tokens ?? 0, output: response.usage.output_tokens ?? 0 }
+    : null;
+
   const outputText = String(response.output_text || "").trim();
-  if (!outputText) return fallback;
+  if (!outputText) {
+    return {
+      diary: fallback,
+      provenance: fallbackProvenance(`${FALLBACK_NOTICE} The AI returned an empty response.`),
+    };
+  }
 
   let parsed: Partial<DiaryOutput> = {};
   try {
     parsed = JSON.parse(outputText) as Partial<DiaryOutput>;
   } catch {
-    return fallback;
+    return {
+      diary: fallback,
+      provenance: fallbackProvenance(`${FALLBACK_NOTICE} The AI response could not be parsed.`),
+    };
   }
 
   const modelSections = Array.isArray(parsed.sections) ? parsed.sections : [];
@@ -525,11 +575,21 @@ async function tryGenerateWithOpenAI(body: GenerateDiaryBody, actor: Pick<Actor,
   );
 
   return {
-    summary,
-    fullReport,
-    safetyChecklist: finalChecklist,
-    reportPeriod: period,
-    sections: safeSections,
+    diary: {
+      summary,
+      fullReport,
+      safetyChecklist: finalChecklist,
+      reportPeriod: period,
+      sections: safeSections,
+    },
+    provenance: {
+      generator: "openai",
+      model,
+      promptVersion: PROMPT_VERSION,
+      warning: null,
+      generatedAtMs: Date.now(),
+      tokenUsage: usage,
+    },
   };
 }
 
@@ -586,6 +646,31 @@ async function resolveDiaryRequest(req: AuthenticatedRequest, body: GenerateDiar
   };
 }
 
+/**
+ * One line per generation, so the rate of silent downgrades is answerable from
+ * the logs rather than by asking users whether their diaries looked AI-written.
+ */
+function logGeneration(
+  req: AuthenticatedRequest,
+  body: GenerateDiaryBody,
+  p: DiaryProvenance,
+  startedAt: number
+): void {
+  const entries = Array.isArray(body.entries) ? body.entries : [];
+  console.log("[ai] generate-diary", {
+    reqid: (req.headers["x-request-id"] as string) || null,
+    generator: p.generator,
+    model: p.model,
+    promptVersion: p.promptVersion,
+    warning: p.warning,
+    tokenUsage: p.tokenUsage,
+    durationMs: Date.now() - startedAt,
+    photoCount: entries.reduce((n, e) => n + (Array.isArray(e.photos) ? e.photos.length : 0), 0),
+    companyId: req.auth.companyId,
+    siteId: cleanString(body.siteId, "") || null,
+  });
+}
+
 aiRouter.post("/generate-diary", requireAuth, rateLimit("generate-diary", 10, 60 * 60 * 1000), async (req, res) => {
   const parsed = GenerateDiaryBodySchema.safeParse(req.body ?? {});
   if (!parsed.success) {
@@ -593,14 +678,24 @@ aiRouter.post("/generate-diary", requireAuth, rateLimit("generate-diary", 10, 60
   }
   const body = parsed.data;
   const payloadBytes = Buffer.byteLength(JSON.stringify(body), "utf8");
+  const startedAt = Date.now();
 
   try {
     const resolved = await resolveDiaryRequest(req as AuthenticatedRequest, body);
     if (resolved.entries.length === 0) {
       return res.status(400).json({ error: "No entries are available for the selected report period." });
     }
-    const diary = await tryGenerateWithOpenAI(resolved, (req as AuthenticatedRequest).auth);
-    return res.json({ success: true, diary });
+    const { diary, provenance } = await tryGenerateWithOpenAI(resolved, (req as AuthenticatedRequest).auth);
+    logGeneration(req as AuthenticatedRequest, body, provenance, startedAt);
+    return res.json({
+      success: true,
+      diary,
+      // Signed so the save request that follows cannot claim a generator that
+      // never ran. Surfaced as `warning` too, because existing clients read
+      // that field and would otherwise show a degraded run as a clean one.
+      generation: signProvenance(provenance, (req as AuthenticatedRequest).auth.companyId),
+      warning: provenance.warning ?? undefined,
+    });
   } catch (err: unknown) {
     const statusFromOpenAI =
       typeof err === "object" && err !== null
@@ -620,11 +715,18 @@ aiRouter.post("/generate-diary", requireAuth, rateLimit("generate-diary", 10, 60
       const fallbackDiary = buildDiaryFromEntries(resolved.entries, resolved.period);
       const warning =
         statusFromOpenAI === 401
-          ? "Invalid OPENAI_API_KEY (401). Used local generator."
+          ? `${FALLBACK_NOTICE} The OpenAI API key was rejected (401).`
           : statusFromOpenAI === 429
-            ? "OpenAI quota/credits exceeded (429). Used local generator."
-            : "AI unavailable, used local generator.";
-      return res.json({ success: true, diary: fallbackDiary, warning });
+            ? `${FALLBACK_NOTICE} OpenAI quota or credits are exhausted (429).`
+            : `${FALLBACK_NOTICE} The AI service was unavailable.`;
+      const provenance = fallbackProvenance(warning);
+      logGeneration(req as AuthenticatedRequest, body, provenance, startedAt);
+      return res.json({
+        success: true,
+        diary: fallbackDiary,
+        generation: signProvenance(provenance, (req as AuthenticatedRequest).auth.companyId),
+        warning,
+      });
     } catch (fallbackError) {
       return res.status(400).json({
         error: fallbackError instanceof Error ? fallbackError.message : "Failed to generate diary.",

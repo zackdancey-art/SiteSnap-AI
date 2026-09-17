@@ -1,0 +1,27 @@
+-- 030: record which generator actually wrote each diary.
+--
+-- A site diary is an evidentiary document: it can end up in front of a QS, an
+-- insurer or a tribunal. Until now nothing distinguished a diary written by the
+-- AI from one written by the rule-based template generator — not in the API
+-- response, not in the export, and not in this table. When the OpenAI account
+-- ran out of credits every /generate-diary call silently fell back to the
+-- template, and no diary recorded that it had. See AUDIT C1.
+--
+-- `generation` holds the signed-then-verified provenance record written by
+-- routes/projects.ts: generator, model, promptVersion, warning, generatedAtMs,
+-- tokenUsage. The API verifies an HMAC over that record (bound to companyId)
+-- before persisting it, so the column holds only claims the server itself
+-- minted — a client cannot stamp `generator: "openai"` onto template output.
+--
+-- Deliberately NULLable with NO backfill and NO default. Every row that exists
+-- today predates provenance and its generator is genuinely unknown; a heuristic
+-- over the template's summary wording would prove "rule-based" for some rows
+-- but could never prove "AI" for any, and is erased entirely by a user edit.
+-- NULL is the honest encoding of unknown. Readers MUST render NULL as
+-- "unknown", never as either generator.
+--
+-- Additive and idempotent. Safe to run against a table with existing rows:
+-- adding a NULLable column with no default is a metadata-only change in
+-- Postgres and rewrites nothing.
+
+ALTER TABLE project_diaries ADD COLUMN IF NOT EXISTS generation JSONB;

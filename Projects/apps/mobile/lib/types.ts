@@ -76,6 +76,24 @@ export interface GeneratedDiary {
   safetyChecklist?: string[];
   sections: DiarySection[];
   editLog?: DiaryEditLogEntry[];
+  /** Which generator wrote this report. Absent/null means unknown — never assume. */
+  generation?: DiaryGeneration | null;
+}
+
+export interface DiaryGeneration {
+  generator: "openai" | "fallback";
+  model: string | null;
+  promptVersion: string;
+  /** Why the run was degraded. Null on a clean AI run. */
+  warning: string | null;
+  generatedAtMs: number;
+  tokenUsage: { input: number; output: number } | null;
+  /**
+   * Server-minted HMAC, present only in transit from /generate-diary to the
+   * save request. It is what makes the record unforgeable; the API verifies it
+   * and stores the record without it.
+   */
+  signature?: string;
 }
 
 export interface DiarySection {

@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { verifyProvenance } from "../services/diaryProvenance";
 import { requireAuth, requireAtLeast, AuthenticatedRequest } from "../middleware/auth";
 import { createAuthToken } from "../utils/authToken";
 import {
@@ -72,8 +73,22 @@ const DiarySchema = z.object({
   fullReport: z.string().default(""),
   safetyChecklist: z.array(z.string()).default([]),
   sections: z.array(z.record(z.unknown())).default([]),
+  /**
+   * Signed provenance, exactly as /generate-diary returned it. Typed as unknown
+   * because the schema is not what makes it trustworthy — verifyProvenance is.
+   * Anything that fails verification is stored as NULL ("unknown"), never as
+   * the generator it claimed to be.
+   */
+  generation: z.unknown().optional(),
 });
 
+/**
+ * Note the absence of `generation`. Provenance describes what produced the
+ * original text and is never patchable: zod strips unknown keys, so a
+ * `generation` field in a PATCH body is discarded rather than honoured. If a
+ * diary's text is edited the provenance still describes who wrote the draft,
+ * which is what the edit_log is for. Guarded by a test.
+ */
 const DiaryPatchSchema = z.object({
   status: z.enum(["draft", "approved"]).optional(),
   summary: z.string().optional(),
@@ -203,7 +218,19 @@ projectsRouter.post("/projects/diaries", async (req, res) => {
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid diary payload.", details: parsed.error.flatten() });
   }
-  const diary = await createDiary(actor, parsed.data);
+  const { generation, ...diaryInput } = parsed.data;
+  // The client receives provenance from /generate-diary and saves the diary in
+  // a separate request, so an unverified `generation` would let any
+  // authenticated user stamp `generator: "openai"` onto template output. The
+  // HMAC is bound to companyId, so another tenant's valid record is refused too.
+  const verified = generation === undefined ? null : verifyProvenance(generation, actor.companyId);
+  if (generation !== undefined && verified === null) {
+    console.warn("[diary] rejected unverified provenance", {
+      companyId: actor.companyId,
+      siteId: diaryInput.siteId,
+    });
+  }
+  const diary = await createDiary(actor, { ...diaryInput, generation: verified });
   return res.status(201).json({ diary });
 });
 

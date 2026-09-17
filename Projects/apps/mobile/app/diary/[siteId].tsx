@@ -17,7 +17,8 @@ import { useData } from "@/lib/data-context";
 import { useAuth } from "@/lib/auth-context";
 import { apiRequest, BASE_URL } from "@/lib/query-client";
 import Colors from "@/constants/colors";
-import { DailyEntry, GeneratedDiary, DiarySection, DiaryEditLogEntry } from "@/lib/types";
+import { DailyEntry, GeneratedDiary, DiarySection, DiaryEditLogEntry, DiaryGeneration } from "@/lib/types";
+import { describeGeneration } from "@/lib/provenance";
 import { buildDiaryReportHtml, exportReportDocument, ReportExportFormat } from "@/lib/export-utils";
 import { BackButton } from "@/components/BackButton";
 
@@ -200,6 +201,12 @@ export default function DiaryPreviewScreen() {
       let payload = (await res.json()) as {
         success?: boolean;
         error?: string;
+        // Signed provenance from the API. Previously this response type didn't
+        // declare `warning` at all, so a report written by the template
+        // generator instead of the AI arrived looking identical to one the AI
+        // wrote — the downgrade was invisible to the user and to this code.
+        generation?: DiaryGeneration;
+        warning?: string;
         diary?: {
           summary?: string;
           fullReport?: string;
@@ -246,6 +253,10 @@ export default function DiaryPreviewScreen() {
         fullReport: payload.diary.fullReport || "",
         safetyChecklist: Array.isArray(payload.diary.safetyChecklist) ? payload.diary.safetyChecklist : [],
         sections: normalizedSections,
+        // Passed through to the save request, where the API verifies the
+        // signature before storing it. Unsigned or tampered provenance is
+        // stored as NULL ("unknown"), never as the generator it claimed.
+        generation: payload.generation ?? null,
       });
       setCurrentDiary(diary);
     } catch (err: unknown) {
@@ -347,6 +358,7 @@ export default function DiaryPreviewScreen() {
       `Report Period: ${resolvedPeriod.toUpperCase()}`,
       `Generated: ${new Date(currentDiary.generatedAt).toLocaleString("en-AU")}`,
       `Status: ${currentDiary.status.toUpperCase()}`,
+      `Generator: ${describeGeneration(currentDiary.generation).label}`,
       "",
       "EXECUTIVE SUMMARY",
       resolvedSummary,
@@ -509,6 +521,30 @@ export default function DiaryPreviewScreen() {
                 {new Date(currentDiary.generatedAt).toLocaleDateString("en-AU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}
               </Text>
             </View>
+
+            {/* Provenance banner. A banner rather than a toast on purpose: a
+                toast is gone before anyone reads the report, and "did AI write
+                this?" is a question asked of the document, not of the moment it
+                was generated. Rendered from the STORED provenance, so it is
+                still there when the report is reopened next month. */}
+            {(() => {
+              const p = describeGeneration(currentDiary.generation);
+              const tint =
+                p.tone === "ai" ? Colors.success : p.tone === "fallback" ? Colors.warning : Colors.textTertiary;
+              return (
+                <View style={[styles.provenanceBanner, { backgroundColor: tint + "14", borderLeftColor: tint }]}>
+                  <Ionicons
+                    name={p.tone === "ai" ? "sparkles" : p.tone === "fallback" ? "warning-outline" : "help-circle-outline"}
+                    size={16}
+                    color={tint}
+                  />
+                  <View style={styles.provenanceTextWrap}>
+                    <Text style={[styles.provenanceLabel, { color: tint }]}>{p.label}</Text>
+                    {p.detail ? <Text style={styles.provenanceDetail}>{p.detail}</Text> : null}
+                  </View>
+                </View>
+              );
+            })()}
 
             <View style={styles.summaryCard}>
               <View style={styles.summaryHeader}>
@@ -866,6 +902,18 @@ const styles = StyleSheet.create({
   statusTextDraft: { color: Colors.warning },
   statusTextApproved: { color: Colors.success },
   generatedDate: { fontSize: 11, fontFamily: "Inter_400Regular", color: Colors.textTertiary },
+  provenanceBanner: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 10,
+    borderLeftWidth: 3,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  provenanceTextWrap: { flex: 1, gap: 2 },
+  provenanceLabel: { fontSize: 12, fontFamily: "Inter_700Bold", letterSpacing: 0.3 },
+  provenanceDetail: { fontSize: 11, fontFamily: "Inter_400Regular", color: Colors.textSecondary, lineHeight: 15 },
   summaryCard: {
     backgroundColor: Colors.surface,
     borderRadius: 16,
