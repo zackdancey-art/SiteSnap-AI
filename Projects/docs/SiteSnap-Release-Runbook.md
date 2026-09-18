@@ -1,6 +1,6 @@
 # SiteSnap — Release Runbook
 
-Last updated: June 2026  
+Last updated: September 2026  
 Applies to: Expo SDK 54 / React Native (iOS + Android) + Express API
 
 ---
@@ -20,6 +20,17 @@ Expected state after the June 2026 engineering push:
 - `pnpm -r run typecheck` → clean
 - `pnpm audit` → 15 remaining (9 moderate / 6 high, all in dev tools or requiring major-version human decisions — see [dependency audit PR](https://github.com/zackdancey-art/SiteSap-AI/pulls) for details)
 - 4 AI unit tests failing on `main` (pre-existing; fixed in PR #1 pending merge)
+
+Then confirm the rate limiter is actually using Redis — configuring `REDIS_URL`
+and *using* Redis are two different facts, and the limiter falls back silently
+to process memory by design if it cannot connect:
+
+```bash
+curl -s https://api.getsitesnapai.com/api/health/ready | jq .rateLimiter
+# want: {"backend":"redis","state":"connected","degradedSince":null,"fallbackCount":0,...}
+# "backend":"memory" with "state":"degraded" means the connection failed and
+# counters are per-process — check lastError, do not ship on that assumption.
+```
 
 ---
 
@@ -45,6 +56,8 @@ Expected state after the June 2026 engineering push:
 | `CORS_ALLOWED_ORIGINS` | Comma-separated allowed origins | Yes in prod |
 | `UPLOAD_SIGNING_SECRET` | HMAC key for signed upload URLs | Yes |
 | `SENTRY_DSN` | Error tracking | Recommended |
+| `REDIS_URL` | Rate-limit counter store (Render Key Value). Without it, limits are per-process and reset on every deploy | Recommended — see §11 |
+| `RATE_LIMIT_*` | Per-limit thresholds and windows; all optional, defaults in `.env.example` | No |
 | `PORT` | HTTP port, default 4000 | No |
 
 ### Mobile (`apps/mobile`)
@@ -186,7 +199,49 @@ The following controls are active in production:
 
 ---
 
-## 11. Known deferred items (needs human decision)
+## 11. Rate limiting and the Key Value tier
+
+The limiter counts in Redis (Render Key Value) when `REDIS_URL` is set, and in
+process memory otherwise. The fallback is deliberate: on a login path,
+availability beats perfect counting, so an unreachable Redis degrades to
+in-memory counting rather than failing requests. It is not silent about it —
+it logs at error, raises one Sentry event on the transition, and reports state
+on `/health/ready`.
+
+**Current state: the Key Value instance is on the FREE tier, which has no disk
+persistence.** Render's docs are explicit that "data persistence is not
+available for free Key Value instances" (25 MB, 50 connections).
+
+What that means in practice, stated precisely because the halfway position is
+easy to misread in both directions:
+
+- **It is still an improvement over no Redis.** Counters now survive API
+  deploys and restarts, and are shared across API instances. Before this, every
+  deploy reset every limit.
+- **But the 24-hour caps are not true daily caps.** `RATE_LIMIT_OTP_SEND_PER_PHONE_DAILY`
+  and `RATE_LIMIT_FORGOT_PASSWORD_PER_IDENTIFIER_DAILY` exist to stop a real
+  person's phone being used as an SMS target over a day. On the free tier those
+  counters are lost whenever the Key Value instance restarts — Render
+  maintenance, a plan change, or any instance restart — and an attacker who
+  waits out a restart gets a fresh budget. The 15-minute burst caps are largely
+  unaffected, since a restart is unlikely to fall inside any given window.
+- **Eviction is a second, quieter reset path.** With `maxmemory-policy=allkeys-lru`
+  the instance drops the oldest keys under memory pressure instead of erroring.
+  At this workload — short counter strings, all with TTLs — 25 MB is far more
+  than needed, so this should not trigger in practice. It is listed because if
+  it ever does, it looks like nothing at all.
+- **50 connections is the free-tier ceiling.** Fine for a single API instance;
+  remember it before scaling out.
+
+**To close this:** upgrade to the `256mb` plan (256 MB, 250 connections),
+persistence set to journal + snapshot, `maxmemory-policy=allkeys-lru`. You are
+buying persistence and the connection limit, not the memory. Nothing in the
+application needs to change — the limiter code is identical on both tiers, so
+this is a dashboard change and a restart.
+
+---
+
+## 12. Known deferred items (needs human decision)
 
 | Item | Risk | Action required |
 |---|---|---|
@@ -194,6 +249,6 @@ The following controls are active in production:
 | `minimatch` / `picomatch` / `brace-expansion` in dev tools | Moderate CVEs in dev-only transitive deps | Upgrade `@typescript-eslint` to v7+ (breaking lint rules) |
 | `path-to-regexp` in express | CVE fixed in 0.1.13; now resolved automatically via express `~0.1.12` | Monitor; upgrade to express v5 when ready |
 | express v4 → v5 | breaking changes to router and middleware API | Scheduled for next major refactor |
-| Rate limiting: in-memory only | Resets on restart; not distributed | Add Redis-backed limiter for multi-instance |
+| Key Value instance is on the FREE tier | Free tier has no disk persistence, so the 24h SMS caps reset whenever the Key Value instance restarts — they are not true daily caps. See §12. | Upgrade to the `256mb` plan with journal+snapshot persistence before the SMS caps are relied on |
 | EAS projectId placeholder | OTA updates disabled until filled in | Run `eas init` and replace `FILL-AFTER-eas-init` |
 | Apple submission credentials | Placeholder Apple ID in eas.json | Fill `appleId`, `ascAppId`, `teamId` in eas.json |
