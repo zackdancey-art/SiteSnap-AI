@@ -9,6 +9,25 @@ import { resetRateLimitStoreForTests } from "../middleware/rateLimit";
 let server: http.Server;
 let baseUrl: string;
 
+/**
+ * A seed request whose response is CHECKED.
+ *
+ * An unchecked `await req(...)` used as setup is the quiet form of the failure
+ * this suite is meant to catch: if the seed starts failing, every assertion
+ * downstream of it tests nothing, and a "must be absent / must be 0" assertion
+ * will happily pass because the thing was never created in the first place.
+ * seed() fails loudly at the setup line instead. Use it for any request whose
+ * response you would otherwise discard.
+ */
+async function seed<T = unknown>(...args: Parameters<typeof req>): Promise<{ status: number; body: T }> {
+  const res = await req<T>(...args);
+  assert.ok(
+    res.status >= 200 && res.status < 300,
+    `seed request failed: ${args[0]} ${args[1]} -> ${res.status} ${JSON.stringify(res.body)}`
+  );
+  return res;
+}
+
 async function req<T = unknown>(
   method: string,
   path: string,
@@ -212,7 +231,15 @@ test("delete site removes associated entries", async () => {
   );
   const siteId = site.body.site.id;
 
-  await req("POST", "/projects/entries", { siteId, date: "2025-01-01", notes: "x", photos: [] }, token);
+  const seeded = await req<{ entry: { id: string } }>(
+    "POST", "/projects/entries", { siteId, date: "2025-01-01", notes: "x", photos: [] }, token
+  );
+  // Precondition, not decoration: the length-0 assertion at the end only means
+  // "the cascade deleted the entry" if an entry existed to delete. Unchecked,
+  // this test would keep passing if entry creation broke entirely.
+  assert.equal(seeded.status, 201, `entry seed failed: ${JSON.stringify(seeded.body)}`);
+  const before = await req<{ entries: unknown[] }>("GET", `/projects/entries?siteId=${siteId}`, undefined, token);
+  assert.equal(before.body.entries.length, 1, "entry must be listed BEFORE the delete");
 
   const del = await req<{ ok: boolean }>("DELETE", `/projects/sites/${siteId}`, undefined, token);
   assert.equal(del.status, 200);
@@ -225,7 +252,7 @@ test("pagination limit and offset work", async () => {
   const token = await createWorkerToken();
 
   for (let i = 0; i < 5; i++) {
-    await req(
+    await seed(
       "POST",
       "/projects/sites",
       { name: `Site ${i}`, address: "A", client: "C", startDate: "2025-01-01", status: "active" },

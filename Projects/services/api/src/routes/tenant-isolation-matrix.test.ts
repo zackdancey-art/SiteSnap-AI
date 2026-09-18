@@ -208,6 +208,17 @@ const MATRIX: MatrixEntry[] = [
       const tokenB = await registerUser("owner-b@sites.matrix.test", "Owner B", "Sites Co B");
       const siteAId = await createSiteAs(tokenA, "Matrix Site A");
 
+      // Positive control: prove the list endpoint returns rows at all. Without it
+      // an endpoint broken to return [] for EVERY caller would satisfy the negative
+      // assertion below and this row would pass while isolation went untested.
+      // (Not hypothetical: mutating listSites() to return [] left the whole matrix
+      //  green — see docs/VACUITY-AUDIT.md, mutation M6.)
+      const ownRes = await req<{ sites: { id: string }[] }>("GET", "/projects/sites", undefined, tokenA);
+      assert.equal(ownRes.status, 200);
+      assert.ok(
+        ownRes.body.sites.map((r) => r.id).includes(siteAId),
+        "positive control: Company A must see its OWN site in the list"
+      );
       const listRes = await req<{ sites: { id: string }[] }>("GET", "/projects/sites", undefined, tokenB);
       assert.equal(listRes.status, 200);
       assert.ok(!listRes.body.sites.map((s) => s.id).includes(siteAId), "Company B must not see Company A's site in the list");
@@ -232,6 +243,17 @@ const MATRIX: MatrixEntry[] = [
       assert.equal(entryRes.status, 201, `seed entry failed: ${JSON.stringify(entryRes.body)}`);
       const entryAId = entryRes.body.entry.id;
 
+      // Positive control: prove the list endpoint returns rows at all. Without it
+      // an endpoint broken to return [] for EVERY caller would satisfy the negative
+      // assertion below and this row would pass while isolation went untested.
+      // (Not hypothetical: mutating listSites() to return [] left the whole matrix
+      //  green — see docs/VACUITY-AUDIT.md, mutation M6.)
+      const ownRes = await req<{ entries: { id: string }[] }>("GET", "/projects/entries", undefined, tokenA);
+      assert.equal(ownRes.status, 200);
+      assert.ok(
+        ownRes.body.entries.map((r) => r.id).includes(entryAId),
+        "positive control: Company A must see its OWN entrie in the list"
+      );
       const listRes = await req<{ entries: { id: string }[] }>("GET", "/projects/entries", undefined, tokenB);
       assert.equal(listRes.status, 200);
       assert.ok(!listRes.body.entries.map((e) => e.id).includes(entryAId), "Company B must not see Company A's entry in the list");
@@ -256,6 +278,17 @@ const MATRIX: MatrixEntry[] = [
       assert.equal(diaryRes.status, 201, `seed diary failed: ${JSON.stringify(diaryRes.body)}`);
       const diaryAId = diaryRes.body.diary.id;
 
+      // Positive control: prove the list endpoint returns rows at all. Without it
+      // an endpoint broken to return [] for EVERY caller would satisfy the negative
+      // assertion below and this row would pass while isolation went untested.
+      // (Not hypothetical: mutating listSites() to return [] left the whole matrix
+      //  green — see docs/VACUITY-AUDIT.md, mutation M6.)
+      const ownRes = await req<{ diaries: { id: string }[] }>("GET", "/projects/diaries", undefined, tokenA);
+      assert.equal(ownRes.status, 200);
+      assert.ok(
+        ownRes.body.diaries.map((r) => r.id).includes(diaryAId),
+        "positive control: Company A must see its OWN diarie in the list"
+      );
       const listRes = await req<{ diaries: { id: string }[] }>("GET", "/projects/diaries", undefined, tokenB);
       assert.equal(listRes.status, 200);
       assert.ok(!listRes.body.diaries.map((d) => d.id).includes(diaryAId), "Company B must not see Company A's diary in the list");
@@ -280,6 +313,17 @@ const MATRIX: MatrixEntry[] = [
       assert.equal(tplRes.status, 201, `seed site-template failed: ${JSON.stringify(tplRes.body)}`);
       const tplAId = tplRes.body.template.id;
 
+      // Positive control: prove the list endpoint returns rows at all. Without it
+      // an endpoint broken to return [] for EVERY caller would satisfy the negative
+      // assertion below and this row would pass while isolation went untested.
+      // (Not hypothetical: mutating listSites() to return [] left the whole matrix
+      //  green — see docs/VACUITY-AUDIT.md, mutation M6.)
+      const ownRes = await req<{ templates: { id: string }[] }>("GET", "/projects/templates", undefined, tokenA);
+      assert.equal(ownRes.status, 200);
+      assert.ok(
+        ownRes.body.templates.map((r) => r.id).includes(tplAId),
+        "positive control: Company A must see its OWN template in the list"
+      );
       const listRes = await req<{ templates: { id: string }[] }>("GET", "/projects/templates", undefined, tokenB);
       assert.equal(listRes.status, 200);
       assert.ok(!listRes.body.templates.map((t) => t.id).includes(tplAId), "Company B must not see Company A's site-template in the list");
@@ -303,6 +347,17 @@ const MATRIX: MatrixEntry[] = [
       assert.equal(tplRes.status, 201, `seed entry-template failed: ${JSON.stringify(tplRes.body)}`);
       const tplAId = tplRes.body.template.id;
 
+      // Positive control: prove the list endpoint returns rows at all. Without it
+      // an endpoint broken to return [] for EVERY caller would satisfy the negative
+      // assertion below and this row would pass while isolation went untested.
+      // (Not hypothetical: mutating listSites() to return [] left the whole matrix
+      //  green — see docs/VACUITY-AUDIT.md, mutation M6.)
+      const ownRes = await req<{ templates: { id: string }[] }>("GET", "/entry-templates", undefined, tokenA);
+      assert.equal(ownRes.status, 200);
+      assert.ok(
+        ownRes.body.templates.map((r) => r.id).includes(tplAId),
+        "positive control: Company A must see its OWN template in the list"
+      );
       const listRes = await req<{ templates: { id: string }[] }>("GET", "/entry-templates", undefined, tokenB);
       assert.equal(listRes.status, 200);
       assert.ok(!listRes.body.templates.map((t) => t.id).includes(tplAId), "Company B must not see Company A's entry-template in the list");
@@ -327,6 +382,17 @@ const MATRIX: MatrixEntry[] = [
       assert.equal(incRes.status, 201, `seed incident failed: ${JSON.stringify(incRes.body)}`);
       const incAId = incRes.body.incident.id;
 
+      // Positive control: prove the list endpoint returns rows at all. Without it
+      // an endpoint broken to return [] for EVERY caller would satisfy the negative
+      // assertion below and this row would pass while isolation went untested.
+      // (Not hypothetical: mutating listSites() to return [] left the whole matrix
+      //  green — see docs/VACUITY-AUDIT.md, mutation M6.)
+      const ownRes = await req<{ incidents: { id: string }[] }>("GET", "/incidents", undefined, tokenA);
+      assert.equal(ownRes.status, 200);
+      assert.ok(
+        ownRes.body.incidents.map((r) => r.id).includes(incAId),
+        "positive control: Company A must see its OWN incident in the list"
+      );
       const listRes = await req<{ incidents: { id: string }[] }>("GET", "/incidents", undefined, tokenB);
       assert.equal(listRes.status, 200);
       assert.ok(!listRes.body.incidents.map((i) => i.id).includes(incAId), "Company B must not see Company A's incident in the list");
@@ -351,6 +417,17 @@ const MATRIX: MatrixEntry[] = [
       assert.equal(delivRes.status, 201, `seed delivery failed: ${JSON.stringify(delivRes.body)}`);
       const delivAId = delivRes.body.delivery.id;
 
+      // Positive control: prove the list endpoint returns rows at all. Without it
+      // an endpoint broken to return [] for EVERY caller would satisfy the negative
+      // assertion below and this row would pass while isolation went untested.
+      // (Not hypothetical: mutating listSites() to return [] left the whole matrix
+      //  green — see docs/VACUITY-AUDIT.md, mutation M6.)
+      const ownRes = await req<{ deliveries: { id: string }[] }>("GET", "/deliveries", undefined, tokenA);
+      assert.equal(ownRes.status, 200);
+      assert.ok(
+        ownRes.body.deliveries.map((r) => r.id).includes(delivAId),
+        "positive control: Company A must see its OWN deliverie in the list"
+      );
       const listRes = await req<{ deliveries: { id: string }[] }>("GET", "/deliveries", undefined, tokenB);
       assert.equal(listRes.status, 200);
       assert.ok(!listRes.body.deliveries.map((d) => d.id).includes(delivAId), "Company B must not see Company A's delivery in the list");
@@ -375,6 +452,17 @@ const MATRIX: MatrixEntry[] = [
       assert.equal(inspRes.status, 201, `seed inspection failed: ${JSON.stringify(inspRes.body)}`);
       const inspAId = inspRes.body.inspection.id;
 
+      // Positive control: prove the list endpoint returns rows at all. Without it
+      // an endpoint broken to return [] for EVERY caller would satisfy the negative
+      // assertion below and this row would pass while isolation went untested.
+      // (Not hypothetical: mutating listSites() to return [] left the whole matrix
+      //  green — see docs/VACUITY-AUDIT.md, mutation M6.)
+      const ownRes = await req<{ inspections: { id: string }[] }>("GET", "/inspections", undefined, tokenA);
+      assert.equal(ownRes.status, 200);
+      assert.ok(
+        ownRes.body.inspections.map((r) => r.id).includes(inspAId),
+        "positive control: Company A must see its OWN inspection in the list"
+      );
       const listRes = await req<{ inspections: { id: string }[] }>("GET", "/inspections", undefined, tokenB);
       assert.equal(listRes.status, 200);
       assert.ok(!listRes.body.inspections.map((i) => i.id).includes(inspAId), "Company B must not see Company A's inspection in the list");
@@ -398,6 +486,17 @@ const MATRIX: MatrixEntry[] = [
       assert.equal(tplRes.status, 201, `seed inspection-template failed: ${JSON.stringify(tplRes.body)}`);
       const tplAId = tplRes.body.template.id;
 
+      // Positive control: prove the list endpoint returns rows at all. Without it
+      // an endpoint broken to return [] for EVERY caller would satisfy the negative
+      // assertion below and this row would pass while isolation went untested.
+      // (Not hypothetical: mutating listSites() to return [] left the whole matrix
+      //  green — see docs/VACUITY-AUDIT.md, mutation M6.)
+      const ownRes = await req<{ templates: { id: string }[] }>("GET", "/inspection-templates", undefined, tokenA);
+      assert.equal(ownRes.status, 200);
+      assert.ok(
+        ownRes.body.templates.map((r) => r.id).includes(tplAId),
+        "positive control: Company A must see its OWN template in the list"
+      );
       const listRes = await req<{ templates: { id: string }[] }>("GET", "/inspection-templates", undefined, tokenB);
       assert.equal(listRes.status, 200);
       assert.ok(!listRes.body.templates.map((t) => t.id).includes(tplAId), "Company B must not see Company A's inspection-template in the list");
@@ -422,6 +521,17 @@ const MATRIX: MatrixEntry[] = [
       assert.equal(tcRes.status, 201, `seed timecard failed: ${JSON.stringify(tcRes.body)}`);
       const tcAId = tcRes.body.timecard.id;
 
+      // Positive control: prove the list endpoint returns rows at all. Without it
+      // an endpoint broken to return [] for EVERY caller would satisfy the negative
+      // assertion below and this row would pass while isolation went untested.
+      // (Not hypothetical: mutating listSites() to return [] left the whole matrix
+      //  green — see docs/VACUITY-AUDIT.md, mutation M6.)
+      const ownRes = await req<{ timecards: { id: string }[] }>("GET", "/crew/timecards", undefined, tokenA);
+      assert.equal(ownRes.status, 200);
+      assert.ok(
+        ownRes.body.timecards.map((r) => r.id).includes(tcAId),
+        "positive control: Company A must see its OWN timecard in the list"
+      );
       const listRes = await req<{ timecards: { id: string }[] }>("GET", "/crew/timecards", undefined, tokenB);
       assert.equal(listRes.status, 200);
       assert.ok(!listRes.body.timecards.map((t) => t.id).includes(tcAId), "Company B must not see Company A's timecard in the list");
@@ -547,6 +657,21 @@ test(
     assert.ok(
       bForgedFetch === 404 || bForgedFetch === 401,
       `Company B must STILL be denied after forging a referencing entry, got ${bForgedFetch}`
+    );
+
+    // Positive control for the assertion below: signing must actually WORK for
+    // the rightful owner. Without this, a /uploads/sign broken to return
+    // url:null for every caller would satisfy B's null-check and this test
+    // would pass while the feature was entirely dead. (Not hypothetical:
+    // mutating the ownership check to deny everyone left all 126 tests green —
+    // see docs/VACUITY-AUDIT.md, mutation M7.)
+    const aSign = await req<{ signed: { url: string | null }[] }>(
+      "POST", "/uploads/sign", { paths: [uploaded.url] }, tokenA
+    );
+    assert.equal(aSign.status, 200);
+    assert.ok(
+      typeof aSign.body.signed[0].url === "string" && aSign.body.signed[0].url.includes("sig="),
+      `Company A must receive a signed URL for its OWN file, got ${JSON.stringify(aSign.body.signed[0])}`
     );
 
     // Company B cannot mint a signed URL for A's file, even after the forgery.

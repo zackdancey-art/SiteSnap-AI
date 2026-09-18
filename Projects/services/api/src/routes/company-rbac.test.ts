@@ -22,6 +22,25 @@ import { resetRateLimitStoreForTests } from "../middleware/rateLimit";
 let server: http.Server;
 let baseUrl: string;
 
+/**
+ * A seed request whose response is CHECKED.
+ *
+ * An unchecked `await req(...)` used as setup is the quiet form of the failure
+ * this suite is meant to catch: if the seed starts failing, every assertion
+ * downstream of it tests nothing, and a "must be absent / must be 0" assertion
+ * will happily pass because the thing was never created in the first place.
+ * seed() fails loudly at the setup line instead. Use it for any request whose
+ * response you would otherwise discard.
+ */
+async function seed<T = unknown>(...args: Parameters<typeof req>): Promise<{ status: number; body: T }> {
+  const res = await req<T>(...args);
+  assert.ok(
+    res.status >= 200 && res.status < 300,
+    `seed request failed: ${args[0]} ${args[1]} -> ${res.status} ${JSON.stringify(res.body)}`
+  );
+  return res;
+}
+
 async function req<T = unknown>(
   method: string,
   path: string,
@@ -270,7 +289,7 @@ test("6b: Accepting invite when already in a different company is rejected", asy
 
   // User registers and accepts Company A invite
   const dualToken = await registerUser("dual@co.test", "Dual User");
-  await req("POST", "/projects/invites/accept", { token: invARes.body.results[0]?.token }, dualToken);
+  await seed("POST", "/projects/invites/accept", { token: invARes.body.results[0]?.token }, dualToken);
 
   // Attempting to accept Company B invite should be rejected
   const rejectRes = await req<{ status?: string; error?: string }>(

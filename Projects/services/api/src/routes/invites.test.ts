@@ -15,6 +15,25 @@ import type { Actor } from "../storage/actor";
 let server: http.Server;
 let baseUrl: string;
 
+/**
+ * A seed request whose response is CHECKED.
+ *
+ * An unchecked `await req(...)` used as setup is the quiet form of the failure
+ * this suite is meant to catch: if the seed starts failing, every assertion
+ * downstream of it tests nothing, and a "must be absent / must be 0" assertion
+ * will happily pass because the thing was never created in the first place.
+ * seed() fails loudly at the setup line instead. Use it for any request whose
+ * response you would otherwise discard.
+ */
+async function seed<T = unknown>(...args: Parameters<typeof req>): Promise<{ status: number; body: T }> {
+  const res = await req<T>(...args);
+  assert.ok(
+    res.status >= 200 && res.status < 300,
+    `seed request failed: ${args[0]} ${args[1]} -> ${res.status} ${JSON.stringify(res.body)}`
+  );
+  return res;
+}
+
 async function req<T = unknown>(
   method: string,
   path: string,
@@ -150,7 +169,7 @@ test("accepted invite registers user as member; token cannot be reused", async (
   const siteId = await createSite(supToken, "Invite Site");
 
   // Send invite
-  await req(
+  await seed(
     "POST", `/projects/sites/${siteId}/invites`,
     { emails: ["joiner@example.com"], role: "crew" },
     supToken
@@ -208,7 +227,7 @@ test("wrong-user token is rejected", async () => {
   const supToken = await registerAndLogin("supervisor@example.com", "+447911000010", "Supervisor");
   const siteId = await createSite(supToken);
 
-  await req("POST", `/projects/sites/${siteId}/invites`,
+  await seed("POST", `/projects/sites/${siteId}/invites`,
     { emails: ["target@example.com"], role: "crew" }, supToken);
 
   const listR = await req<{ invites: Array<{ token: string }> }>(
@@ -238,7 +257,7 @@ test("invited member sees the site in their sites list", async () => {
   const supToken = await registerAndLogin("supervisor@example.com", "+447911000010", "Supervisor");
   const siteId = await createSite(supToken, "Member Site");
 
-  await req("POST", `/projects/sites/${siteId}/invites`,
+  await seed("POST", `/projects/sites/${siteId}/invites`,
     { emails: ["member@example.com"], role: "crew" }, supToken);
 
   const listR = await req<{ invites: Array<{ token: string }> }>(
@@ -247,7 +266,7 @@ test("invited member sees the site in their sites list", async () => {
   const token = listR.body.invites[0].token;
 
   const memberToken = await registerAndLogin("member@example.com", "+447911000070", "Member");
-  await req("POST", "/projects/invites/accept", { token }, memberToken);
+  await seed("POST", "/projects/invites/accept", { token }, memberToken);
 
   const sitesR = await req<{ sites: Array<{ id: string; name: string }> }>(
     "GET", "/projects/sites", undefined, memberToken
@@ -261,7 +280,7 @@ test("supervisor can revoke an invite", async () => {
   const supToken = await registerAndLogin("supervisor@example.com", "+447911000010", "Supervisor");
   const siteId = await createSite(supToken);
 
-  await req("POST", `/projects/sites/${siteId}/invites`,
+  await seed("POST", `/projects/sites/${siteId}/invites`,
     { emails: ["revoked@example.com"], role: "crew" }, supToken);
 
   const listR = await req<{ invites: Array<{ id: string; token: string }> }>(
@@ -287,13 +306,13 @@ test("already_member status returned for existing member", async () => {
   const siteId = await createSite(supToken);
 
   // Invite and accept once
-  await req("POST", `/projects/sites/${siteId}/invites`,
+  await seed("POST", `/projects/sites/${siteId}/invites`,
     { emails: ["repeat@example.com"], role: "crew" }, supToken);
   const listR = await req<{ invites: Array<{ token: string }> }>(
     "GET", `/projects/sites/${siteId}/invites`, undefined, supToken
   );
   const memberToken = await registerAndLogin("repeat@example.com", "+447911000090", "Repeat");
-  await req("POST", "/projects/invites/accept", { token: listR.body.invites[0].token }, memberToken);
+  await seed("POST", "/projects/invites/accept", { token: listR.body.invites[0].token }, memberToken);
 
   // Invite again → should return already_member
   const r2 = await req<{ results: Array<{ email: string; status: string }> }>(
@@ -309,13 +328,13 @@ test("supervisor can remove a member", async () => {
   const supToken = await registerAndLogin("supervisor@example.com", "+447911000010", "Supervisor");
   const siteId = await createSite(supToken);
 
-  await req("POST", `/projects/sites/${siteId}/invites`,
+  await seed("POST", `/projects/sites/${siteId}/invites`,
     { emails: ["leaveme@example.com"], role: "crew" }, supToken);
   const listR = await req<{ invites: Array<{ token: string }> }>(
     "GET", `/projects/sites/${siteId}/invites`, undefined, supToken
   );
   const memberToken = await registerAndLogin("leaveme@example.com", "+447911000095", "Leave");
-  await req("POST", "/projects/invites/accept", { token: listR.body.invites[0].token }, memberToken);
+  await seed("POST", "/projects/invites/accept", { token: listR.body.invites[0].token }, memberToken);
 
   const removeR = await req(
     "DELETE", `/projects/sites/${siteId}/members/leaveme@example.com`,
@@ -482,7 +501,7 @@ test("ceiling: manager inviting 'crew' via site invite succeeds (201)", async ()
   const ownerToken = await registerAndLogin("ceil-owner2@example.com", "+447911002010", "CeilOwner2");
   const siteId = await createSite(ownerToken, "Ceiling Site 2");
 
-  await req("POST", `/projects/sites/${siteId}/invites`,
+  await seed("POST", `/projects/sites/${siteId}/invites`,
     { emails: ["ceil-mgr2@example.com"], role: "manager" }, ownerToken);
   const accepted = await acceptSiteInviteFor(
     ownerToken, siteId, "ceil-mgr2@example.com", "+447911002011", "CeilMgr2"
@@ -502,7 +521,7 @@ test("ceiling (headline): manager inviting 'manager' via site invite is rejected
   const ownerToken = await registerAndLogin("ceil-owner3@example.com", "+447911002020", "CeilOwner3");
   const siteId = await createSite(ownerToken, "Ceiling Site 3");
 
-  await req("POST", `/projects/sites/${siteId}/invites`,
+  await seed("POST", `/projects/sites/${siteId}/invites`,
     { emails: ["ceil-mgr3@example.com"], role: "manager" }, ownerToken);
   const accepted = await acceptSiteInviteFor(
     ownerToken, siteId, "ceil-mgr3@example.com", "+447911002021", "CeilMgr3"
@@ -526,7 +545,7 @@ test("ceiling: manager inviting 'viewer' via site invite is rejected 403", async
   const ownerToken = await registerAndLogin("ceil-owner4@example.com", "+447911002030", "CeilOwner4");
   const siteId = await createSite(ownerToken, "Ceiling Site 4");
 
-  await req("POST", `/projects/sites/${siteId}/invites`,
+  await seed("POST", `/projects/sites/${siteId}/invites`,
     { emails: ["ceil-mgr4@example.com"], role: "manager" }, ownerToken);
   const accepted = await acceptSiteInviteFor(
     ownerToken, siteId, "ceil-mgr4@example.com", "+447911002031", "CeilMgr4"
@@ -570,7 +589,7 @@ test("ceiling: company-member invite remains owner-only (manager 403, owner 201)
   const ownerToken = await registerAndLogin("ceil-owner6@example.com", "+447911002050", "CeilOwner6");
   const siteId = await createSite(ownerToken, "Ceiling Site 6");
 
-  await req("POST", `/projects/sites/${siteId}/invites`,
+  await seed("POST", `/projects/sites/${siteId}/invites`,
     { emails: ["ceil-mgr6@example.com"], role: "manager" }, ownerToken);
   const accepted = await acceptSiteInviteFor(
     ownerToken, siteId, "ceil-mgr6@example.com", "+447911002051", "CeilMgr6"
@@ -600,7 +619,7 @@ test("ceiling: server-side enforcement — a rejected manager→manager site inv
   const ownerToken = await registerAndLogin("ceil-owner7@example.com", "+447911002060", "CeilOwner7");
   const siteId = await createSite(ownerToken, "Ceiling Site 7");
 
-  await req("POST", `/projects/sites/${siteId}/invites`,
+  await seed("POST", `/projects/sites/${siteId}/invites`,
     { emails: ["ceil-mgr7@example.com"], role: "manager" }, ownerToken);
   const accepted = await acceptSiteInviteFor(
     ownerToken, siteId, "ceil-mgr7@example.com", "+447911002061", "CeilMgr7"

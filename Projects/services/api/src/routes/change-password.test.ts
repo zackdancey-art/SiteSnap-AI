@@ -21,6 +21,25 @@ import { resetRateLimitStoreForTests } from "../middleware/rateLimit";
 let server: http.Server;
 let baseUrl: string;
 
+/**
+ * A seed request whose response is CHECKED.
+ *
+ * An unchecked `await req(...)` used as setup is the quiet form of the failure
+ * this suite is meant to catch: if the seed starts failing, every assertion
+ * downstream of it tests nothing, and a "must be absent / must be 0" assertion
+ * will happily pass because the thing was never created in the first place.
+ * seed() fails loudly at the setup line instead. Use it for any request whose
+ * response you would otherwise discard.
+ */
+async function seed<T = unknown>(...args: Parameters<typeof req>): Promise<{ status: number; body: T }> {
+  const res = await req<T>(...args);
+  assert.ok(
+    res.status >= 200 && res.status < 300,
+    `seed request failed: ${args[0]} ${args[1]} -> ${res.status} ${JSON.stringify(res.body)}`
+  );
+  return res;
+}
+
 async function req<T = unknown>(
   method: string,
   path: string,
@@ -148,7 +167,7 @@ test("change-password: successful change returns ok:true", async () => {
 
 test("change-password: old password no longer works for login after change", async () => {
   const token = await registerAndLogin("user@test.test", "OldPassword1!");
-  await req("POST", "/auth/change-password",
+  await seed("POST", "/auth/change-password",
     { currentPassword: "OldPassword1!", newPassword: "NewPassword2!" }, token);
 
   const loginRes = await req<{ error?: string }>(
@@ -159,7 +178,7 @@ test("change-password: old password no longer works for login after change", asy
 
 test("change-password: new password works for login after change", async () => {
   const token = await registerAndLogin("user@test.test", "OldPassword1!");
-  await req("POST", "/auth/change-password",
+  await seed("POST", "/auth/change-password",
     { currentPassword: "OldPassword1!", newPassword: "NewPassword2!" }, token);
 
   const loginRes = await req<{ token?: string }>(
