@@ -7,6 +7,10 @@
     "outDir": "dist",
     "rootDir": "src",
     "composite": true,
+    // Stack traces and any tooling that maps compiled output back to source
+    // (debuggers, coverage, mutation testing) are otherwise reporting line
+    // numbers in dist/ that do not correspond to anything a person edits.
+    "sourceMap": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
