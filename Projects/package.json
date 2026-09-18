@@ -17,7 +17,7 @@
     "kill:4000": "lsof -t -iTCP:4000 -sTCP:LISTEN | xargs kill -9 || true",
     "dev": "pnpm run dev:api",
     "typecheck": "pnpm -r run typecheck",
-    "test": "pnpm -r --if-present run test",
+    "test": "./scripts/assert-test-packages.sh && pnpm -r --if-present run test",
     "ci": "pnpm run lint && pnpm run typecheck && pnpm run test",
     "lint": "eslint \"{apps,services,shared}/**/*.{ts,tsx,js,jsx}\" --ext .ts,.tsx,.js --ignore-path .eslintignore",
     "lint:fix": "eslint \"{apps,services,shared}/**/*.{ts,tsx,js,jsx}\" --ext .ts,.tsx,.js --ignore-path .eslintignore --fix",

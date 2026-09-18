@@ -8,8 +8,8 @@
     "build": "tsc -p tsconfig.json",
     "start": "node ./dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "rm -rf dist tsconfig.tsbuildinfo && pnpm run build && NODE_ENV=test node --require ./dist/test-setup.js --test $(find dist -name '*.test.js')",
-    "test:db": "pnpm run build && NODE_ENV=test node --require ./dist/test-setup.js --test-concurrency=1 --test $(grep -rl '!process.env.TEST_DATABASE_URL' dist --include='*.test.js')",
+    "test": "rm -rf dist tsconfig.tsbuildinfo && pnpm run build && ./scripts/run-tests.sh memory",
+    "test:db": "pnpm run build && ./scripts/run-tests.sh db",
     "load-test": "NODE_ENV=test RATE_LIMIT_DISABLE=1 ts-node-dev --transpile-only --exit-child load-test.ts",
     "teardown-loadtest": "ts-node-dev --transpile-only --exit-child teardown-loadtest.ts"
   },
