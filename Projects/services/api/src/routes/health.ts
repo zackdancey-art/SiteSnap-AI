@@ -4,6 +4,7 @@ import path from "path";
 import { Sentry } from "../instrument";
 import { requireAuth } from "../middleware/auth";
 import { getPgPool } from "../storage/postgres";
+import { getRateLimiterStatus } from "../middleware/rateLimit";
 
 export const healthRouter: Router = Router();
 
@@ -41,10 +42,20 @@ healthRouter.get("/health/client-ip", requireAuth, (req, res) => {
 // where migrations silently didn't run (registration failing on a missing
 // column) — a plain liveness check stays green through that.
 healthRouter.get("/health/ready", async (_req, res) => {
+  // Rate limiter backend. Reported on every branch below, including the failure
+  // ones, because a degraded limiter is exactly the condition you want visible
+  // while something else is also wrong.
+  //
+  // Deliberately NOT part of the ready/not-ready decision: losing Redis costs
+  // accuracy in counting, not the ability to serve, and 503-ing here would pull
+  // the service out of rotation over a limiter fault. It is surfaced so it gets
+  // noticed on a dashboard rather than on a bill.
+  const rateLimiter = getRateLimiterStatus();
+
   const usingDb = Boolean(process.env.DATABASE_URL && process.env.DATABASE_URL.trim());
   if (!usingDb) {
     // Dev / in-memory mode: no DB to verify; the app is serviceable.
-    return res.json({ status: "ready", database: "in-memory" });
+    return res.json({ status: "ready", database: "in-memory", rateLimiter });
   }
   try {
     await getPgPool().query("SELECT 1");
@@ -68,14 +79,16 @@ healthRouter.get("/health/ready", async (_req, res) => {
         status: "not ready",
         database: "connected",
         migrations: { applied, expected, message: "migrations not fully applied" },
+        rateLimiter,
       });
     }
-    return res.json({ status: "ready", database: "connected", migrations: { applied, expected } });
+    return res.json({ status: "ready", database: "connected", migrations: { applied, expected }, rateLimiter });
   } catch (err) {
     return res.status(503).json({
       status: "not ready",
       database: "unreachable",
       error: err instanceof Error ? err.message : String(err),
+      rateLimiter,
     });
   }
 });

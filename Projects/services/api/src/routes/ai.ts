@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { requireAuth, AuthenticatedRequest } from "../middleware/auth";
-import { rateLimit } from "../middleware/rateLimit";
+import { rateLimitByCompany, LIMITS } from "../middleware/rateLimit";
 import { getMediaStorage } from "../storage/mediaStorage";
 import { listEntries, listSites } from "../storage/projectsStore";
 import { uploadBelongsToActorCompany } from "../storage/uploadsStore";
@@ -671,7 +671,14 @@ function logGeneration(
   });
 }
 
-aiRouter.post("/generate-diary", requireAuth, rateLimit("generate-diary", 10, 60 * 60 * 1000), async (req, res) => {
+// Keyed on the authenticated actor's COMPANY, not their IP. Keyed on IP this
+// was wrong in both directions: a whole crew behind one site router shared a
+// single budget, while an attacker with an account and a few proxies had no
+// effective limit at all on an endpoint that spends OpenAI credit. The spend
+// is authenticated, so the payer is known — charge them. The threshold is
+// env-overridable (RATE_LIMIT_GENERATE_DIARY_PER_COMPANY) and sized so no
+// legitimate crew meets it; the prepaid OpenAI balance is the real ceiling.
+aiRouter.post("/generate-diary", requireAuth, rateLimitByCompany("generate-diary", LIMITS.generateDiaryPerCompany.max, LIMITS.generateDiaryPerCompany.windowMs), async (req, res) => {
   const parsed = GenerateDiaryBodySchema.safeParse(req.body ?? {});
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid request payload.", details: parsed.error.flatten() });

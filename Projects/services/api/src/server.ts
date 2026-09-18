@@ -12,6 +12,7 @@ import { isProductionMediaStorageReady } from "./storage/mediaStorage";
 import { initProjectSchema } from "./storage/projectsStore";
 import { runMigrations } from "./storage/migrate";
 import { readIntEnv } from "./utils/env";
+import { logRateLimiterBackendAtBoot } from "./middleware/rateLimit";
 
 dotenv.config();
 
@@ -190,6 +191,10 @@ export function createApp(): express.Express {
 
 export async function bootstrap() {
   validateProviderConfig();
+  // Say which rate-limit backend this process is actually using. Without this,
+  // "we turned Redis on" and "Redis is being used" are two different facts and
+  // nothing distinguishes them until something is abused.
+  logRateLimiterBackendAtBoot();
   await runMigrations();
   await initAuthSchema();
   await initProjectSchema();
