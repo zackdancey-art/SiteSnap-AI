@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { readIntEnv } from "./env";
 
 export type UserRole = "worker" | "supervisor" | "admin";
 export type CompanyRole = "owner" | "manager" | "viewer" | "crew";
@@ -14,7 +15,9 @@ export type AuthClaims = {
   exp: number;
 };
 
-const TOKEN_TTL_SECONDS = Number(process.env.AUTH_TOKEN_TTL_SECONDS ?? 60 * 60 * 24 * 7);
+// A TTL of 0 would mint tokens that are already expired; min 1 makes that a
+// boot failure rather than a fleet-wide logout.
+const TOKEN_TTL_SECONDS = readIntEnv("AUTH_TOKEN_TTL_SECONDS", 60 * 60 * 24 * 7, { min: 1 });
 
 export const ELEVATED_ROLES: UserRole[] = ["supervisor", "admin"];
 

@@ -11,6 +11,7 @@ import { initAuthSchema } from "./storage/authStore";
 import { isProductionMediaStorageReady } from "./storage/mediaStorage";
 import { initProjectSchema } from "./storage/projectsStore";
 import { runMigrations } from "./storage/migrate";
+import { readIntEnv } from "./utils/env";
 
 dotenv.config();
 
@@ -115,18 +116,10 @@ const allowedOrigins = String(process.env.CORS_ALLOWED_ORIGINS ?? "")
  * Confirm with `GET /api/health/client-ip` (authenticated) after any change to
  * the hosting or domain setup; do not re-derive it from memory.
  */
-const TRUST_PROXY_HOPS = (() => {
-  const raw = process.env.TRUST_PROXY_HOPS;
-  if (raw === undefined || raw.trim() === "") return 2;
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed < 0) {
-    throw new Error(
-      `TRUST_PROXY_HOPS must be a non-negative integer (got ${JSON.stringify(raw)}). ` +
-        "It is the number of proxies in front of the API; see server.ts for how to measure it."
-    );
-  }
-  return parsed;
-})();
+const TRUST_PROXY_HOPS = readIntEnv("TRUST_PROXY_HOPS", 2, {
+  min: 0,
+  hint: "It is the number of proxies in front of the API; see the comment above for how to measure it.",
+});
 
 export function createApp(): express.Express {
   const app = express();
