@@ -31,7 +31,14 @@ import {
 } from "../services/notificationService";
 import { requireAuth, AuthenticatedRequest } from "../middleware/auth";
 import { createAuthToken } from "../utils/authToken";
-import { isRateLimitedByIp, isRateLimitedByAccount, LIMITS } from "../middleware/rateLimit";
+import { isDisposableEmailDomain } from "../utils/disposableDomains";
+import {
+  isRateLimitedByIp,
+  isRateLimitedByAccount,
+  isRateLimitedByPhone,
+  isRateLimitedByKey,
+  LIMITS,
+} from "../middleware/rateLimit";
 import { hashPassword, verifyPassword } from "../utils/password";
 import { readIntEnv } from "../utils/env";
 
@@ -127,6 +134,16 @@ async function initiateRegistration(req: Request, res: Response) {
   if (!isValidEmail(email)) {
     return res.status(400).json({ error: "Please enter a valid email address." });
   }
+  // Throwaway mailboxes are the cheap half of the SMS-bombing route: the flow
+  // costs an attacker one deliverable inbox per phone number they want to hit,
+  // and a disposable provider makes that free and automatable. Refused here, as
+  // a validation, so no quota and no pending row is spent on it. Bundled static
+  // list — deliberately no network lookup in the signup path.
+  if (isDisposableEmailDomain(email)) {
+    return res.status(400).json({
+      error: "Please use a permanent email address. Disposable email providers are not accepted.",
+    });
+  }
   if (phone.replace(/\D/g, "").length < 8) {
     return res.status(400).json({ error: "Please enter a valid phone number with country code." });
   }
@@ -143,6 +160,26 @@ async function initiateRegistration(req: Request, res: Response) {
   }
   if (await isRateLimitedByIp(req, "otp-send", LIMITS.otpSendPerIp.max, LIMITS.otpSendPerIp.windowMs)) {
     return res.status(429).json({ error: "Too many verification requests from this network. Please try again shortly." });
+  }
+
+  // PHONE-KEYED CAP, part 1 of 2: peek, do not consume.
+  //
+  // Stage 1 sends an EMAIL. The SMS — the thing that costs money and lands on a
+  // stranger's handset — is dispatched at /auth/register/verify-email, and that
+  // is where this counter is incremented. Checking here as well turns an
+  // exhausted phone away before a pending row exists, without an abandoned
+  // signup that never sent anything eating the victim's own budget.
+  //
+  // Every other OTP limit above keys on the email, which the attacker picks.
+  // Cycling throwaway mailboxes against one real number therefore bought
+  // unbounded SMS to a person who never signed up. `phone` is already
+  // normalized (normalizePhone runs before validation), so formatting variants
+  // share one counter.
+  if (
+    (await isRateLimitedByPhone(phone, "otp-send", LIMITS.otpSendPerPhone.max, LIMITS.otpSendPerPhone.windowMs, { peek: true })) ||
+    (await isRateLimitedByPhone(phone, "otp-send-daily", LIMITS.otpSendPerPhoneDaily.max, LIMITS.otpSendPerPhoneDaily.windowMs, { peek: true }))
+  ) {
+    return res.status(429).json({ error: "Too many verification codes requested for this phone number. Please try again later." });
   }
 
   try {
@@ -259,6 +296,21 @@ router.post("/auth/register/verify-email", async (req, res) => {
     const smsChannel = isChannelConfigured("sms");
     if (isProd && !smsChannel.ok) {
       return res.status(500).json({ error: smsChannel.reason });
+    }
+
+    // PHONE-KEYED CAP, part 2 of 2: consume the budget HERE, where the SMS is
+    // actually spent. This is the check that binds; the peek at stage 1 is only
+    // an early exit. Counting here is what makes "3 per 15 minutes" mean three
+    // messages rather than three attempts — and it is what the tests can verify
+    // against getFakeSendsForTests(), since both count the same event.
+    //
+    // Placed BEFORE markPendingEmailVerified so a rejected caller does not burn
+    // the one-shot claim on their own pending row.
+    if (await isRateLimitedByPhone(pending.phone, "otp-send", LIMITS.otpSendPerPhone.max, LIMITS.otpSendPerPhone.windowMs)) {
+      return res.status(429).json({ error: "Too many verification codes requested for this phone number. Please try again later." });
+    }
+    if (await isRateLimitedByPhone(pending.phone, "otp-send-daily", LIMITS.otpSendPerPhoneDaily.max, LIMITS.otpSendPerPhoneDaily.windowMs)) {
+      return res.status(429).json({ error: "Daily verification code limit reached for this phone number. Please try again tomorrow." });
     }
 
     // Mint + claim first. The UPDATE is guarded on email_verified_at IS NULL, so
@@ -701,6 +753,34 @@ router.post("/auth/forgot-password", async (req, res) => {
 
   if (channel === "email" && !isValidEmail(identifier)) {
     return res.status(400).json({ error: "Please enter a valid email address." });
+  }
+
+  /**
+   * IDENTIFIER-KEYED CAP.
+   *
+   * Until now only forgotPasswordPerIp applied, and this endpoint accepts
+   * channel=sms: an attacker who knew one victim's email could text that
+   * victim's phone from as many rented IPs as they liked. The budget has to
+   * belong to the address being targeted, not to the network doing the
+   * targeting.
+   *
+   * One canonical key per identifier, so "+61 400 000 000" and
+   * "+61400000000" — and Bob@x.com and bob@x.com — cannot each hold their own.
+   *
+   * Checked BEFORE findUserByIdentifier on purpose, and for two reasons:
+   *  - the limit then applies uniformly whether or not the account exists, so
+   *    it cannot be used as an oracle; and
+   *  - a known and an unknown identifier are refused after the same amount of
+   *    work, so the 429 does not leak account existence through response time.
+   * It sits after field validation so malformed input cannot consume a real
+   * address's quota.
+   */
+  const limitKey = isValidEmail(identifier) ? identifier.toLowerCase() : normalizePhone(identifier);
+  if (
+    (await isRateLimitedByKey("identifier", limitKey, "forgot-password", LIMITS.forgotPasswordPerIdentifier.max, LIMITS.forgotPasswordPerIdentifier.windowMs)) ||
+    (await isRateLimitedByKey("identifier", limitKey, "forgot-password-daily", LIMITS.forgotPasswordPerIdentifierDaily.max, LIMITS.forgotPasswordPerIdentifierDaily.windowMs))
+  ) {
+    return res.status(429).json({ error: "Too many reset requests for this account. Please try again later." });
   }
 
   try {
