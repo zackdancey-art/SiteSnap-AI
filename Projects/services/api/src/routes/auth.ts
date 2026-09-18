@@ -33,6 +33,7 @@ import { requireAuth, AuthenticatedRequest } from "../middleware/auth";
 import { createAuthToken } from "../utils/authToken";
 import { isRateLimitedByIp, isRateLimitedByAccount, LIMITS } from "../middleware/rateLimit";
 import { hashPassword, verifyPassword } from "../utils/password";
+import { readIntEnv } from "../utils/env";
 
 const SESSION_COOKIE = "sitesnap.session";
 const COOKIE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -52,10 +53,13 @@ function clearSessionCookie(res: Response) {
 }
 
 const router: Router = Router();
-const verificationTtlMs = Number(process.env.ACCOUNT_VERIFICATION_TTL_MS ?? 10 * 60 * 1000);
+// An empty ACCOUNT_VERIFICATION_TTL_MS used to parse to 0 here, expiring every
+// verification code the moment it was minted — signup broke for everyone and
+// the only symptom was a truthful-looking 401. See utils/env.ts.
+const verificationTtlMs = readIntEnv("ACCOUNT_VERIFICATION_TTL_MS", 10 * 60 * 1000, { min: 1 });
 // Minimum gap between verification SMS sends for one pending signup. Bounds the
 // cost of the resend path for someone who has already proven their mailbox.
-const smsResendCooldownMs = Number(process.env.SMS_RESEND_COOLDOWN_MS ?? 60 * 1000);
+const smsResendCooldownMs = readIntEnv("SMS_RESEND_COOLDOWN_MS", 60 * 1000, { min: 0 });
 const isProd = process.env.NODE_ENV === "production";
 const hasDatabase = Boolean(process.env.DATABASE_URL && process.env.DATABASE_URL.trim());
 
