@@ -60,29 +60,17 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # shared emits only .d.ts files; build it first so TypeScript project
-      # references resolve correctly in typecheck and test/build steps.
-      - name: Build shared types
-        run: pnpm --filter ./shared run build:types
-
-      - name: Lint
-        run: pnpm run lint
-
-      - name: Typecheck
-        run: pnpm run typecheck
-
-      # Two separate runs on purpose. TEST_DATABASE_URL must NOT be set for the
-      # in-memory suite: some stores (e.g. projectsStore) are test-aware and switch
-      # to the DB path whenever TEST_DATABASE_URL is present, which breaks tests
-      # that assume the in-memory store. So the in-memory suite runs with it unset
-      # (the DB-gated suites register a skip), and the DB suites run separately with
-      # it set (test:db targets exactly the files guarded by !TEST_DATABASE_URL).
-      - name: Tests (in-memory)
-        run: pnpm run test
-
-      - name: Tests (database — RLS + store round-trip)
-        run: pnpm --filter services-api run test:db
+      # ONE step. Every gate — shared types, lint, typecheck, the in-memory
+      # suite and the DB suite — is defined in Projects/scripts/ci.sh, which is
+      # the same program a developer runs locally. Do not add gate steps here:
+      # scripts/assert-ci-single-definition.sh (invoked first by ci.sh) fails
+      # the build if this file starts running pnpm gates of its own, because a
+      # second definition is free to drift from the first and nothing notices.
+      - name: CI gate
+        run: ./scripts/ci.sh
         env:
           # NODE_ENV=test binds getPgPool() to TEST_DATABASE_URL (never DATABASE_URL).
           # No PG_SSL -> plain local connection to the service container, no TLS.
+          # ci.sh HARD FAILS if this is unset while CI=true, rather than letting
+          # the DB suites register as skips and the build go green regardless.
           TEST_DATABASE_URL: postgres://sitesnap:sitesnap@localhost:5432/sitesnap_test

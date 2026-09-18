@@ -38,6 +38,23 @@ MODE="${1:-}"
 [ -n "$MODE" ] || { echo "usage: run-tests.sh <memory|db>" >&2; exit 2; }
 cd "$(dirname "$0")/.."
 
+# How many suites are gated on TEST_DATABASE_URL. Both modes check against this
+# one number, because it is the same invariant seen from two sides:
+#
+#   db mode     must SELECT exactly this many files, or the grep selector has
+#               stopped matching some of them.
+#   memory mode must report exactly this many SKIPS, or a suite that is
+#               supposed to defer to the db run has stopped doing so.
+#
+# A non-empty-but-short list is the case the empty-list guard below cannot see:
+# if the selector matches 3 of 5, the run is green and 2 suites vanished. That
+# is the same silent-success failure in a quieter form, so it is pinned.
+#
+# This number is EXPECTED TO CHANGE — raise it in the same commit that adds a
+# DB-gated suite. That is the point: the change has to be deliberate and shows
+# up in review, rather than a count drifting unobserved.
+EXPECTED_DB_SUITES=5
+
 case "$MODE" in
   memory)
     DESCRIPTION="in-memory suite"
@@ -92,7 +109,88 @@ IFS=$OLD_IFS
 
 echo "run-tests.sh: $DESCRIPTION — $# file(s)"
 
-if [ -n "$CONCURRENCY" ]; then
+if [ "$MODE" = "db" ] && [ "$#" -ne "$EXPECTED_DB_SUITES" ]; then
+  {
+    echo ""
+    echo "ERROR: selected $# db-gated file(s), expected $EXPECTED_DB_SUITES."
+    echo ""
+    echo "  Selected:"
+    for f in "$@"; do echo "    $f"; done
+    echo ""
+    echo "  If you added or removed a DB-gated suite, update EXPECTED_DB_SUITES"
+    echo "  in this script in the same commit. If you did not, the grep selector"
+    echo "  has stopped matching a suite that still exists — find it before"
+    echo "  changing the number."
+    echo ""
+  } >&2
+  exit 1
+fi
+
+if [ "$MODE" = "db" ]; then
   exec env NODE_ENV=test node --require ./dist/test-setup.js "$CONCURRENCY" --test "$@"
 fi
-exec env NODE_ENV=test node --require ./dist/test-setup.js --test "$@"
+
+# Memory mode runs through `tee` so the skip count can be checked afterwards
+# while the output still streams live.
+#
+# Getting node's exit status out of that pipeline is the delicate part, and it
+# is delicate in a way that fails SILENTLY AND GREEN, so read before editing:
+#
+#   * `$?` after a pipeline is the LAST command's status — tee's, always 0.
+#     Using it would swallow every test failure.
+#   * ${PIPESTATUS[0]} is a bashism; this script runs under dash on the CI
+#     runner, where it expands to nothing.
+#   * `set -e` must be OFF around the run. With it on, a failing node aborts
+#     the pipeline's left-hand subshell BEFORE the status is recorded, leaving
+#     it empty — and an empty status silently skips the failure check below.
+#     That exact mistake was made here first and caught only by deliberately
+#     failing a test: the suite reported a real failure and the script still
+#     exited 0.
+#
+# So: status to a file, with `set -e` disabled across the run.
+OUT=$(mktemp)
+STATUS_FILE=$(mktemp)
+trap 'rm -f "$OUT" "$STATUS_FILE"' EXIT
+
+set +e
+{ env NODE_ENV=test node --require ./dist/test-setup.js --test "$@"; echo "$?" > "$STATUS_FILE"; } | tee "$OUT"
+set -e
+
+STATUS=$(cat "$STATUS_FILE")
+if [ -z "$STATUS" ]; then
+  echo "ERROR: the test runner's exit status was not recorded — treating as failure." >&2
+  exit 1
+fi
+if [ "$STATUS" -ne 0 ]; then
+  exit "$STATUS"
+fi
+
+# node --test prints one TAP summary line per counter, e.g. "# skipped 5".
+SKIPPED=$(awk '/^# skipped /{print $3}' "$OUT" | tail -1)
+if [ -z "$SKIPPED" ]; then
+  echo "" >&2
+  echo "ERROR: could not find a '# skipped' line in the test output." >&2
+  echo "  The runner's summary format changed; update this parser rather than" >&2
+  echo "  dropping the check." >&2
+  exit 1
+fi
+
+if [ "$SKIPPED" -ne "$EXPECTED_DB_SUITES" ]; then
+  {
+    echo ""
+    echo "ERROR: in-memory run reported $SKIPPED skip(s), expected $EXPECTED_DB_SUITES."
+    echo ""
+    echo "  Each TEST_DATABASE_URL-gated suite must register exactly one skip"
+    echo "  here and then actually run in the db pass."
+    echo ""
+    echo "  FEWER than expected: a suite stopped skipping — it may now be running"
+    echo "  its assertions against the in-memory store, where RLS does not exist"
+    echo "  and would pass vacuously."
+    echo "  MORE than expected:  something else started skipping. A skip is not a"
+    echo "  pass; find out what stopped running."
+    echo ""
+  } >&2
+  exit 1
+fi
+
+echo "run-tests.sh: $SKIPPED skip(s), as expected — each runs for real under test:db"
