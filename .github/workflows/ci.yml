@@ -31,6 +31,23 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
+      # Redis for the reachable-Redis tests. The unreachable-Redis suite runs
+      # everywhere and covers the failure path; it cannot cover the SUCCESS path,
+      # because a client that never becomes ready never exercises the `ready`
+      # handler, the connect grace window, or the counter actually landing in
+      # Redis. That path shipped to production untested once and produced a
+      # spurious degradation alert on every boot. The health check is what makes
+      # "the container came up" a precondition rather than an assumption.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -74,3 +91,8 @@ jobs:
           # ci.sh HARD FAILS if this is unset while CI=true, rather than letting
           # the DB suites register as skips and the build go green regardless.
           TEST_DATABASE_URL: postgres://sitesnap:sitesnap@localhost:5432/sitesnap_test
+          # Deliberately NOT named REDIS_URL. Only the Redis test file promotes
+          # it to REDIS_URL, so no other suite can be pointed at a real instance
+          # by an env var that happens to be present. ci.sh HARD FAILS if this is
+          # unset while CI=true, for the same reason it does for the DB suites.
+          REDIS_TEST_URL: redis://127.0.0.1:6379

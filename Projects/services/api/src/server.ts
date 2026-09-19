@@ -59,10 +59,13 @@ export function validateProviderConfig() {
     if (missing.length > 0) {
       throw new Error(`Missing production configuration: ${missing.join(", ")}`);
     }
-    console.warn(
-      "[auth] Production mode: rate limiting is in-memory and will reset on restart. " +
-      "Use a reverse proxy (nginx/Cloudflare) or external rate limiter for multi-instance deployments."
-    );
+    // The unconditional "rate limiting is in-memory" warning that used to live
+    // here is gone. It predated the Redis backend and was simply false whenever
+    // REDIS_URL was set — it printed one line above logRateLimiterBackendAtBoot()
+    // saying the opposite. Two log lines disagreeing about the same fact is
+    // worse than either alone, because a reader has no way to tell which is
+    // stale. logRateLimiterBackendAtBoot() is now the single source of truth for
+    // which backend this process uses, and /health/ready for whether it works.
     return;
   }
 

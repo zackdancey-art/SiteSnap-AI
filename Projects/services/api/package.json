@@ -9,6 +9,7 @@
     "start": "node ./dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "rm -rf dist tsconfig.tsbuildinfo && pnpm run build && ./scripts/run-tests.sh memory",
+    "test:redis": "pnpm run build && ./scripts/run-tests.sh redis",
     "test:db": "pnpm run build && ./scripts/run-tests.sh db",
     "load-test": "NODE_ENV=test RATE_LIMIT_DISABLE=1 ts-node-dev --transpile-only --exit-child load-test.ts",
     "teardown-loadtest": "ts-node-dev --transpile-only --exit-child teardown-loadtest.ts"
