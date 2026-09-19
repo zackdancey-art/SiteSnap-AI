@@ -35,7 +35,7 @@
 set -eu
 
 MODE="${1:-}"
-[ -n "$MODE" ] || { echo "usage: run-tests.sh <memory|db>" >&2; exit 2; }
+[ -n "$MODE" ] || { echo "usage: run-tests.sh <memory|db|redis>" >&2; exit 2; }
 cd "$(dirname "$0")/.."
 
 # How many suites are gated on TEST_DATABASE_URL. Both modes check against this
@@ -55,6 +55,20 @@ cd "$(dirname "$0")/.."
 # up in review, rather than a count drifting unobserved.
 EXPECTED_DB_SUITES=5
 
+# How many individual TESTS are gated on REDIS_TEST_URL.
+#
+# Note the unit: db gating is per-SUITE (each file registers one skip), Redis
+# gating is per-TEST (one file, four gated tests). Do not merge the two numbers —
+# they count different things and drift for different reasons.
+#
+#   memory mode must report EXPECTED_DB_SUITES + EXPECTED_REDIS_TESTS skips,
+#                since neither TEST_DATABASE_URL nor REDIS_TEST_URL is set.
+#   redis mode   must report exactly this many PASSES and zero skips. That is the
+#                positive control: a Redis job whose service container never came
+#                up would otherwise skip all four and exit 0 — a green run
+#                proving nothing about the success path it exists to cover.
+EXPECTED_REDIS_TESTS=4
+
 case "$MODE" in
   memory)
     DESCRIPTION="in-memory suite"
@@ -64,6 +78,25 @@ case "$MODE" in
     FILE_LIST=$(find dist -name '*.test.js' | sort)
     CONCURRENCY=""
     ;;
+  redis)
+    DESCRIPTION="Redis-gated tests"
+    if [ -z "${REDIS_TEST_URL:-}" ]; then
+      {
+        echo ""
+        echo "ERROR: redis mode requires REDIS_TEST_URL to be set."
+        echo ""
+        echo "  Without it every Redis test skips and the run exits 0, which is"
+        echo "  the exact silent-success this script exists to prevent. Start a"
+        echo "  Redis and point REDIS_TEST_URL at it, e.g."
+        echo "    REDIS_TEST_URL=redis://127.0.0.1:6379 pnpm run test:redis"
+        echo ""
+      } >&2
+      exit 1
+    fi
+    FILE_LIST=$(grep -rl 'REDIS_TEST_URL' dist --include='*.test.js' | sort || true)
+    # These share one Redis keyspace; parallel runs would cross-count.
+    CONCURRENCY="--test-concurrency=1"
+    ;;
   db)
     DESCRIPTION="database-gated suites"
     FILE_LIST=$(grep -rl '!process.env.TEST_DATABASE_URL' dist --include='*.test.js' | sort || true)
@@ -72,7 +105,7 @@ case "$MODE" in
     CONCURRENCY="--test-concurrency=1"
     ;;
   *)
-    echo "run-tests.sh: unknown mode '$MODE' (expected 'memory' or 'db')" >&2
+    echo "run-tests.sh: unknown mode '$MODE' (expected 'memory', 'db' or 'redis')" >&2
     exit 2
     ;;
 esac
@@ -90,6 +123,9 @@ if [ -z "$FILE_LIST" ]; then
       echo "  The db suites are selected by grepping dist/ for the literal string"
       echo "  '!process.env.TEST_DATABASE_URL'. If that guard was rewritten, update"
       echo "  the selector in this script to match."
+    elif [ "$MODE" = "redis" ]; then
+      echo "  The Redis tests are selected by grepping dist/ for 'REDIS_TEST_URL'."
+      echo "  If that env var was renamed, update the selector in this script."
     else
       echo "  Check that 'pnpm run build' emitted to dist/ before this ran."
     fi
@@ -130,7 +166,7 @@ if [ "$MODE" = "db" ]; then
   exec env NODE_ENV=test node --require ./dist/test-setup.js "$CONCURRENCY" --test "$@"
 fi
 
-# Memory mode runs through `tee` so the skip count can be checked afterwards
+# Memory and redis modes run through `tee` so the skip count can be checked afterwards
 # while the output still streams live.
 #
 # Getting node's exit status out of that pipeline is the delicate part, and it
@@ -153,7 +189,7 @@ STATUS_FILE=$(mktemp)
 trap 'rm -f "$OUT" "$STATUS_FILE"' EXIT
 
 set +e
-{ env NODE_ENV=test node --require ./dist/test-setup.js --test "$@"; echo "$?" > "$STATUS_FILE"; } | tee "$OUT"
+{ env NODE_ENV=test node --require ./dist/test-setup.js ${CONCURRENCY:+"$CONCURRENCY"} --test "$@"; echo "$?" > "$STATUS_FILE"; } | tee "$OUT"
 set -e
 
 STATUS=$(cat "$STATUS_FILE")
@@ -175,22 +211,55 @@ if [ -z "$SKIPPED" ]; then
   exit 1
 fi
 
-if [ "$SKIPPED" -ne "$EXPECTED_DB_SUITES" ]; then
+if [ "$MODE" = "redis" ]; then
+  EXPECTED_SKIPS=0
+else
+  EXPECTED_SKIPS=$((EXPECTED_DB_SUITES + EXPECTED_REDIS_TESTS))
+fi
+
+if [ "$SKIPPED" -ne "$EXPECTED_SKIPS" ]; then
   {
     echo ""
-    echo "ERROR: in-memory run reported $SKIPPED skip(s), expected $EXPECTED_DB_SUITES."
+    echo "ERROR: $MODE run reported $SKIPPED skip(s), expected $EXPECTED_SKIPS."
     echo ""
-    echo "  Each TEST_DATABASE_URL-gated suite must register exactly one skip"
-    echo "  here and then actually run in the db pass."
-    echo ""
-    echo "  FEWER than expected: a suite stopped skipping — it may now be running"
-    echo "  its assertions against the in-memory store, where RLS does not exist"
-    echo "  and would pass vacuously."
-    echo "  MORE than expected:  something else started skipping. A skip is not a"
-    echo "  pass; find out what stopped running."
+    if [ "$MODE" = "redis" ]; then
+      echo "  A Redis test skipped while REDIS_TEST_URL was set. The client could"
+      echo "  not reach the server, so the success path went untested and the run"
+      echo "  would otherwise have gone green having proved nothing."
+    else
+      echo "  Expected $EXPECTED_DB_SUITES TEST_DATABASE_URL-gated suite(s) plus"
+      echo "  $EXPECTED_REDIS_TESTS REDIS_TEST_URL-gated test(s), each of which must"
+      echo "  register a skip here and then actually run in its own pass."
+      echo ""
+      echo "  FEWER than expected: a suite stopped skipping — it may now be running"
+      echo "  its assertions against the in-memory store, where RLS does not exist"
+      echo "  and would pass vacuously."
+      echo "  MORE than expected:  something else started skipping. A skip is not a"
+      echo "  pass; find out what stopped running."
+    fi
     echo ""
   } >&2
   exit 1
 fi
 
-echo "run-tests.sh: $SKIPPED skip(s), as expected — each runs for real under test:db"
+# The positive control for the Redis pass. Zero skips alone is satisfied by a
+# selector that matched nothing meaningful; this pins the number that ran.
+if [ "$MODE" = "redis" ]; then
+  PASSED=$(awk '/^# pass /{print $3}' "$OUT" | tail -1)
+  if [ "${PASSED:-0}" -ne "$EXPECTED_REDIS_TESTS" ]; then
+    {
+      echo ""
+      echo "ERROR: redis run passed ${PASSED:-0} test(s), expected $EXPECTED_REDIS_TESTS."
+      echo ""
+      echo "  Update EXPECTED_REDIS_TESTS in the same commit that adds or removes"
+      echo "  a Redis-gated test. If you did not change one, tests stopped being"
+      echo "  selected — find out which before changing the number."
+      echo ""
+    } >&2
+    exit 1
+  fi
+  echo "run-tests.sh: $PASSED Redis-gated test(s) ran against $REDIS_TEST_URL, 0 skipped"
+  exit 0
+fi
+
+echo "run-tests.sh: $SKIPPED skip(s), as expected — each runs for real under test:db / test:redis"

@@ -177,11 +177,76 @@ function peekMemory(key: string): number {
  * failure mode this work exists to remove. Degraded is a state worth naming,
  * reporting once, and exposing on /health/ready.
  */
-export type RateLimiterState = "disabled" | "connected" | "degraded" | "unavailable";
+/**
+ * Every state is a distinct, actionable fact. The distinctions that matter:
+ *
+ *  disabled    REDIS_URL is not set. In-memory by CONFIGURATION, not by fault.
+ *              Nothing is wrong; nobody should be paged.
+ *  configured  REDIS_URL is set but no rate-limited request has run yet, so no
+ *              connection has been attempted. This state exists because its
+ *              absence was a bug: the field read "disabled" between boot and
+ *              the first limited request, asserting "not configured" when the
+ *              truth was "not yet attempted" — the exact opposite.
+ *  connecting  The client exists, the socket is not ready. Commands issued now
+ *              are REJECTED (enableOfflineQueue is false, deliberately), so
+ *              they fall back to memory. Expected at boot; not an incident.
+ *  connected   Set only from the `ready` event or a genuinely successful
+ *              command. Never assumed from having constructed a client.
+ *  degraded    It worked, or the connect grace expired, and now it does not.
+ *              This one IS an incident and is the only one that announces.
+ *  unavailable ioredis itself could not be loaded. A deploy problem, not a
+ *              network one.
+ */
+export type RateLimiterState =
+  | "disabled"
+  | "configured"
+  | "connecting"
+  | "connected"
+  | "degraded"
+  | "unavailable";
 
 let redisClient: unknown | null = null;
 let redisConnectAttempted = false;
 let redisState: RateLimiterState = "disabled";
+/** True once the socket has ever been ready. Gates the boot grace window. */
+let redisEverReady = false;
+/** When the first connection attempt began, for the grace window. */
+let redisConnectStartedAt: number | null = null;
+let redisGraceTimer: ReturnType<typeof setTimeout> | null = null;
+/**
+ * Resolves when the first connection settles — ready, errored, or timed out.
+ *
+ * The first rate-limited request after boot used to be counted in MEMORY, not
+ * Redis: the client was constructed and returned immediately, and because
+ * enableOfflineQueue is false its commands were rejected until the socket came
+ * up. Silencing the boot alert did not fix that — the counter was still wrong by
+ * however many requests arrived during the handshake, on every deploy.
+ *
+ * So the first caller waits for the handshake instead of racing it. The wait is
+ * bounded by REDIS_READY_TIMEOUT_MS and falls back to memory when it expires, so
+ * the worst case is the old behaviour plus a bounded delay on ONE request —
+ * never the unbounded hang that enableOfflineQueue: true would have given us.
+ */
+let redisReadyWait: Promise<void> | null = null;
+
+/**
+ * How long a first connection may fail quietly before it counts as an incident.
+ *
+ * The window exists because connecting is not instantaneous and the limiter
+ * refuses to queue commands while it happens. Without it, EVERY deploy fired a
+ * Sentry "degraded" alert that resolved milliseconds later — which does not
+ * just add noise, it destroys the meaning of the signal: degradationReports had
+ * a floor of 1 per boot, so the number could no longer answer "has Redis failed
+ * in production". A boot is not an incident. A boot that never finishes is.
+ */
+const REDIS_CONNECT_GRACE_MS = envInt("RATE_LIMIT_REDIS_CONNECT_GRACE_MS", 10_000);
+
+/**
+ * How long the FIRST rate-limited request may wait for the socket before giving
+ * up and counting in memory. Deliberately shorter than the grace window: this
+ * one is in the critical path of a user's login.
+ */
+const REDIS_READY_TIMEOUT_MS = envInt("RATE_LIMIT_REDIS_READY_TIMEOUT_MS", 3000);
 let redisLastError: string | null = null;
 let redisDegradedSince: number | null = null;
 let redisFallbackCount = 0;
@@ -214,15 +279,22 @@ export function redactRedisUrl(url: string): string {
   }
 }
 
-function markDegraded(reason: string): void {
-  redisFallbackCount += 1;
-  redisLastError = reason;
-  // Report the TRANSITION, not every request. A Redis outage on a busy path
-  // would otherwise emit one Sentry event per request and bury itself.
+/** True while a first connection is still inside its grace window. */
+function withinConnectGrace(): boolean {
+  if (redisEverReady || redisConnectStartedAt === null) return false;
+  return Date.now() - redisConnectStartedAt < REDIS_CONNECT_GRACE_MS;
+}
+
+/**
+ * The only place a degradation is announced. Separated from markDegraded so
+ * that the timer path and the request path cannot announce differently.
+ */
+function announceDegraded(reason: string): void {
   if (redisState === "degraded") return;
   redisState = "degraded";
   redisDegradedSince = Date.now();
   redisDegradationReports += 1;
+  redisLastError = reason;
   console.error(
     `[ratelimit] DEGRADED: Redis is unreachable — counting in process memory. ` +
       `Limits no longer apply across instances and will reset on restart. Reason: ${reason}`
@@ -230,13 +302,40 @@ function markDegraded(reason: string): void {
   Sentry.captureMessage(`[ratelimit] degraded to in-memory counting: ${reason}`, "error");
 }
 
+function markDegraded(reason: string): void {
+  redisFallbackCount += 1;
+  redisLastError = reason;
+  // Report the TRANSITION, not every request. A Redis outage on a busy path
+  // would otherwise emit one Sentry event per request and bury itself.
+  if (redisState === "degraded") return;
+  if (withinConnectGrace()) {
+    // Still opening the first socket. The operation really did fall back to
+    // memory and fallbackCount records that, but this is the expected shape of
+    // a boot, not a fault, so it does not announce. If the socket never becomes
+    // ready, the grace timer announces instead — silence here is bounded.
+    redisState = "connecting";
+    return;
+  }
+  announceDegraded(reason);
+}
+
 function markConnected(): void {
+  // Called from the `ready` event AND after every successful command, so it has
+  // to be cheap and idempotent.
+  if (redisState === "connected") return;
   const wasDegraded = redisState === "degraded";
+  redisEverReady = true;
   redisState = "connected";
   redisDegradedSince = null;
   redisLastError = null;
+  if (redisGraceTimer) {
+    clearTimeout(redisGraceTimer);
+    redisGraceTimer = null;
+  }
   if (wasDegraded) {
     console.warn("[ratelimit] RECOVERED: Redis is reachable again — counting in Redis.");
+  } else {
+    console.log("[ratelimit] connected to Redis — rate limits are counted in Redis.");
   }
 }
 
@@ -251,7 +350,9 @@ export function getRateLimiterStatus(): {
 } {
   return {
     backend: redisState === "connected" ? "redis" : "memory",
-    state: redisState,
+    // "disabled" means REDIS_URL is unset. If it IS set and nothing has tried
+    // yet, say so rather than reporting the opposite of the truth.
+    state: redisState === "disabled" && process.env.REDIS_URL ? "configured" : redisState,
     degradedSince: redisDegradedSince ? new Date(redisDegradedSince).toISOString() : null,
     fallbackCount: redisFallbackCount,
     degradationReports: redisDegradationReports,
@@ -269,12 +370,25 @@ export function logRateLimiterBackendAtBoot(): void {
     );
     return;
   }
-  console.log(`[ratelimit] REDIS_URL is set (${redactRedisUrl(process.env.REDIS_URL)}) — using Redis for rate limits.`);
+  // Says "configured", not "using". At this point nothing has connected: the
+  // client opens lazily on the first rate-limited request, so this line has no
+  // evidence for "using" at the moment it prints, and the previous wording
+  // contradicted /health/ready for as long as the service was idle.
+  console.log(
+    `[ratelimit] REDIS_URL is configured (${redactRedisUrl(process.env.REDIS_URL)}). ` +
+      `The connection opens on the first rate-limited request — check /health/ready ` +
+      `for the live backend; this line does not mean Redis is in use yet.`
+  );
 }
 
 async function getRedisClient(): Promise<unknown | null> {
   if (!process.env.REDIS_URL) return null;
-  if (redisConnectAttempted) return redisClient;
+  if (redisConnectAttempted) {
+    // Requests that arrive DURING the first handshake queue behind it too,
+    // rather than each racing the socket independently.
+    if (redisReadyWait) await redisReadyWait;
+    return redisClient;
+  }
   redisConnectAttempted = true;
 
   try {
@@ -283,6 +397,7 @@ async function getRedisClient(): Promise<unknown | null> {
     const { default: Redis } = require("ioredis") as {
       default: new (url: string, opts: Record<string, unknown>) => {
         on: (evt: string, cb: (arg: Error) => void) => void;
+        once: (evt: string, cb: (arg?: Error) => void) => void;
       };
     };
     const client = new Redis(process.env.REDIS_URL, {
@@ -301,7 +416,41 @@ async function getRedisClient(): Promise<unknown | null> {
     client.on("error", (err: Error) => markDegraded(err.message));
     client.on("ready", () => markConnected());
     redisClient = client;
-    redisState = "connected";
+    // "connecting", NOT "connected". Constructing the client is not evidence
+    // that the socket works, and a health field that guesses optimistically is
+    // wrong in the one direction that matters: it claims healthy during exactly
+    // the window when commands are being rejected.
+    redisState = "connecting";
+    redisConnectStartedAt = Date.now();
+    // Bounds the silence in markDegraded. Without this, a Redis that never
+    // becomes ready would sit in "connecting" forever on a quiet service and
+    // never alert at all — trading a false alarm for a missed one.
+    redisGraceTimer = setTimeout(() => {
+      redisGraceTimer = null;
+      if (redisEverReady) return;
+      announceDegraded(
+        redisLastError ?? `Redis did not become ready within ${REDIS_CONNECT_GRACE_MS}ms`
+      );
+    }, REDIS_CONNECT_GRACE_MS);
+    // Never hold the process open for this.
+    redisGraceTimer.unref?.();
+
+    redisReadyWait = new Promise<void>((resolve) => {
+      let settled = false;
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        redisReadyWait = null;
+        resolve();
+      };
+      client.once("ready", settle);
+      // An error means the socket will not be usable now. Settle immediately and
+      // let the caller fall back — waiting out the full timeout would add
+      // latency to a login for no gain.
+      client.once("error", settle);
+      const t = setTimeout(settle, REDIS_READY_TIMEOUT_MS);
+      t.unref?.();
+    });
   } catch (err) {
     redisState = "unavailable";
     redisLastError = err instanceof Error ? err.message : String(err);
@@ -312,6 +461,8 @@ async function getRedisClient(): Promise<unknown | null> {
     Sentry.captureMessage(`[ratelimit] ioredis unavailable: ${redisLastError}`, "error");
   }
 
+  // Block this first caller on the handshake so its count lands in Redis.
+  if (redisReadyWait) await redisReadyWait;
   return redisClient;
 }
 
@@ -542,4 +693,11 @@ export function resetRateLimitStoreForTests(): void {
   redisDegradedSince = null;
   redisFallbackCount = 0;
   redisDegradationReports = 0;
+  redisEverReady = false;
+  redisConnectStartedAt = null;
+  redisReadyWait = null;
+  if (redisGraceTimer) {
+    clearTimeout(redisGraceTimer);
+    redisGraceTimer = null;
+  }
 }

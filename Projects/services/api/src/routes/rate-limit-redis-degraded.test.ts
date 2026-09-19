@@ -8,6 +8,14 @@ process.env.TRUST_PROXY_HOPS = "0";
 process.env.REDIS_URL = "redis://admin:hunter2@127.0.0.1:1";
 // Small so the test spends three calls, not thirty.
 process.env.RATE_LIMIT_FORGOT_PASSWORD_PER_IDENTIFIER = "2";
+// No connect grace in THIS file. The grace window exists so that a boot against
+// a slow-but-working Redis is not announced as an incident, and it is covered by
+// rate-limit-redis-live.test.ts. Here the subject is the incident itself — a
+// Redis that is configured and genuinely unreachable — and the announcement is
+// what we are asserting on. Leaving the 10s default in place would mean either
+// asserting nothing for ten seconds or asserting the suppression rather than the
+// alert, and the alert is the behaviour that matters when this fires for real.
+process.env.RATE_LIMIT_REDIS_CONNECT_GRACE_MS = "0";
 
 import assert from "node:assert/strict";
 import { test, before, after, beforeEach } from "node:test";

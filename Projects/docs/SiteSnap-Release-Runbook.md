@@ -22,15 +22,44 @@ Expected state after the June 2026 engineering push:
 - 4 AI unit tests failing on `main` (pre-existing; fixed in PR #1 pending merge)
 
 Then confirm the rate limiter is actually using Redis — configuring `REDIS_URL`
-and *using* Redis are two different facts, and the limiter falls back silently
-to process memory by design if it cannot connect:
+and *using* Redis are two different facts. If it cannot connect, the limiter
+falls back to process memory by design so a Redis outage never locks users out;
+it announces that once (error log + one Sentry event), but the requests still
+succeed, so nothing about the API's behaviour will tell you on its own.
 
 ```bash
 curl -s https://api.getsitesnapai.com/api/health/ready | jq .rateLimiter
-# want: {"backend":"redis","state":"connected","degradedSince":null,"fallbackCount":0,...}
-# "backend":"memory" with "state":"degraded" means the connection failed and
-# counters are per-process — check lastError, do not ship on that assumption.
 ```
+
+**Read `state` before `backend`.** The connection is opened lazily, on the first
+rate-limited request — so immediately after a deploy, on a quiet service, the
+honest answer is that nothing has been attempted yet. That is not a fault, and
+the field says so rather than guessing:
+
+| `state` | Means | Action |
+|---|---|---|
+| `disabled` | `REDIS_URL` is not set. In-memory by **configuration**, not by fault. | Set `REDIS_URL` if you expected Redis. |
+| `configured` | `REDIS_URL` is set; no rate-limited request has run yet. | Not an error. Exercise a limited endpoint (below) and re-read. |
+| `connecting` | The socket is opening. Commands in this window fall back to memory. | Re-read in a few seconds. |
+| `connected` | Counting in Redis. **This is the state to ship on.** | — |
+| `degraded` | It worked (or the connect window expired) and now does not. | Check `lastError`. Do **not** ship on this. |
+| `unavailable` | The `ioredis` module could not be loaded at all. | A build/dependency problem, not a network one. |
+
+To move it off `configured`, make one request against a rate-limited endpoint —
+a login for an address that does not exist is enough, and costs nothing:
+
+```bash
+curl -s -o /dev/null -X POST https://api.getsitesnapai.com/api/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"email":"readiness-probe@invalid.test","password":"x"}'
+curl -s https://api.getsitesnapai.com/api/health/ready | jq .rateLimiter
+# want: {"backend":"redis","state":"connected","degradedSince":null,...}
+```
+
+`fallbackCount` counts operations that fell back to memory and `degradationReports`
+counts announced incidents. A small non-zero `fallbackCount` with `state:"connected"`
+and `degradationReports:0` is normal — those are requests that arrived during the
+handshake. A rising `degradationReports` is the signal that matters.
 
 ---
 

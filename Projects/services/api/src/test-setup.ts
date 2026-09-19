@@ -59,6 +59,15 @@ const ALLOWED = new Set([
   // by CI, never at production.
   "TEST_DATABASE_URL",
   "CI",
+  // The reachable-Redis suite selects itself on this, exactly as the DB suites
+  // select on TEST_DATABASE_URL. It points at a scratch Redis created by CI,
+  // never at production, and carries no credential. Blanking it would make the
+  // ONLY test of the working Redis path a permanent skip — leaving the success
+  // path untested, which is the failure class this file exists to prevent.
+  // Note it is deliberately NOT named REDIS_URL: the app reads REDIS_URL, and
+  // an allowlisted REDIS_URL would let a developer's .env point the suite at a
+  // real instance. The suite copies this into REDIS_URL itself, in the file.
+  "REDIS_TEST_URL",
   // Read at the bottom of this file. Must be allowed, or the loop below blanks
   // it before the debug check runs and the switch silently does nothing.
   "TEST_ENV_DEBUG",

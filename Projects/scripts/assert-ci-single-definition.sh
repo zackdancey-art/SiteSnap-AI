@@ -48,8 +48,29 @@ if [ -n "$STRAY" ]; then
   FAIL=1
 fi
 
-# 3. The root "ci" script must delegate too, so `pnpm run ci` and CI agree.
-#    This is the one that was already wrong: it ran lint+typecheck+test and
+# 3. No workflow directory anywhere but the repo root.
+#
+#    GitHub only reads `.github/workflows/` at the REPOSITORY ROOT. A workflow
+#    file placed anywhere else is inert — it never runs, nothing reports on it,
+#    and so nothing ever tells you it has drifted. `Projects/.github/workflows/
+#    ci.yml` was exactly that: a fourth definition of the gate, with no Postgres
+#    service, no Redis service, and no call to ci.sh, sitting unexecuted for
+#    months while reading like the real thing.
+#
+#    Inert is not harmless. It is a trap for the next person who opens it to see
+#    "what CI does", and worse for anyone who fixes the inertness by moving it
+#    to the root — which would replace the real gate with the weaker one and
+#    report green.
+if [ -d "../Projects/.github/workflows" ] || [ -d ".github/workflows" ]; then
+  echo "FAIL: a .github/workflows directory exists below the repository root." >&2
+  echo "  GitHub only reads the root one, so this is an inert second definition" >&2
+  echo "  of the gate that can drift without ever failing. Delete it; the real" >&2
+  echo "  workflow is at the repo root and runs scripts/ci.sh." >&2
+  FAIL=1
+fi
+
+# 4. The root "ci" script must delegate too, so `pnpm run ci` and CI agree.
+#    This one was already wrong when written: it ran lint+typecheck+test and
 #    omitted test:db, so it passed a strictly weaker check than CI did.
 CI_SCRIPT=$(node -e 'process.stdout.write(String(require("./package.json").scripts.ci ?? ""))')
 case "$CI_SCRIPT" in
