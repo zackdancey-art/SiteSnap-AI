@@ -68,6 +68,13 @@ const ALLOWED = new Set([
   // an allowlisted REDIS_URL would let a developer's .env point the suite at a
   // real instance. The suite copies this into REDIS_URL itself, in the file.
   "REDIS_TEST_URL",
+  // The live OpenAI contract suite selects itself on this, exactly as the DB
+  // suites select on TEST_DATABASE_URL. It is deliberately NOT named
+  // OPENAI_API_KEY, for the same reason REDIS_TEST_URL is not REDIS_URL: the
+  // app reads OPENAI_API_KEY, and allowlisting that name would let a
+  // developer's .env silently point the whole suite at the real API and spend
+  // real money on every run. This one is opt-in, per-run, and never set in CI.
+  "OPENAI_LIVE_TEST_KEY",
   // Read at the bottom of this file. Must be allowed, or the loop below blanks
   // it before the debug check runs and the switch silently does nothing.
   "TEST_ENV_DEBUG",

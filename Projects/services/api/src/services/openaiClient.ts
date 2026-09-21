@@ -8,7 +8,13 @@ let _client: OpenAI | null = null;
 // (so tests can assert which images were/weren't sent to the model) and returns
 // a canned valid response. This keeps the vision code path exercisable without
 // exporting internal functions or hitting OpenAI.
-type RecordedOpenAICall = { input: unknown };
+// `request` is the FULL argument object, not just `input`. It used to record
+// only `input`, which meant the fake accepted any parameter set at all — a
+// request carrying a parameter the configured model rejects (Sentry
+// SITESNAP-API-9: `temperature` on gpt-5.6-terra) was invisible to every test.
+// A mock that silently accepts what the real API refuses is worse than no mock,
+// because it converts a production 400 into a green suite.
+type RecordedOpenAICall = { input: unknown; request: Record<string, unknown> };
 const recordedCalls: RecordedOpenAICall[] = [];
 
 // X2 runtime-fallback tests: queue an error the next test-client call will throw,
@@ -30,13 +36,13 @@ export function resetOpenAIRecordingForTests(): void {
 function makeTestClient(): OpenAI {
   return {
     responses: {
-      create: async (args: { input: unknown }) => {
+      create: async (args: { input: unknown } & Record<string, unknown>) => {
         if (_nextErrorForTests) {
           const err = _nextErrorForTests;
           _nextErrorForTests = null;
           throw err;
         }
-        recordedCalls.push({ input: args?.input });
+        recordedCalls.push({ input: args?.input, request: { ...args } });
         return {
           output_text: JSON.stringify({
             summary: "test",

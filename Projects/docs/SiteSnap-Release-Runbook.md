@@ -21,6 +21,50 @@ Expected state after the June 2026 engineering push:
 - `pnpm audit` → 15 remaining (9 moderate / 6 high, all in dev tools or requiring major-version human decisions — see [dependency audit PR](https://github.com/zackdancey-art/SiteSap-AI/pulls) for details)
 - 4 AI unit tests failing on `main` (pre-existing; fixed in PR #1 pending merge)
 
+### Before changing `OPENAI_MODEL`
+
+**Run the live contract suite against the new model before setting it in
+Render.** This is a separate, opt-in step and it is not covered by CI:
+
+```bash
+OPENAI_MODEL=<the-new-model> OPENAI_LIVE_TEST_KEY=sk-... \
+  pnpm -C Projects --filter services-api run test:openai
+```
+
+Why this exists, rather than trusting a green build: models differ in which
+request parameters they accept, and the ordinary suite cannot see the
+difference. The OpenAI client is mocked at the boundary in `NODE_ENV=test`
+(`services/openaiClient.ts`), and that mock returns a canned success for *any*
+argument object — so a request carrying a parameter the real model rejects
+passes every test we have.
+
+That is not hypothetical. Switching `OPENAI_MODEL` to `gpt-5.6-terra`
+(2026-09-21) sent `temperature: 0.3`, which that model rejects with a 400. Every
+diary silently became a rule-based template, the full suite stayed green
+throughout, and the failure reached Sentry as "The AI service was unavailable"
+— pointing at OpenAI for a fault that was entirely in our own configuration
+(SITESNAP-API-9).
+
+If the new model needs a different parameter set, update
+`MODELS_SUPPORTING_SAMPLING_PARAMS` in `services/api/src/routes/ai.ts` in the
+same change. Add a model to that table only after a request carrying
+`temperature` has returned 200 for it against the real API — never because the
+name looks like it belongs to a family that supports it.
+
+After deploying a model change, confirm the path really is AI-backed rather than
+falling back. `generator` must be `openai`, not `fallback`:
+
+```bash
+curl -s -X POST https://api.getsitesnapai.com/api/generate-diary \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"period":"daily","entries":[{"date":"2026-01-01","notes":"Test entry.","weather":"Fine","crewCount":"2"}]}' \
+  | jq '{generator: .generation.generator, model: .generation.model, warning: .warning}'
+```
+
+A `generator` of `fallback` with a 400-shaped warning means the parameter set is
+wrong for the configured model. Revert `OPENAI_MODEL` to restore service, then
+fix the table.
+
 Then confirm the rate limiter is actually using Redis — configuring `REDIS_URL`
 and *using* Redis are two different facts. If it cannot connect, the limiter
 falls back to process memory by design so a Redis outage never locks users out;
@@ -81,7 +125,7 @@ handshake. A rising `degradationReports` is the signal that matters.
 | `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | S3/R2 storage | Yes |
 | `S3_ENDPOINT` | Custom endpoint for R2/MinIO | If using R2 |
 | `OPENAI_API_KEY` | GPT-4o vision diary generation | Yes |
-| `OPENAI_MODEL` | Override model, default `gpt-4o` | No |
+| `OPENAI_MODEL` | Override model, default `gpt-4o`. **Never change this without running `test:openai` against the new model first — see §1.** Models differ in which request parameters they accept, and a rejected parameter fails *every* generation silently | No |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated allowed origins | Yes in prod |
 | `UPLOAD_SIGNING_SECRET` | HMAC key for signed upload URLs | Yes |
 | `SENTRY_DSN` | Error tracking | Recommended |
