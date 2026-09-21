@@ -16,6 +16,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { router, useFocusEffect } from "expo-router";
 import Constants from "expo-constants";
+import * as Application from "expo-application";
 import { useAuth } from "@/lib/auth-context";
 import Colors from "@/constants/colors";
 import { DEFAULT_PROFILE, getLocalProfile } from "@/lib/profile-store";
@@ -80,8 +81,26 @@ export default function SettingsScreen() {
 
   const webTopInset = Platform.OS === "web" ? 67 : 0;
   const webBottomInset = Platform.OS === "web" ? 34 : 0;
+  // Read the version and build number out of the NATIVE binary, not out of
+  // expoConfig. eas.json sets `appVersionSource: "remote"`, so the build number
+  // is assigned by EAS servers at build time and is not knowable to the config
+  // that was evaluated on a developer's machine — `Constants.expoConfig` would
+  // display a number that no TestFlight build ever carried. `nativeBuildVersion`
+  // reads CFBundleVersion (iOS) / versionCode (Android) from the installed
+  // binary, so this label matches what a tester sees in TestFlight by
+  // construction rather than by us keeping two numbers in step.
+  //
+  // Both are null on web, and under Expo Go they describe the Expo Go binary
+  // rather than this app — so fall back to the config values, which are at
+  // least right about the version, and mark the build so nobody mistakes a
+  // development reading for a real one.
   const extra = Constants.expoConfig?.extra as { appVersion?: string; buildVersion?: string } | undefined;
-  const versionLabel = `${extra?.appVersion || "0.0.1"} • ${extra?.buildVersion || "dev"}`;
+  const nativeVersion = Application.nativeApplicationVersion;
+  const nativeBuild = Application.nativeBuildVersion;
+  const versionLabel =
+    nativeVersion && nativeBuild
+      ? `${nativeVersion} (${nativeBuild})`
+      : `${nativeVersion || extra?.appVersion || "0.0.0"} • ${extra?.buildVersion || "dev"}`;
 
   useFocusEffect(
     React.useCallback(() => {
