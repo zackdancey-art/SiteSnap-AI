@@ -19,12 +19,23 @@
         "buildType": "apk"
       }
     },
+    "simulator": {
+      "distribution": "internal",
+      "developmentClient": false,
+      "env": {
+        "APP_ENV": "simulator",
+        "EXPO_PUBLIC_API_URL": "https://api.getsitesnapai.com"
+      },
+      "ios": {
+        "simulator": true
+      }
+    },
     "preview": {
       "distribution": "internal",
       "channel": "preview",
       "env": {
         "APP_ENV": "preview",
-        "EXPO_PUBLIC_API_URL": "https://api-staging.getsitesnapai.com"
+        "EXPO_PUBLIC_API_URL": "https://api.getsitesnapai.com"
       },
       "ios": {
         "enterpriseProvisioning": "adhoc"
@@ -49,15 +60,12 @@
       }
     }
   },
-  "update": {
-    "channel": "production"
-  },
   "submit": {
     "production": {
       "ios": {
-        "appleId": "YOUR_APPLE_ID",
-        "ascAppId": "YOUR_APP_STORE_CONNECT_APP_ID",
-        "appleTeamId": "YOUR_TEAM_ID"
+        "appleId": "admin@getsitesnapai.com",
+        "ascAppId": "REPLACE-WITH-10-DIGIT-ASC-APP-ID",
+        "appleTeamId": "3FALF4GK4D"
       },
       "android": {
         "serviceAccountKeyPath": "./google-play-key.json",
