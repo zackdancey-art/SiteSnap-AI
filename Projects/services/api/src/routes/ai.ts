@@ -6,6 +6,7 @@ import { getMediaStorage } from "../storage/mediaStorage";
 import { listEntries, listSites } from "../storage/projectsStore";
 import { uploadBelongsToActorCompany } from "../storage/uploadsStore";
 import { Actor } from "../storage/actor";
+import type OpenAI from "openai";
 import { getOpenAIClient } from "../services/openaiClient";
 import { DiaryProvenance, signProvenance } from "../services/diaryProvenance";
 
@@ -58,10 +59,35 @@ type GenerateDiaryBody = z.infer<typeof GenerateDiaryBodySchema>;
 
 type OpenAIErrorLike = {
   status?: number;
+  message?: string;
+  error?: { message?: string };
   response?: {
     status?: number;
+    data?: { error?: { message?: string } };
   };
 };
+
+/**
+ * The provider's own description of what was wrong, e.g.
+ *   "Unsupported parameter: 'temperature' is not supported with this model."
+ *
+ * The SDK surfaces this in more than one shape depending on how the failure
+ * arose, so all of them are checked. Truncated because it ends up in a
+ * user-visible warning string and the useful part is always at the front.
+ */
+function rawOpenAIMessage(err: unknown): string | null {
+  if (typeof err !== "object" || err === null) return null;
+  const e = err as OpenAIErrorLike;
+  const raw =
+    e.error?.message ??
+    e.response?.data?.error?.message ??
+    e.message ??
+    null;
+  if (!raw) return null;
+  const text = String(raw).trim();
+  if (!text) return null;
+  return text.length > 200 ? `${text.slice(0, 197)}...` : text;
+}
 
 type DiarySection = {
   date: string;
@@ -398,7 +424,7 @@ export function buildDiaryFromEntries(entries: GenerateDiaryEntry[], period: Rep
   };
 }
 
-const SYSTEM_PROMPT = `You are a professional quantity surveyor and construction site manager writing a formal construction site diary report.
+export const SYSTEM_PROMPT = `You are a professional quantity surveyor and construction site manager writing a formal construction site diary report.
 
 Your task is to produce a detailed, accurate, and professionally written site diary based on:
 1. Site photographs (your PRIMARY source — analyse each image carefully)
@@ -448,6 +474,104 @@ Return strict JSON with exactly these fields:
   ]
 }`;
 
+/**
+ * Which models accept the sampling parameters (`temperature`, `top_p`).
+ *
+ * MEASURED against the live API on 2026-09-21, not inferred from the name:
+ *   gpt-4o, gpt-4o-mini, gpt-4.1, gpt-4.1-mini, gpt-4-turbo   temperature accepted
+ *   gpt-5.6-terra                                             HTTP 400
+ *     "Unsupported parameter: 'temperature' is not supported with this model."
+ *
+ * The default for an UNRECOGNISED model is to OMIT them, because the two
+ * directions of error are not symmetric:
+ *
+ *   omitting on a model that supports them -> the model samples at its own
+ *       default instead of our 0.3. A slightly less deterministic report.
+ *       Degraded output, still a report.
+ *   sending on a model that rejects them   -> HTTP 400 on every request, so
+ *       every generation silently becomes a template diary. That is the
+ *       outage this table exists because of (Sentry SITESNAP-API-9).
+ *
+ * So an unknown model still produces a WORKING request, and only a model we
+ * have positively verified gets the tuned temperature. To add one, send it a
+ * request with `temperature` against the real API and add it here only if that
+ * returns 200 — do not add a name because it looks like it belongs.
+ *
+ * ───────────────────────────────────────────────────────────────────────────
+ * IF YOU ARE HERE BECAUSE A NEW MODEL APPEARED: before setting OPENAI_MODEL in
+ * Render, run the live contract suite against it. Nothing in CI will catch a
+ * parameter incompatibility for you, because the boundary mock in
+ * services/openaiClient.ts returns a canned success for ANY argument object:
+ *
+ *     OPENAI_MODEL=<the-new-model> OPENAI_LIVE_TEST_KEY=sk-... \
+ *       pnpm -C Projects --filter services-api run test:openai
+ *
+ * That is the whole reason this table is hand-maintained rather than inferred.
+ * See §1 of docs/SiteSnap-Release-Runbook.md for the full procedure and the
+ * post-deploy check that `generator` is "openai" and not "fallback".
+ * ───────────────────────────────────────────────────────────────────────────
+ */
+const MODELS_SUPPORTING_SAMPLING_PARAMS: ReadonlySet<string> = new Set([
+  "gpt-4o",
+  "gpt-4o-mini",
+  "gpt-4.1",
+  "gpt-4.1-mini",
+  "gpt-4-turbo",
+]);
+
+/**
+ * Build the exact request body sent to the Responses API.
+ *
+ * Extracted as a pure function for one reason: the boundary mock in
+ * openaiClient.ts cannot tell us whether OpenAI ACCEPTS these parameters, only
+ * that we sent them. ai-openai-contract.test.ts takes the object this returns
+ * and posts it to the real API, so "the parameter set is valid for the
+ * configured model" is checked against the provider rather than against our own
+ * assumptions. Keep this the single construction path — an inline object at the
+ * call site would be untested by that contract test.
+ */
+export function buildDiaryRequest(
+  model: string,
+  systemPrompt: string,
+  userContent: OpenAIContentItem[]
+): OpenAI.Responses.ResponseCreateParamsNonStreaming {
+  return {
+    model,
+    input: [
+      { role: "system", content: [{ type: "input_text", text: systemPrompt }] },
+      { role: "user", content: userContent },
+    ],
+    // `temperature` is attached per-model rather than unconditionally. Stripping
+    // it globally would work for gpt-5.6-terra and quietly de-tune gpt-4o if
+    // OPENAI_MODEL is ever set back; see MODELS_SUPPORTING_SAMPLING_PARAMS.
+    ...(supportsSamplingParams(model) ? { temperature: 0.3 } : {}),
+    // NOT conditional — accepted by both families. It does require the word
+    // "json" to appear in the input messages, which SYSTEM_PROMPT satisfies;
+    // that is a property of the parameter, not of the model.
+    text: { format: { type: "json_object" } },
+  };
+}
+
+/**
+ * Dated snapshots inherit from their base model: "gpt-4o-2024-11-20" -> "gpt-4o".
+ * Exported for tests.
+ */
+/**
+ * The model this process will actually use. Single source of truth: the catch
+ * block reports the model in its warning and log line, and if it re-derived the
+ * name independently the two could disagree about what just failed.
+ */
+export function resolveModel(): string {
+  return process.env.OPENAI_MODEL || "gpt-4o";
+}
+
+export function supportsSamplingParams(model: string): boolean {
+  if (MODELS_SUPPORTING_SAMPLING_PARAMS.has(model)) return true;
+  // Strip a trailing -YYYY-MM-DD snapshot suffix and retry once.
+  const base = model.replace(/-\d{4}-\d{2}-\d{2}$/, "");
+  return base !== model && MODELS_SUPPORTING_SAMPLING_PARAMS.has(base);
+}
+
 function fallbackProvenance(warning: string): DiaryProvenance {
   return {
     generator: "fallback",
@@ -478,7 +602,7 @@ async function tryGenerateWithOpenAI(
   }
 
   const fallback = buildDiaryFromEntries(entries, period);
-  const model = process.env.OPENAI_MODEL || "gpt-4o";
+  const model = resolveModel();
   const client = getOpenAIClient();
 
   const { content: visionInputs, imageCount } = await buildVisionInputs(entries, actor);
@@ -511,21 +635,9 @@ async function tryGenerateWithOpenAI(
     ...visionInputs,
   ];
 
-  const response = await client.responses.create({
-    model,
-    input: [
-      {
-        role: "system",
-        content: [{ type: "input_text", text: SYSTEM_PROMPT }],
-      },
-      {
-        role: "user",
-        content: userContent,
-      },
-    ],
-    temperature: 0.3,
-    text: { format: { type: "json_object" } },
-  });
+  const response = await client.responses.create(
+    buildDiaryRequest(model, SYSTEM_PROMPT, userContent)
+  );
 
   const usage = response.usage
     ? { input: response.usage.input_tokens ?? 0, output: response.usage.output_tokens ?? 0 }
@@ -713,19 +825,38 @@ aiRouter.post("/generate-diary", requireAuth, rateLimitByCompany("generate-diary
       path: req.originalUrl,
       payloadBytes,
       siteId: body.siteId || null,
+      // The model is logged because a 400 is almost always about THIS value,
+      // and the HTTP response deliberately does not echo configuration back.
+      model: resolveModel(),
       message: err instanceof Error ? err.message : String(err),
       statusFromOpenAI: statusFromOpenAI ?? null,
+      // The provider's own words. Without this a 400 reaches Sentry as a bare
+      // status and the actual parameter name is lost.
+      openAIError: rawOpenAIMessage(err) ?? null,
     });
 
     try {
       const resolved = await resolveDiaryRequest(req as AuthenticatedRequest, body);
       const fallbackDiary = buildDiaryFromEntries(resolved.entries, resolved.period);
+      // A 400 is the provider telling us the REQUEST is wrong — an unsupported
+      // parameter, a model name that does not exist, a malformed input. It is a
+      // configuration fault on our side and it will repeat on every single
+      // request until someone changes something. Reporting it as "the AI service
+      // was unavailable" points the reader at OpenAI's status page for a problem
+      // that is entirely ours, which is exactly what happened with
+      // SITESNAP-API-9: a rejected `temperature` parameter spent a deploy
+      // looking like an outage.
       const warning =
-        statusFromOpenAI === 401
-          ? `${FALLBACK_NOTICE} The OpenAI API key was rejected (401).`
-          : statusFromOpenAI === 429
-            ? `${FALLBACK_NOTICE} OpenAI quota or credits are exhausted (429).`
-            : `${FALLBACK_NOTICE} The AI service was unavailable.`;
+        statusFromOpenAI === 400
+          ? `${FALLBACK_NOTICE} The AI request was rejected as invalid (400) for model ` +
+            `"${resolveModel()}". This is a configuration problem, not an outage — ` +
+            `check OPENAI_MODEL and the request parameters. ` +
+            `OpenAI said: ${rawOpenAIMessage(err) ?? "no detail provided"}`
+          : statusFromOpenAI === 401
+            ? `${FALLBACK_NOTICE} The OpenAI API key was rejected (401).`
+            : statusFromOpenAI === 429
+              ? `${FALLBACK_NOTICE} OpenAI quota or credits are exhausted (429).`
+              : `${FALLBACK_NOTICE} The AI service was unavailable.`;
       const provenance = fallbackProvenance(warning);
       logGeneration(req as AuthenticatedRequest, body, provenance, startedAt);
       return res.json({

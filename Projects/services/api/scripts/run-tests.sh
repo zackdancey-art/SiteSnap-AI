@@ -35,7 +35,7 @@
 set -eu
 
 MODE="${1:-}"
-[ -n "$MODE" ] || { echo "usage: run-tests.sh <memory|db|redis>" >&2; exit 2; }
+[ -n "$MODE" ] || { echo "usage: run-tests.sh <memory|db|redis|openai>" >&2; exit 2; }
 cd "$(dirname "$0")/.."
 
 # How many suites are gated on TEST_DATABASE_URL. Both modes check against this
@@ -69,6 +69,16 @@ EXPECTED_DB_SUITES=5
 #                proving nothing about the success path it exists to cover.
 EXPECTED_REDIS_TESTS=4
 
+# How many individual TESTS are gated on OPENAI_LIVE_TEST_KEY.
+#
+# These call the real OpenAI API and cost real money, so unlike the db and redis
+# modes this one is NEVER run in CI — ci.sh does not invoke it. It exists because
+# the boundary mock accepts any parameter set at all, so it cannot tell us
+# whether the provider accepts the request we build (Sentry SITESNAP-API-9: a
+# `temperature` the mock was happy with and gpt-5.6-terra rejected with a 400).
+# Run it by hand when changing the request shape or OPENAI_MODEL.
+EXPECTED_LIVE_OPENAI_TESTS=3
+
 case "$MODE" in
   memory)
     DESCRIPTION="in-memory suite"
@@ -77,6 +87,26 @@ case "$MODE" in
     # to * and silently matches only files exactly one directory deep.
     FILE_LIST=$(find dist -name '*.test.js' | sort)
     CONCURRENCY=""
+    ;;
+  openai)
+    DESCRIPTION="live OpenAI contract tests"
+    if [ -z "${OPENAI_LIVE_TEST_KEY:-}" ]; then
+      {
+        echo ""
+        echo "ERROR: openai mode requires OPENAI_LIVE_TEST_KEY to be set."
+        echo ""
+        echo "  Without it every contract test skips and the run exits 0, which is"
+        echo "  the exact silent-success this script exists to prevent."
+        echo ""
+        echo "  NOTE: these calls are BILLABLE and hit the real API. This mode is"
+        echo "  deliberately not part of CI."
+        echo "    OPENAI_LIVE_TEST_KEY=sk-... pnpm run test:openai"
+        echo ""
+      } >&2
+      exit 1
+    fi
+    FILE_LIST=$(grep -rl 'OPENAI_LIVE_TEST_KEY' dist --include='*.test.js' | sort || true)
+    CONCURRENCY="--test-concurrency=1"
     ;;
   redis)
     DESCRIPTION="Redis-gated tests"
@@ -105,7 +135,7 @@ case "$MODE" in
     CONCURRENCY="--test-concurrency=1"
     ;;
   *)
-    echo "run-tests.sh: unknown mode '$MODE' (expected 'memory', 'db' or 'redis')" >&2
+    echo "run-tests.sh: unknown mode '$MODE' (expected 'memory', 'db', 'redis' or 'openai')" >&2
     exit 2
     ;;
 esac
@@ -126,6 +156,10 @@ if [ -z "$FILE_LIST" ]; then
     elif [ "$MODE" = "redis" ]; then
       echo "  The Redis tests are selected by grepping dist/ for 'REDIS_TEST_URL'."
       echo "  If that env var was renamed, update the selector in this script."
+    elif [ "$MODE" = "openai" ]; then
+      echo "  The contract tests are selected by grepping dist/ for"
+      echo "  'OPENAI_LIVE_TEST_KEY'. If that env var was renamed, update the"
+      echo "  selector in this script."
     else
       echo "  Check that 'pnpm run build' emitted to dist/ before this ran."
     fi
@@ -211,10 +245,10 @@ if [ -z "$SKIPPED" ]; then
   exit 1
 fi
 
-if [ "$MODE" = "redis" ]; then
+if [ "$MODE" = "redis" ] || [ "$MODE" = "openai" ]; then
   EXPECTED_SKIPS=0
 else
-  EXPECTED_SKIPS=$((EXPECTED_DB_SUITES + EXPECTED_REDIS_TESTS))
+  EXPECTED_SKIPS=$((EXPECTED_DB_SUITES + EXPECTED_REDIS_TESTS + EXPECTED_LIVE_OPENAI_TESTS))
 fi
 
 if [ "$SKIPPED" -ne "$EXPECTED_SKIPS" ]; then
@@ -226,10 +260,14 @@ if [ "$SKIPPED" -ne "$EXPECTED_SKIPS" ]; then
       echo "  A Redis test skipped while REDIS_TEST_URL was set. The client could"
       echo "  not reach the server, so the success path went untested and the run"
       echo "  would otherwise have gone green having proved nothing."
+    elif [ "$MODE" = "openai" ]; then
+      echo "  A contract test skipped while OPENAI_LIVE_TEST_KEY was set, so the"
+      echo "  request shape went unverified against the real API."
     else
-      echo "  Expected $EXPECTED_DB_SUITES TEST_DATABASE_URL-gated suite(s) plus"
-      echo "  $EXPECTED_REDIS_TESTS REDIS_TEST_URL-gated test(s), each of which must"
-      echo "  register a skip here and then actually run in its own pass."
+      echo "  Expected $EXPECTED_DB_SUITES TEST_DATABASE_URL-gated suite(s), plus"
+      echo "  $EXPECTED_REDIS_TESTS REDIS_TEST_URL-gated test(s), plus"
+      echo "  $EXPECTED_LIVE_OPENAI_TESTS OPENAI_LIVE_TEST_KEY-gated test(s), each of"
+      echo "  which must register a skip here and then actually run in its own pass."
       echo ""
       echo "  FEWER than expected: a suite stopped skipping — it may now be running"
       echo "  its assertions against the in-memory store, where RLS does not exist"
@@ -244,22 +282,27 @@ fi
 
 # The positive control for the Redis pass. Zero skips alone is satisfied by a
 # selector that matched nothing meaningful; this pins the number that ran.
-if [ "$MODE" = "redis" ]; then
+if [ "$MODE" = "redis" ] || [ "$MODE" = "openai" ]; then
+  if [ "$MODE" = "redis" ]; then
+    EXPECTED_PASSES=$EXPECTED_REDIS_TESTS; COUNTER_NAME=EXPECTED_REDIS_TESTS; TARGET=$REDIS_TEST_URL
+  else
+    EXPECTED_PASSES=$EXPECTED_LIVE_OPENAI_TESTS; COUNTER_NAME=EXPECTED_LIVE_OPENAI_TESTS; TARGET="the live OpenAI API"
+  fi
   PASSED=$(awk '/^# pass /{print $3}' "$OUT" | tail -1)
-  if [ "${PASSED:-0}" -ne "$EXPECTED_REDIS_TESTS" ]; then
+  if [ "${PASSED:-0}" -ne "$EXPECTED_PASSES" ]; then
     {
       echo ""
-      echo "ERROR: redis run passed ${PASSED:-0} test(s), expected $EXPECTED_REDIS_TESTS."
+      echo "ERROR: $MODE run passed ${PASSED:-0} test(s), expected $EXPECTED_PASSES."
       echo ""
-      echo "  Update EXPECTED_REDIS_TESTS in the same commit that adds or removes"
-      echo "  a Redis-gated test. If you did not change one, tests stopped being"
-      echo "  selected — find out which before changing the number."
+      echo "  Update $COUNTER_NAME in the same commit that adds or removes such a"
+      echo "  test. If you did not change one, tests stopped being selected —"
+      echo "  find out which before changing the number."
       echo ""
     } >&2
     exit 1
   fi
-  echo "run-tests.sh: $PASSED Redis-gated test(s) ran against $REDIS_TEST_URL, 0 skipped"
+  echo "run-tests.sh: $PASSED $MODE test(s) ran against $TARGET, 0 skipped"
   exit 0
 fi
 
-echo "run-tests.sh: $SKIPPED skip(s), as expected — each runs for real under test:db / test:redis"
+echo "run-tests.sh: $SKIPPED skip(s), as expected — each runs for real under test:db / test:redis / test:openai"

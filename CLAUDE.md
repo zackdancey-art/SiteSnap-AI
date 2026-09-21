@@ -124,11 +124,25 @@ The API `test` script cleans `dist/`, compiles, and then runs `node --test` over
 - The runner enumerates files with **`find dist -name '*.test.js'`, not a shell glob.** Do **not** revert this to `node --test dist/**/*.test.js`: `pnpm`/npm run scripts under `sh`, which has no globstar, so `**` collapses to `*` and the pattern silently matches only files exactly one directory deep — a test at the `dist/` root, or two-plus directories deep, never runs *and is never reported as skipped*. `find` is depth-independent and matches the files on disk exactly. (`node --test dist` directory recursion is also wrong — its broad default patterns re-pick-up `dist/test-setup.js`, the `--require` preload.)
 - The leading `rm -rf dist tsconfig.tsbuildinfo` forces a clean full compile every run. The project is `composite: true` (incremental), so deleting `dist` alone leaves the buildinfo and tsc under-emits; and without the clean a renamed/deleted test can linger in `dist` as a stale, still-passing copy.
 
-**Two test runs, not one — `test` (in-memory) and `test:db` (Postgres).** The `test` script above runs **without** `TEST_DATABASE_URL`: the DB-gated suites register a skip and everything else runs against the in-memory store. The `test:db` script runs the **DB-gated** suites against a real Postgres (`TEST_DATABASE_URL` set). They are deliberately separate because some stores are **test-aware** (`useDatabase()` returns true when `TEST_DATABASE_URL` is set under `NODE_ENV=test`, e.g. `projectsStore`), so setting `TEST_DATABASE_URL` for the *whole* suite flips those stores to the DB and breaks tests that assume the in-memory store. Two rules for `test:db`:
+**Three test runs, not one — `test` (in-memory), `test:db` (Postgres) and `test:redis` (Redis), plus the opt-in `test:openai` below.** The `test` script above runs **without** `TEST_DATABASE_URL`: the DB-gated suites register a skip and everything else runs against the in-memory store. The `test:db` script runs the **DB-gated** suites against a real Postgres (`TEST_DATABASE_URL` set). They are deliberately separate because some stores are **test-aware** (`useDatabase()` returns true when `TEST_DATABASE_URL` is set under `NODE_ENV=test`, e.g. `projectsStore`), so setting `TEST_DATABASE_URL` for the *whole* suite flips those stores to the DB and breaks tests that assume the in-memory store. Two rules for `test:db`:
 - It targets **exactly** the files guarded by `if (!process.env.TEST_DATABASE_URL)` — `grep -rl '!process.env.TEST_DATABASE_URL' dist`. A test that merely *mentions* `TEST_DATABASE_URL` in a comment (comments are stripped in `dist`) or `delete`s it is an in-memory test and must **not** be swept in.
 - It runs **`--test-concurrency=1`**. `node --test` runs files in parallel by default; DB suites all migrate/seed the same database, so parallel runs race and fail spuriously. Sequential is mandatory for the DB path.
 
-**Both suites refuse to pass vacuously.** `services/api/scripts/run-tests.sh` enumerates the files, and a selector that matches **nothing** is a failure rather than the exit-0 clean pass `node --test` gives it. It also pins `EXPECTED_DB_SUITES=5`, checked from both sides: `db` mode must select exactly 5 files, and the in-memory run must report exactly 5 skips. Adding or removing a DB-gated suite means raising that number **in the same commit** — that is the point, so the change is deliberate and visible in review rather than a count drifting unobserved.
+**Every mode refuses to pass vacuously.** `services/api/scripts/run-tests.sh` enumerates the files, and a selector that matches **nothing** is a failure rather than the exit-0 clean pass `node --test` gives it. It pins three counters, each checked from both sides — the gated run must select/pass exactly that many, and the in-memory run must report them all as skips:
+
+| counter | unit | what it gates |
+|---|---|---|
+| `EXPECTED_DB_SUITES=5` | per **suite** | `TEST_DATABASE_URL` — RLS, store round-trip |
+| `EXPECTED_REDIS_TESTS=4` | per **test** | `REDIS_TEST_URL` — the reachable-Redis path |
+| `EXPECTED_LIVE_OPENAI_TESTS=3` | per **test** | `OPENAI_LIVE_TEST_KEY` — the live OpenAI request contract |
+
+So the in-memory run must report exactly **12** skips (5 + 4 + 3). Adding or removing a gated suite/test means changing the matching number **in the same commit** — that is the point, so the change is deliberate and visible in review rather than a count drifting unobserved.
+
+**`test:openai` is opt-in and deliberately NOT in CI.** It makes real, billable calls. It exists because the `openaiClient.ts` boundary mock returns a canned success for *any* argument object, so it can prove we sent the parameters we meant to but never that OpenAI accepts them — the gap Sentry SITESNAP-API-9 lived in, where a `temperature` the mock was happy with drew a 400 from `gpt-5.6-terra` and every diary silently became a template. Run it by hand when changing the request shape or `OPENAI_MODEL`:
+
+```
+OPENAI_LIVE_TEST_KEY=sk-... pnpm -C Projects --filter services-api run test:openai
+```
 
 The DB round-trip guard (`storage/store-roundtrip.test.ts`) lives here: it drives each store's real full-column INSERT against a boot-migrated Postgres and reads it back, so a store-vs-schema column drift (L10 timecards, L11 diaries) fails CI instead of 500ing in prod. Static column audits can't catch a `CREATE TABLE IF NOT EXISTS` no-op column (see L11) — only a real round-trip can.
 
