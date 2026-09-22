@@ -10,7 +10,8 @@
       "channel": "development",
       "env": {
         "APP_ENV": "development",
-        "EXPO_PUBLIC_API_URL": "http://localhost:4000"
+        "EXPO_PUBLIC_API_URL": "http://localhost:4000",
+        "SENTRY_DISABLE_AUTO_UPLOAD": "true"
       },
       "ios": {
         "simulator": true
@@ -24,7 +25,8 @@
       "developmentClient": false,
       "env": {
         "APP_ENV": "simulator",
-        "EXPO_PUBLIC_API_URL": "https://api.getsitesnapai.com"
+        "EXPO_PUBLIC_API_URL": "https://api.getsitesnapai.com",
+        "SENTRY_DISABLE_AUTO_UPLOAD": "true"
       },
       "ios": {
         "simulator": true

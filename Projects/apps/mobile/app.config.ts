@@ -122,10 +122,29 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         "@sentry/react-native/expo",
         {
           // Uploads source maps so Sentry can de-obfuscate stack traces.
-          // Requires SENTRY_AUTH_TOKEN + SENTRY_ORG + SENTRY_PROJECT in the
-          // EAS build environment. Safe to omit — native crash reporting still
-          // works without source maps; frames will just show minified names.
-          // Organization and project slugs are set via EAS secrets/env vars.
+          //
+          // NOT optional, despite what this comment used to claim. This plugin
+          // adds an Xcode build phase that runs `sentry-cli`, and that phase
+          // FAILS THE BUILD when it cannot find an org — "error: An organization
+          // ID or slug is required (provide with --org)". It is not a warning and
+          // there is no silent degrade to "no source maps". Two ways to satisfy it:
+          //
+          //   1. Set SENTRY_ORG + SENTRY_PROJECT + SENTRY_AUTH_TOKEN in the EAS
+          //      build environment. This is what production and preview do — see
+          //      `eas env:list`. Source maps upload and production stack traces
+          //      are readable.
+          //   2. Set SENTRY_DISABLE_AUTO_UPLOAD=true. This is what the simulator
+          //      and development profiles do in eas.json: they are for local UI
+          //      review, the JS is not shipped anywhere, and uploading its source
+          //      maps would only pollute the Sentry project with noise releases.
+          //
+          // A profile that does NEITHER does not build. If you add a build profile
+          // to eas.json, it needs one of the two.
+          //
+          // Native crash reporting does still work without source maps — but a
+          // JS-layer error, which is most of what this app can throw, arrives as
+          // minified frames that are nearly useless for diagnosis. That is why
+          // production uploads rather than disabling.
         },
       ],
       ...(UPDATES_ENABLED ? ["expo-updates"] : []),
