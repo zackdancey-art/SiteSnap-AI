@@ -11,6 +11,12 @@
     "jsEngine": "hermes",
     "plugins": [
       "expo-router"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "0252315c-1864-4d41-8e6a-90828608b0cd"
+      }
+    },
+    "owner": "zackdancey"
   }
 }

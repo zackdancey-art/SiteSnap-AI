@@ -339,3 +339,22 @@ Note that the enumeration signal is not confined to the status code. Timing is a
 4. Cover it with a test that asserts the unknown-account and wrong-password responses are **byte-identical** (status and body), with a positive control proving both requests actually reached the login handler — an assertion that two responses match is otherwise satisfied by two requests that both failed earlier for some unrelated reason.
 
 Related: the same consideration applies to any other endpoint that distinguishes "this identifier exists" from "it does not" — `forgot-password` should be checked for the same leak at the same time.
+
+### L19 — pnpm's isolated `node-linker` breaks native build scripts that `require.resolve` a transitive dependency — MEDIUM (build fragility)
+
+There is no `.npmrc` in the repo, so pnpm uses its default **isolated** node-linker: `apps/mobile/node_modules` contains symlinks for that package's **direct** dependencies only, and everything else lives in the content-addressed `Projects/node_modules/.pnpm/` store, reachable through the dependency graph but **not** by a bare Node resolution walk from the app directory.
+
+React Native's native build scripts do exactly that bare walk. Two independent instances failed the first EAS iOS builds:
+
+- **`RNReanimated.podspec`** (`find_config()`) shells out to `node -e "require.resolve('react-native-worklets/package.json')"` with the CWD set to `apps/mobile/ios`. `react-native-worklets` is a **peer** dependency of `react-native-reanimated@4.1.6`, not a direct dependency of the app, so it was present in the store but unresolvable from there → `MODULE_NOT_FOUND` → `Invalid Podfile file` → the `Install pods` phase failed.
+- **`@sentry/react-native`'s Xcode build phase** does the same for `@sentry/cli/package.json`, which it pins at `3.4.1` as its own dependency → the `Run fastlane` phase failed.
+
+Both present as an error in a *third-party* file, which is what makes them expensive to diagnose: nothing in the repo is wrong, and the same `package.json` installs and typechecks perfectly under npm or Yarn. Note also that neither is caught by any local gate — `typecheck`, `lint` and the full test suite all pass, because no JavaScript ever imports these packages. Only a real native build exercises the path.
+
+**Current remedy (applied):** add each offending package as a **direct** dependency of `apps/mobile`, pinned to the exact version already resolved transitively (`react-native-worklets@~0.7.4`, `@sentry/cli@3.4.1`), so pnpm links it into `apps/mobile/node_modules` without moving any other package in the graph. Verified by `require.resolve` from the app directory failing before and succeeding after — the same check the podspec runs.
+
+This is per-instance whack-a-mole. It will recur on the next native dependency whose build script resolves a transitive package, and the failure will again surface as an opaque error inside someone else's podspec.
+
+**Disposition:** OPEN, deliberately deferred. The structural fix is `node-linker=hoisted` in a root `.npmrc`, which is the documented remedy for exactly this class and is what most React Native + pnpm monorepos run. It was **consciously not taken during the pre-launch EAS work**: it changes the install layout for **all** workspaces — `services/api` and `apps/supervisor-web` included, neither of which has this problem — and hoisting makes previously-unresolvable packages resolvable, which can mask a genuinely missing dependency declaration and change which transitive version wins a bare import. That is a poor trade to make days before a first TestFlight submission, on a shared lockfile, to fix a problem that already has a working targeted workaround.
+
+Take it up as its own branch once the release is out, and gate it on: a green `./scripts/ci.sh` (full, with DB), a successful iOS simulator build, and a successful `services/api` Docker build — the three consumers of the install layout. If it lands, the two direct dependencies added above become redundant and should be removed in the same commit, so the workaround does not outlive the reason for it.
