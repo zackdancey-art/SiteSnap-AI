@@ -172,7 +172,7 @@ function RootLayout() {
       <QueryClientProvider client={queryClient}>
         <AuthProvider>
           <DataProvider>
-            <GestureHandlerRootView>
+            <GestureHandlerRootView style={{ flex: 1 }}>
               <RootLayoutNav />
             </GestureHandlerRootView>
           </DataProvider>
