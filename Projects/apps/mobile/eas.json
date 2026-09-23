@@ -66,7 +66,7 @@
     "production": {
       "ios": {
         "appleId": "admin@getsitesnapai.com",
-        "ascAppId": "REPLACE-WITH-10-DIGIT-ASC-APP-ID",
+        "ascAppId": "6813701040",
         "appleTeamId": "3FALF4GK4D"
       },
       "android": {
