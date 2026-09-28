@@ -128,6 +128,18 @@ function RootLayoutNav() {
           headerTintColor: Colors.primary,
         }}
       />
+      {/* terms-of-service was reachable (Settings pushed to it) but never
+          registered, so it fell through to the bare root screenOptions and was
+          the one pushed screen with no title in its header. Registered here to
+          match privacy-policy, its sibling. */}
+      <Stack.Screen
+        name="terms-of-service"
+        options={{
+          title: "Terms of Service",
+          headerShown: true,
+          headerTintColor: Colors.primary,
+        }}
+      />
       <Stack.Screen
         name="help-support"
         options={{
