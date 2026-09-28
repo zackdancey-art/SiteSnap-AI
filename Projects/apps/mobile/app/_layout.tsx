@@ -152,6 +152,11 @@ function RootLayoutNav() {
       <Stack.Screen name="incidents/[siteId]" options={{ headerShown: false }} />
       <Stack.Screen name="inspections/[siteId]" options={{ headerShown: false }} />
       <Stack.Screen name="deliveries/[siteId]" options={{ headerShown: false }} />
+      {/* Settings drill-down. Pattern B (headerShown: false + shared
+          ScreenHeader), matching the other pushed detail screens. */}
+      <Stack.Screen name="settings/account" options={{ headerShown: false }} />
+      <Stack.Screen name="settings/data-privacy" options={{ headerShown: false }} />
+      <Stack.Screen name="settings/about" options={{ headerShown: false }} />
     </Stack>
     </>
   );
