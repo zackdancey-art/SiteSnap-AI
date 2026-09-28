@@ -34,7 +34,7 @@ export default function AccountSettingsScreen() {
     : null;
 
   const isDirty = changingPassword && !!(pwCurrent || pwNew || pwConfirm);
-  const markSaved = useUnsavedChangesGuard(isDirty);
+  useUnsavedChangesGuard(isDirty);
 
   const clearPasswordForm = () => {
     setPwCurrent("");
@@ -66,12 +66,15 @@ export default function AccountSettingsScreen() {
         const data = (await res.json()) as { error?: string };
         throw new Error(data.error || "Failed to change password.");
       }
-      // Clear and mark saved BEFORE the alert: the guard must stop treating the
-      // form as dirty the moment the change lands, or dismissing the success
-      // alert and going back would prompt to discard an already-saved change.
+      // Clear BEFORE the alert so the guard stops treating the form as dirty the
+      // moment the change lands. That is sufficient on its own: collapsing the
+      // form makes isDirty false on the next render, which React flushes long
+      // before a human dismisses a modal alert. Deliberately NOT calling
+      // markSaved() here -- this screen stays mounted after saving, and that
+      // latch is only safe when the save is immediately followed by navigating
+      // away (see lib/useUnsavedChangesGuard.ts).
       clearPasswordForm();
       setChangingPassword(false);
-      markSaved();
       Alert.alert("Success", "Your password has been updated.");
     } catch (err) {
       Alert.alert("Error", err instanceof Error ? err.message : "Failed to change password.");

@@ -167,8 +167,15 @@ A new Pattern B screen MUST get a `Stack.Screen` entry in the same commit.
 **Back always has a destination.** `goBackSafe()` in `components/BackButton.tsx`
 falls back to `router.replace(homeFallback)` when `router.canGoBack()` is false,
 because any screen can be entered by deep link with an empty history, and
-`router.back()` there strands the user on a screen with a dead back button. Pass
-`homeFallback` on every `ScreenHeader` whose screen is reachable by a link.
+`router.back()` there strands the user on a screen with a dead back button.
+
+The parameter defaults to `/(tabs)`, which is the right destination for most
+screens, and eight existing call sites correctly rely on that default
+(`company-invite`, `crew/[siteId]`, `site-invite`, `diary-gallery/[siteId]`,
+`inspections/[siteId]`, `incidents/[siteId]`, `deliveries/[siteId]`). Pass
+`homeFallback` explicitly only where the sensible landing place is NOT the tab
+root — e.g. a settings sub-screen, which passes `/(tabs)/settings` so a
+deep-linked user lands back in Settings rather than on Sites.
 
 **An unsaved-changes guard also disables the swipe.** `lib/useUnsavedChangesGuard`
 intercepts `beforeRemove` with a "Discard changes?" alert AND sets
@@ -178,9 +185,19 @@ without the alert ever being presented, so a guard that leaves the gesture
 enabled is a guard with a documented bypass — which is worse than none, because
 it reads as protection. The cost is accepted: while a form is dirty the user
 loses the swipe and must use the back button, which is what surfaces the prompt.
-When `isDirty` goes false the gesture returns. Call the returned `markSaved`
-immediately on a successful save, before showing any success alert — otherwise
-dismissing that alert and going back prompts to discard a change already saved.
+When `isDirty` goes false the gesture returns.
+
+`markSaved` is narrower than it looks, and the narrowness is the point. It sets a
+latch that suppresses the guard, and it exists for one sequence only: a save
+whose very next statement navigates away (`markSaved(); router.back();` — the
+form is still dirty at that instant and no render can flush in between, so
+without the latch the programmatic exit would prompt). A screen that saves and
+STAYS mounted must not call it. Such a screen does not need it — clearing the
+form makes `isDirty` false on the next render, which React flushes long before a
+human dismisses a success alert — and calling it anyway would suppress the guard
+for every later edit on that screen. The hook re-arms the latch whenever the form
+goes clean, so a misuse costs one unguarded exit rather than a screen whose guard
+is dead for good; do not rely on that, it is a backstop and not a licence.
 
 ## 10. Observed facts (plain list)
 

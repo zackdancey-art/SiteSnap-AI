@@ -14,6 +14,13 @@ import { useNavigation } from "expo-router";
  * successful save so the guard lets that programmatic exit through without a
  * spurious discard prompt (the form state is still "dirty" at that point — no
  * React render can flush between the save and the synchronous `router.back()`).
+ *
+ * `markSaved` is ONLY for that save-then-leave sequence. A screen that saves and
+ * STAYS mounted must not call it: it does not need to (clearing the form makes
+ * `isDirty` false on the next render, which is enough), and the latch it sets
+ * would otherwise suppress the guard for the rest of the screen's life. The
+ * latch therefore re-arms below whenever the form goes clean again, so a misuse
+ * degrades to one unguarded exit rather than a permanently disarmed screen.
  */
 export function useUnsavedChangesGuard(isDirty: boolean): () => void {
   const navigation = useNavigation();
@@ -22,6 +29,12 @@ export function useUnsavedChangesGuard(isDirty: boolean): () => void {
   useEffect(() => {
     navigation.setOptions({ gestureEnabled: !isDirty });
   }, [isDirty, navigation]);
+
+  // Re-arm once the form is clean. The save-then-leave callers never reach this
+  // (they unmount while still dirty), so it cannot let their exit be prompted.
+  useEffect(() => {
+    if (!isDirty) savedRef.current = false;
+  }, [isDirty]);
 
   useEffect(() => {
     const unsubscribe = navigation.addListener("beforeRemove", (e) => {

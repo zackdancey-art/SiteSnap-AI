@@ -129,9 +129,10 @@ function RootLayoutNav() {
         }}
       />
       {/* terms-of-service was reachable (Settings pushed to it) but never
-          registered, so it fell through to the bare root screenOptions and was
-          the one pushed screen with no title in its header. Registered here to
-          match privacy-policy, its sibling. */}
+          registered, so it fell through to the bare root screenOptions and
+          showed its raw route name ("terms-of-service") as the header title,
+          native-stack's default. Registered here to match privacy-policy, its
+          sibling. */}
       <Stack.Screen
         name="terms-of-service"
         options={{
