@@ -149,6 +149,39 @@ Files: `diary/[siteId].tsx`, `data-context.tsx`, API `routes/ai.ts`, `services/o
 - **Mobile: zero tests. Web: zero tests. Shared: zero tests.**
 - No eval harness for LLM output quality; `ai.test.ts` exercises the deterministic fallback path, not live generation.
 
+## 9a. Mobile navigation contracts
+
+Three conventions in `apps/mobile` that are easy to break by accident, because
+breaking them produces something that looks correct.
+
+**Two header patterns, deliberately.** Pattern A is the native Stack header
+(`headerShown: true` in `app/_layout.tsx`, `headerTintColor: Colors.primary`) and
+is used by the modals and the standalone document screens. Pattern B is
+`headerShown: false` plus the shared `components/ScreenHeader`, and is used by
+pushed detail screens that need a subtitle, a right-hand action, or a navy
+variant. Both are legitimate; what is not legitimate is Pattern B without the
+registration, because the root Stack's default is `headerShown: true` and the
+screen then renders a bare native header stacked on top of its ScreenHeader.
+A new Pattern B screen MUST get a `Stack.Screen` entry in the same commit.
+
+**Back always has a destination.** `goBackSafe()` in `components/BackButton.tsx`
+falls back to `router.replace(homeFallback)` when `router.canGoBack()` is false,
+because any screen can be entered by deep link with an empty history, and
+`router.back()` there strands the user on a screen with a dead back button. Pass
+`homeFallback` on every `ScreenHeader` whose screen is reachable by a link.
+
+**An unsaved-changes guard also disables the swipe.** `lib/useUnsavedChangesGuard`
+intercepts `beforeRemove` with a "Discard changes?" alert AND sets
+`navigation.setOptions({ gestureEnabled: !isDirty })`. The second half is not an
+oversight to be tidied away: on iOS the swipe-back gesture can dismiss a screen
+without the alert ever being presented, so a guard that leaves the gesture
+enabled is a guard with a documented bypass — which is worse than none, because
+it reads as protection. The cost is accepted: while a form is dirty the user
+loses the swipe and must use the back button, which is what surfaces the prompt.
+When `isDirty` goes false the gesture returns. Call the returned `markSaved`
+immediately on a successful save, before showing any success alert — otherwise
+dismissing that alert and going back prompts to discard a change already saved.
+
 ## 10. Observed facts (plain list)
 
 1. One LLM call site total; prompt is an inline string literal; model default `gpt-4o` via env override; temp 0.3; JSON-object mode (not strict JSON schema); no streaming; no token/latency/cost logging beyond Sentry errors and a `payloadBytes` log on failure.
