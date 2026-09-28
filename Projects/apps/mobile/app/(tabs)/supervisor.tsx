@@ -1,26 +1,53 @@
 import React from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { router } from "expo-router";
 import { useData } from "@/lib/data-context";
 import { useAuth } from "@/lib/auth-context";
+import { TabScreenInsets, useTabScreenInsets } from "@/lib/useScreenInsets";
 import Colors from "@/constants/colors";
 
 export default function SupervisorTabScreen() {
+  return (
+    <TabScreenInsets>
+      <SupervisorContent />
+    </TabScreenInsets>
+  );
+}
+
+/**
+ * This screen had no safe-area handling at all: a bare `padding: 16` container
+ * put "Supervisor Dashboard" 16pt from the physical top of the display, under
+ * the status bar, on both the normal and the Access Restricted branch. It is the
+ * only screen in the app with that fault — the other two tab screens size their
+ * own headers off the top inset, the seven pushed screens get it from the shared
+ * ScreenHeader, and the eight native-header screens get it from the OS.
+ *
+ * It is also inside the (tabs) group, so it needs the bottom inset for the tab
+ * bar like the other two. The content is short enough to fit today, but it grows
+ * with the number of metrics, so it scrolls rather than relying on that.
+ */
+function SupervisorContent() {
+  const insets = useTabScreenInsets();
   const { sites, entries, diaries } = useData();
   const { user } = useAuth();
   const canSeeSupervisor = user?.companyRole === "owner" || user?.companyRole === "manager";
 
+  const contentStyle = [
+    styles.content,
+    { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 24 },
+  ];
+
   if (!canSeeSupervisor) {
     return (
-      <View style={styles.container}>
+      <ScrollView style={styles.container} contentContainerStyle={contentStyle}>
         <Text style={styles.title}>Access Restricted</Text>
         <Text style={styles.subtitle}>Supervisor dashboard is only visible for assigned supervisor accounts.</Text>
-      </View>
+      </ScrollView>
     );
   }
 
   return (
-    <View style={styles.container}>
+    <ScrollView style={styles.container} contentContainerStyle={contentStyle}>
       <Text style={styles.title}>Supervisor Dashboard</Text>
       <Text style={styles.subtitle}>Monitor project activity and report readiness.</Text>
       <View style={styles.card}>
@@ -31,12 +58,13 @@ export default function SupervisorTabScreen() {
       <Pressable style={styles.button} onPress={() => router.push("/supervisor-dashboard")}>
         <Text style={styles.buttonText}>Open Full Dashboard</Text>
       </Pressable>
-    </View>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.background, padding: 16, gap: 12 },
+  container: { flex: 1, backgroundColor: Colors.background },
+  content: { paddingHorizontal: 16, gap: 12 },
   title: { fontSize: 24, fontFamily: "Inter_700Bold", color: Colors.text },
   subtitle: { fontSize: 14, fontFamily: "Inter_400Regular", color: Colors.textSecondary },
   card: {

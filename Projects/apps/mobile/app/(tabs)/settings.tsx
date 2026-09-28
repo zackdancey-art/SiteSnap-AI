@@ -10,12 +10,12 @@ import {
   Image,
   ActivityIndicator,
 } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { router, useFocusEffect } from "expo-router";
 import { useAuth } from "@/lib/auth-context";
 import { SettingsRow, SettingsDivider } from "@/components/SettingsRow";
 import { SettingsCard, SettingsSection } from "@/components/SettingsSection";
+import { TabScreenInsets, useTabScreenInsets } from "@/lib/useScreenInsets";
 import Colors from "@/constants/colors";
 import { DEFAULT_PROFILE, getLocalProfile } from "@/lib/profile-store";
 
@@ -40,13 +40,18 @@ import { DEFAULT_PROFILE, getLocalProfile } from "@/lib/profile-store";
  * comes back when notifications do.
  */
 export default function SettingsScreen() {
-  const insets = useSafeAreaInsets();
+  return (
+    <TabScreenInsets>
+      <SettingsContent />
+    </TabScreenInsets>
+  );
+}
+
+function SettingsContent() {
+  const insets = useTabScreenInsets();
   const { user, logout, token } = useAuth();
   const [profile, setProfile] = useState(DEFAULT_PROFILE);
   const [deletingAccount, setDeletingAccount] = useState(false);
-
-  const webTopInset = Platform.OS === "web" ? 67 : 0;
-  const webBottomInset = Platform.OS === "web" ? 34 : 0;
 
   useFocusEffect(
     React.useCallback(() => {
@@ -110,12 +115,14 @@ export default function SettingsScreen() {
 
   return (
     <View style={styles.container}>
-      <View style={[styles.header, { paddingTop: insets.top + webTopInset + 8 }]}>
+      <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
         <Text style={styles.headerTitle}>Settings</Text>
       </View>
 
       <ScrollView
-        contentContainerStyle={{ paddingBottom: 100 + webBottomInset }}
+        // insets.bottom clears the tab bar (measured, see lib/useScreenInsets);
+        // the +24 is breathing room below the last card, not a guess at the bar.
+        contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
         contentInsetAdjustmentBehavior="automatic"
         showsVerticalScrollIndicator={false}
       >

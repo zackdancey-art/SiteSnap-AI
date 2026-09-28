@@ -6,15 +6,14 @@ import {
   Pressable,
   TextInput,
   StyleSheet,
-  Platform,
   RefreshControl,
 } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons, Feather } from "@expo/vector-icons";
 import { router } from "expo-router";
 import { useData } from "@/lib/data-context";
 import Colors from "@/constants/colors";
 import { Site } from "@/lib/types";
+import { TabScreenInsets, useTabScreenInsets } from "@/lib/useScreenInsets";
 
 function SiteCard({ site }: { site: Site }) {
   const entryCount = useData().entries.filter((e) => e.siteId === site.id).length;
@@ -66,12 +65,18 @@ function SiteCard({ site }: { site: Site }) {
 }
 
 export default function SitesScreen() {
-  const insets = useSafeAreaInsets();
+  return (
+    <TabScreenInsets>
+      <SitesContent />
+    </TabScreenInsets>
+  );
+}
+
+function SitesContent() {
+  const insets = useTabScreenInsets();
   const { sites } = useData();
   const [search, setSearch] = useState("");
   const [refreshing, setRefreshing] = useState(false);
-
-  const webTopInset = Platform.OS === "web" ? 67 : 0;
 
   const filtered = useMemo(() => {
     if (!search.trim()) return sites;
@@ -93,7 +98,7 @@ export default function SitesScreen() {
 
   return (
     <View style={styles.container}>
-      <View style={[styles.header, { paddingTop: insets.top + webTopInset + 8 }]}>
+      <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
         <View style={styles.headerTop}>
           <View>
             <Text style={styles.headerTitle}>My Sites</Text>
@@ -129,7 +134,9 @@ export default function SitesScreen() {
         data={filtered}
         keyExtractor={(item) => item.id}
         renderItem={({ item }) => <SiteCard site={item} />}
-        contentContainerStyle={[styles.listContent, { paddingBottom: 100 }]}
+        // insets.bottom clears the tab bar (measured, see lib/useScreenInsets);
+        // the +24 is breathing room below the last card, not a guess at the bar.
+        contentContainerStyle={[styles.listContent, { paddingBottom: insets.bottom + 24 }]}
         contentInsetAdjustmentBehavior="automatic"
         showsVerticalScrollIndicator={false}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={Colors.accent} />}

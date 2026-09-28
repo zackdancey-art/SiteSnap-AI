@@ -6,6 +6,7 @@ import { Ionicons } from "@expo/vector-icons";
 import React from "react";
 import Colors from "@/constants/colors";
 import { useAuth } from "@/lib/auth-context";
+import { ClassicTabBarProvider, useClassicTabBarMeasurement } from "@/lib/useScreenInsets";
 
 function NativeTabLayout({ canSeeSupervisor }: { canSeeSupervisor: boolean }) {
   return (
@@ -31,6 +32,7 @@ function NativeTabLayout({ canSeeSupervisor }: { canSeeSupervisor: boolean }) {
 function ClassicTabLayout({ canSeeSupervisor }: { canSeeSupervisor: boolean }) {
   const isWeb = Platform.OS === "web";
   const isIOS = Platform.OS === "ios";
+  const { onBarLayout } = useClassicTabBarMeasurement();
 
   return (
     <Tabs
@@ -52,10 +54,16 @@ function ClassicTabLayout({ canSeeSupervisor }: { canSeeSupervisor: boolean }) {
           elevation: 0,
           ...(isWeb ? { height: 84 } : {}),
         },
-        tabBarBackground: () =>
-          isIOS || isWeb ? (
-            <View style={[StyleSheet.absoluteFill, { backgroundColor: Colors.primary }]} />
-          ) : null,
+        // onLayout here is the ONLY runtime measurement of the classic tab bar
+        // available to the screens inside it (see lib/useScreenInsets.tsx). The
+        // view is rendered on every platform so Android is measured too; the
+        // brand fill stays iOS/web-only, so what is drawn does not change.
+        tabBarBackground: () => (
+          <View
+            onLayout={onBarLayout}
+            style={[StyleSheet.absoluteFill, (isIOS || isWeb) && { backgroundColor: Colors.primary }]}
+          />
+        ),
       }}
     >
       <Tabs.Screen
@@ -94,8 +102,13 @@ function ClassicTabLayout({ canSeeSupervisor }: { canSeeSupervisor: boolean }) {
 export default function TabLayout() {
   const { user } = useAuth();
   const canSeeSupervisor = user?.companyRole === "owner" || user?.companyRole === "manager";
-  if (isLiquidGlassAvailable()) {
-    return <NativeTabLayout canSeeSupervisor={canSeeSupervisor} />;
-  }
-  return <ClassicTabLayout canSeeSupervisor={canSeeSupervisor} />;
+  return (
+    <ClassicTabBarProvider>
+      {isLiquidGlassAvailable() ? (
+        <NativeTabLayout canSeeSupervisor={canSeeSupervisor} />
+      ) : (
+        <ClassicTabLayout canSeeSupervisor={canSeeSupervisor} />
+      )}
+    </ClassicTabBarProvider>
+  );
 }
