@@ -1,5 +1,5 @@
 import React from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import { router } from "expo-router";
 import { useData } from "@/lib/data-context";
 import { useAuth } from "@/lib/auth-context";
@@ -23,8 +23,15 @@ export default function SupervisorTabScreen() {
  * ScreenHeader, and the eight native-header screens get it from the OS.
  *
  * It is also inside the (tabs) group, so it needs the bottom inset for the tab
- * bar like the other two. The content is short enough to fit today, but it grows
- * with the number of metrics, so it scrolls rather than relying on that.
+ * bar like the other two. Both insets go on the existing View container. The
+ * content is short and does not reach the bottom today, and this screen is being
+ * rebuilt on the mobile dashboard parity branch, which brings the ScrollView it
+ * actually needs along with pull-to-refresh and loading/error states. Converting
+ * it here would be throwaway work and a merge conflict surface for no benefit.
+ *
+ * useTabScreenInsets() is the contract for that rebuild: the ScrollView
+ * conversion belongs there, and it consumes these same two values unchanged —
+ * `top` on the header, `bottom` on contentContainerStyle instead of the View.
  */
 function SupervisorContent() {
   const insets = useTabScreenInsets();
@@ -32,22 +39,25 @@ function SupervisorContent() {
   const { user } = useAuth();
   const canSeeSupervisor = user?.companyRole === "owner" || user?.companyRole === "manager";
 
-  const contentStyle = [
-    styles.content,
-    { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 24 },
+  // The original 16pt gutter, with each inset added to the edge that needs it.
+  // Bottom clears the tab bar, which does not contribute to layout, so the
+  // button stays reachable if the metric list grows before the rebuild lands.
+  const containerStyle = [
+    styles.container,
+    { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 16 },
   ];
 
   if (!canSeeSupervisor) {
     return (
-      <ScrollView style={styles.container} contentContainerStyle={contentStyle}>
+      <View style={containerStyle}>
         <Text style={styles.title}>Access Restricted</Text>
         <Text style={styles.subtitle}>Supervisor dashboard is only visible for assigned supervisor accounts.</Text>
-      </ScrollView>
+      </View>
     );
   }
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={contentStyle}>
+    <View style={containerStyle}>
       <Text style={styles.title}>Supervisor Dashboard</Text>
       <Text style={styles.subtitle}>Monitor project activity and report readiness.</Text>
       <View style={styles.card}>
@@ -58,13 +68,12 @@ function SupervisorContent() {
       <Pressable style={styles.button} onPress={() => router.push("/supervisor-dashboard")}>
         <Text style={styles.buttonText}>Open Full Dashboard</Text>
       </Pressable>
-    </ScrollView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.background },
-  content: { paddingHorizontal: 16, gap: 12 },
+  container: { flex: 1, backgroundColor: Colors.background, paddingHorizontal: 16, gap: 12 },
   title: { fontSize: 24, fontFamily: "Inter_700Bold", color: Colors.text },
   subtitle: { fontSize: 14, fontFamily: "Inter_400Regular", color: Colors.textSecondary },
   card: {
