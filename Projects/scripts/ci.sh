@@ -92,6 +92,12 @@ fi
 step "Structural: ci.yml defines no gate of its own"
 ./scripts/assert-ci-single-definition.sh
 
+# The mobile Babel preset is declared by hand (AUDIT L19) rather than inherited,
+# so it can silently fall out of step with the SDK. Cheap, and it runs before the
+# slow gates because a drifted preset invalidates everything downstream of it.
+step "Structural: mobile Babel preset matches the SDK"
+node ./scripts/assert-babel-preset-expo.mjs
+
 step "Build shared types"
 # @sitesnap/shared emits .d.ts only; TypeScript project references in the API
 # and both apps fail to resolve until this has run.
