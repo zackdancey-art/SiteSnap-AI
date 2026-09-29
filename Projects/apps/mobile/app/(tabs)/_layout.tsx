@@ -6,6 +6,7 @@ import { Ionicons } from "@expo/vector-icons";
 import React from "react";
 import Colors from "@/constants/colors";
 import { useAuth } from "@/lib/auth-context";
+import { ClassicTabBarProvider, useClassicTabBarLayout } from "@/lib/useScreenInsets";
 
 function NativeTabLayout({ canSeeSupervisor }: { canSeeSupervisor: boolean }) {
   return (
@@ -31,6 +32,7 @@ function NativeTabLayout({ canSeeSupervisor }: { canSeeSupervisor: boolean }) {
 function ClassicTabLayout({ canSeeSupervisor }: { canSeeSupervisor: boolean }) {
   const isWeb = Platform.OS === "web";
   const isIOS = Platform.OS === "ios";
+  const onBarLayout = useClassicTabBarLayout();
 
   return (
     <Tabs
@@ -50,12 +52,30 @@ function ClassicTabLayout({ canSeeSupervisor }: { canSeeSupervisor: boolean }) {
           borderTopWidth: StyleSheet.hairlineWidth,
           borderTopColor: Colors.onPrimaryBorder,
           elevation: 0,
+          // Pre-existing, and the one tab-bar height literal left in the tree.
+          // It is not a guess used as padding: getTabBarHeight() returns it as
+          // the bar's customHeight, and the onLayout below then MEASURES that
+          // same 84, so the reserved space still comes from a measurement.
           ...(isWeb ? { height: 84 } : {}),
         },
-        tabBarBackground: () =>
-          isIOS || isWeb ? (
-            <View style={[StyleSheet.absoluteFill, { backgroundColor: Colors.primary }]} />
-          ) : null,
+        // onLayout here is the ONLY runtime measurement of the classic tab bar
+        // available to the screens inside it (see lib/useScreenInsets.tsx), so
+        // the view is rendered on every platform — Android included — and the
+        // brand fill is applied on iOS/web only, as before.
+        //
+        // Android subtlety: returning non-null from tabBarBackground flips
+        // BottomTabBar's own `backgroundColor` from `colors.card` to
+        // `transparent`. Nothing changes visually ONLY because tabBarStyle above
+        // sets backgroundColor: Colors.primary and is applied after it. If that
+        // is ever removed (e.g. moving to a blur or gradient), give this view an
+        // explicit Android fill or the bar goes see-through, with content
+        // scrolling behind the labels.
+        tabBarBackground: () => (
+          <View
+            onLayout={onBarLayout}
+            style={[StyleSheet.absoluteFill, (isIOS || isWeb) && { backgroundColor: Colors.primary }]}
+          />
+        ),
       }}
     >
       <Tabs.Screen
@@ -94,8 +114,16 @@ function ClassicTabLayout({ canSeeSupervisor }: { canSeeSupervisor: boolean }) {
 export default function TabLayout() {
   const { user } = useAuth();
   const canSeeSupervisor = user?.companyRole === "owner" || user?.companyRole === "manager";
-  if (isLiquidGlassAvailable()) {
-    return <NativeTabLayout canSeeSupervisor={canSeeSupervisor} />;
-  }
-  return <ClassicTabLayout canSeeSupervisor={canSeeSupervisor} />;
+  // Which branch is live decides which measurement the screens inside should
+  // wait for, so it is published rather than re-derived per screen.
+  const useNativeTabs = isLiquidGlassAvailable();
+  return (
+    <ClassicTabBarProvider classicActive={!useNativeTabs}>
+      {useNativeTabs ? (
+        <NativeTabLayout canSeeSupervisor={canSeeSupervisor} />
+      ) : (
+        <ClassicTabLayout canSeeSupervisor={canSeeSupervisor} />
+      )}
+    </ClassicTabBarProvider>
+  );
 }
