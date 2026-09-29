@@ -1,6 +1,6 @@
 # CLAUDE.md — SiteSnap AI
 
-Orientation for any agent working in this repo. Read this fully before touching code. Two companion documents are the source of truth for *what* and *why*: `docs/ARCHITECTURE.md` (how the system is built) and `docs/AUDIT.md` (findings, each with an ID like C1/H2/M4). When a task names a finding ID, open that section of `docs/AUDIT.md` yourself — do not act on a paraphrase.
+Orientation for any agent working in this repo. Read this fully before touching code. Three companion documents are the source of truth for *what* and *why*: `docs/ARCHITECTURE.md` (how the system is built), `docs/AUDIT.md` (findings, each with an ID like C1/H2/M4) and `docs/DECISIONS.md` (build/install decisions, each with an ID like ADR-0001 and an explicit expiry condition). When a task names a finding ID, open that section of `docs/AUDIT.md` yourself — do not act on a paraphrase. Before changing how the workspace installs or resolves dependencies, read `docs/DECISIONS.md` first: that ground has been covered.
 
 ---
 
