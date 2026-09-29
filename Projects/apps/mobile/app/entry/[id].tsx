@@ -7,7 +7,7 @@ import {
   StyleSheet,
   Platform,
   Alert,
-  Image,
+  ActivityIndicator,
   Modal,
   Linking,
 } from "react-native";
@@ -17,8 +17,14 @@ import { router, useLocalSearchParams } from "expo-router";
 import { useData } from "@/lib/data-context";
 import Colors from "@/constants/colors";
 import { Photo } from "@/lib/types";
-import { buildEntryPhotosReportHtml, exportReportDocument } from "@/lib/export-utils";
+import {
+  buildEntryPhotosReportHtml,
+  exportReportDocument,
+  resolvePhotosForExport,
+  type ExportPhoto,
+} from "@/lib/export-utils";
 import { BackButton } from "@/components/BackButton";
+import { EvidenceImage, type EvidenceImageStatus } from "@/components/EvidenceImage";
 
 export default function EntryDetailScreen() {
   const insets = useSafeAreaInsets();
@@ -32,6 +38,17 @@ export default function EntryDetailScreen() {
   const webBottomInset = Platform.OS === "web" ? 34 : 0;
   const [previewPhoto, setPreviewPhoto] = React.useState<Photo | null>(null);
 
+  /**
+   * What each tile actually managed to render. Reported by EvidenceImage rather
+   * than inferred from the uri, because a uri can look fine and still fail to
+   * load — and the count in the banner must match what the user is looking at.
+   */
+  const [photoStatuses, setPhotoStatuses] = React.useState<Record<string, EvidenceImageStatus>>({});
+  const handlePhotoStatus = React.useCallback((status: EvidenceImageStatus, photoId: string) => {
+    setPhotoStatuses((prev) => (prev[photoId] === status ? prev : { ...prev, [photoId]: status }));
+  }, []);
+  const [preparingExport, setPreparingExport] = React.useState(false);
+
   if (!entry) {
     return (
       <View style={styles.notFound}>
@@ -42,6 +59,12 @@ export default function EntryDetailScreen() {
       </View>
     );
   }
+
+  // Only tiles that have settled on "unavailable" count; a tile still loading is
+  // not yet a failure.
+  const unavailablePhotoCount = entry.photos.filter(
+    (photo) => photoStatuses[photo.id] === "unavailable"
+  ).length;
 
   const handleDelete = () => {
     if (Platform.OS === "web") {
@@ -85,20 +108,45 @@ export default function EntryDetailScreen() {
     year: "numeric",
   });
 
-  const handleExportPhotos = () => {
+  /**
+   * Every image is turned into a data URI BEFORE the html is built. The exporter
+   * prints a WebView snapshot, so a remote `<img src>` would race the snapshot
+   * and print blank; and a photo that cannot be fetched is declared in the
+   * document rather than omitted from it.
+   */
+  const handleExportPhotos = async () => {
     if (!site || entry.photos.length === 0) {
       Alert.alert("No Photos", "This entry has no photos to export.");
       return;
     }
+    let photos: ExportPhoto[];
+    setPreparingExport(true);
+    try {
+      photos = await resolvePhotosForExport(entry.photos);
+    } catch {
+      Alert.alert(
+        "Export Failed",
+        "The photos for this entry could not be prepared. Check your connection and try again."
+      );
+      return;
+    } finally {
+      setPreparingExport(false);
+    }
+    const notIncluded = photos.filter((photo) => !photo.exportDataUri).length;
     const html = buildEntryPhotosReportHtml({
       site,
       entryDate: formattedDate,
       notes: entry.notes,
-      photos: entry.photos,
+      photos,
       notesMode: entry.notesMode,
       hourlyNotes: entry.hourlyNotes,
     });
-    Alert.alert("Export Entry Photos", "Choose an export format.", [
+    // Said before the file is made, not only inside it.
+    const prompt =
+      notIncluded > 0
+        ? `${notIncluded} of ${photos.length} images could not be attached and are marked "IMAGE NOT INCLUDED" in the document. Choose an export format.`
+        : "Choose an export format.";
+    Alert.alert("Export Entry Photos", prompt, [
       { text: "Cancel", style: "cancel" },
       {
         text: "Word",
@@ -190,12 +238,32 @@ export default function EntryDetailScreen() {
           <View style={styles.sectionHeaderRow}>
             <Text style={styles.sectionTitle}>Photos</Text>
             {entry.photos.length > 0 && (
-              <Pressable style={styles.exportPhotosButton} onPress={handleExportPhotos}>
-                <Ionicons name="share-outline" size={14} color={Colors.accent} />
-                <Text style={styles.exportPhotosText}>Export</Text>
+              <Pressable
+                style={styles.exportPhotosButton}
+                onPress={() => void handleExportPhotos()}
+                disabled={preparingExport}
+              >
+                {preparingExport ? (
+                  <ActivityIndicator size="small" color={Colors.accent} />
+                ) : (
+                  <Ionicons name="share-outline" size={14} color={Colors.accent} />
+                )}
+                <Text style={styles.exportPhotosText}>
+                  {preparingExport ? "Preparing…" : "Export"}
+                </Text>
               </Pressable>
             )}
           </View>
+          {unavailablePhotoCount > 0 && (
+            <View style={styles.photoWarning}>
+              <Ionicons name="alert-circle" size={16} color={Colors.warningText} />
+              <Text style={styles.photoWarningText}>
+                {unavailablePhotoCount} of {entry.photos.length}{" "}
+                {entry.photos.length === 1 ? "photo" : "photos"} cannot be displayed. They are
+                marked below, and are flagged as not included in any export.
+              </Text>
+            </View>
+          )}
           {entry.photos.length === 0 ? (
             <View style={styles.noPhotos}>
               <Ionicons name="images-outline" size={36} color={Colors.textTertiary} />
@@ -209,7 +277,12 @@ export default function EntryDetailScreen() {
                   style={styles.photoThumb}
                   onPress={() => setPreviewPhoto(photo)}
                 >
-                  <Image source={{ uri: photo.uri }} style={styles.photoImage} />
+                  <EvidenceImage
+                    photo={photo}
+                    style={styles.photoImage}
+                    variant="thumb"
+                    onStatusChange={handlePhotoStatus}
+                  />
                 </Pressable>
               ))}
             </View>
@@ -239,7 +312,13 @@ export default function EntryDetailScreen() {
                 showsHorizontalScrollIndicator={false}
                 showsVerticalScrollIndicator={false}
               >
-                <Image source={{ uri: previewPhoto.uri }} style={styles.previewImage} resizeMode="contain" />
+                <EvidenceImage
+                  photo={previewPhoto}
+                  style={styles.previewImage}
+                  resizeMode="contain"
+                  variant="full"
+                  tone="dark"
+                />
               </ScrollView>
               <View style={styles.previewMeta}>
                 <Text style={styles.previewMetaText}>
@@ -445,6 +524,24 @@ const styles = StyleSheet.create({
   photoImage: {
     width: "100%",
     height: "100%",
+  },
+  photoWarning: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+    marginBottom: 10,
+    padding: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: Colors.warningBorder,
+    backgroundColor: Colors.warningBg,
+  },
+  photoWarningText: {
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 17,
+    fontFamily: "Inter_500Medium",
+    color: Colors.warningText,
   },
   previewBackdrop: {
     flex: 1,

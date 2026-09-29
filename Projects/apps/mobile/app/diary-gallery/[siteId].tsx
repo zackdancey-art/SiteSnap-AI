@@ -1,12 +1,31 @@
-import React, { useMemo, useState } from "react";
-import { Alert, Image, Modal, Pressable, ScrollView, Share, StyleSheet, Text, View } from "react-native";
+import React, { useCallback, useMemo, useState } from "react";
+import {
+  ActivityIndicator,
+  Alert,
+  Modal,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams } from "expo-router";
 import Colors from "@/constants/colors";
 import { useData } from "@/lib/data-context";
 import { Photo } from "@/lib/types";
-import { exportReportDocument, buildHtmlDocument } from "@/lib/export-utils";
+import {
+  buildExportImageMarkup,
+  buildHtmlDocument,
+  buildIncompleteRecordNotice,
+  exportReportDocument,
+  formatPhotoCountForExport,
+  resolvePhotosForExport,
+  sharePhotoFile,
+  writeSharablePhotoFile,
+} from "@/lib/export-utils";
 import { ScreenHeader } from "@/components/ScreenHeader";
+import { EvidenceImage, type EvidenceImageStatus } from "@/components/EvidenceImage";
 
 type GalleryItem = {
   id: string;
@@ -24,6 +43,11 @@ export default function DiaryGalleryScreen() {
   const site = safeSiteId ? data.getSite(safeSiteId) : undefined;
   const entries = safeSiteId ? data.getSiteEntries(safeSiteId) : [];
   const [selectedItem, setSelectedItem] = useState<GalleryItem | null>(null);
+  const [busy, setBusy] = useState<"export-all" | string | null>(null);
+  const [photoStatuses, setPhotoStatuses] = useState<Record<string, EvidenceImageStatus>>({});
+  const handlePhotoStatus = useCallback((status: EvidenceImageStatus, photoId: string) => {
+    setPhotoStatuses((prev) => (prev[photoId] === status ? prev : { ...prev, [photoId]: status }));
+  }, []);
 
   const galleryItems = useMemo<GalleryItem[]>(() => {
     return entries.flatMap((entry) =>
@@ -46,16 +70,39 @@ export default function DiaryGalleryScreen() {
     );
   }
 
+  // Settled failures only; a tile still loading is not yet a failure.
+  const unavailableCount = galleryItems.filter(
+    (item) => photoStatuses[item.photo.id] === "unavailable"
+  ).length;
+
   const exportAll = async () => {
     if (galleryItems.length === 0) {
       Alert.alert("No photos", "There are no photos to export.");
       return;
     }
+    // Previously this embedded ONLY photo.base64 and emitted an empty string for
+    // anything else — a synced photo produced a card with no image and no note
+    // that one was missing, while the meta still counted it. Every image is
+    // resolved to a data uri up front, and a photo that cannot be resolved is
+    // declared.
+    let exportPhotos;
+    setBusy("export-all");
+    try {
+      exportPhotos = await resolvePhotosForExport(galleryItems.map((item) => item.photo));
+    } catch {
+      Alert.alert(
+        "Export Failed",
+        "The photos could not be prepared for export. Check your connection and try again."
+      );
+      return;
+    } finally {
+      setBusy(null);
+    }
+    const notIncluded = exportPhotos.filter((photo) => !photo.exportDataUri).length;
+
     const cards = galleryItems
       .map((item, index) => {
-        const imageMarkup = item.photo.base64
-          ? `<img src="data:${item.photo.mimeType || "image/jpeg"};base64,${item.photo.base64}" style="width:100%;max-height:260px;object-fit:cover;border-radius:12px;margin-bottom:12px;" />`
-          : "";
+        const imageMarkup = buildExportImageMarkup(exportPhotos[index], 260);
         return `
           <section class="section">
             <h2>Photo ${index + 1}</h2>
@@ -76,14 +123,18 @@ export default function DiaryGalleryScreen() {
       title: `${site.name} Gallery`,
       subtitle: `${site.client} • ${galleryItems.length} photos`,
       meta: [
-        { label: "Photos", value: String(galleryItems.length) },
+        { label: "Photos", value: formatPhotoCountForExport(galleryItems.length, notIncluded) },
         { label: "Site", value: site.name },
         { label: "Client", value: site.client },
       ],
-      body: cards,
+      body: buildIncompleteRecordNotice(notIncluded, galleryItems.length) + cards,
     });
 
-    Alert.alert("Export Gallery", "Choose an export format.", [
+    const prompt =
+      notIncluded > 0
+        ? `${notIncluded} of ${galleryItems.length} images could not be attached and are marked "IMAGE NOT INCLUDED" in the document. Choose an export format.`
+        : "Choose an export format.";
+    Alert.alert("Export Gallery", prompt, [
       { text: "Cancel", style: "cancel" },
       {
         text: "Word",
@@ -106,16 +157,32 @@ export default function DiaryGalleryScreen() {
     ]);
   };
 
+  /**
+   * Shares the image itself. This used to share `item.photo.uri` — for a synced
+   * photo that is a signed proxy URL which expires in two hours, so the
+   * recipient got a link that stops working, and the signature travelled with
+   * it. The file is written to the cache and shared instead.
+   */
   const exportSingle = async (item: GalleryItem) => {
+    setBusy(item.id);
     try {
-      await Share.share({
-        title: `${site.name} photo`,
-        message: `Site: ${site.name}\nDate: ${item.entryDate}\nCaptured: ${new Date(item.timestamp).toLocaleString("en-AU")}\nURI: ${item.photo.uri}`,
-        url: item.photo.uri,
-      });
+      const uri = await writeSharablePhotoFile(
+        item.photo,
+        `${site.name}-${item.entryDate}-photo`
+      );
+      if (!uri) {
+        Alert.alert(
+          "Photo Not Available",
+          "This image could not be loaded, so there is nothing to share. Reopen the app while online and try again."
+        );
+        return;
+      }
+      await sharePhotoFile(uri, item.photo.mimeType || "image/jpeg");
     } catch (err) {
       console.warn("Export single photo failed", err);
       Alert.alert("Export Failed", "Could not export this photo.");
+    } finally {
+      setBusy(null);
     }
   };
 
@@ -136,8 +203,16 @@ export default function DiaryGalleryScreen() {
         titleStyle={styles.headerTitle}
         subtitleStyle={styles.headerSubtitle}
         right={
-          <Pressable style={styles.headerIcon} onPress={exportAll}>
-            <Ionicons name="download-outline" size={20} color={Colors.white} />
+          <Pressable
+            style={styles.headerIcon}
+            onPress={() => void exportAll()}
+            disabled={busy !== null}
+          >
+            {busy === "export-all" ? (
+              <ActivityIndicator size="small" color={Colors.white} />
+            ) : (
+              <Ionicons name="download-outline" size={20} color={Colors.white} />
+            )}
           </Pressable>
         }
       />
@@ -150,10 +225,26 @@ export default function DiaryGalleryScreen() {
             <Text style={styles.emptyText}>Add photos to entries, then they will appear here.</Text>
           </View>
         ) : (
-          galleryItems.map((item) => (
+          <>
+            {unavailableCount > 0 && (
+              <View style={styles.galleryWarning}>
+                <Ionicons name="alert-circle" size={16} color={Colors.warningText} />
+                <Text style={styles.galleryWarningText}>
+                  {unavailableCount} of {galleryItems.length}{" "}
+                  {galleryItems.length === 1 ? "photo" : "photos"} cannot be displayed. They are
+                  marked below, and are flagged as not included in any export.
+                </Text>
+              </View>
+            )}
+            {galleryItems.map((item) => (
             <View key={item.id} style={styles.card}>
               <Pressable onPress={() => openPreview(item)}>
-                <Image source={{ uri: item.photo.uri }} style={styles.photo} />
+                <EvidenceImage
+                  photo={item.photo}
+                  style={styles.photo}
+                  variant="thumb"
+                  onStatusChange={handlePhotoStatus}
+                />
               </Pressable>
               <View style={styles.cardBody}>
                 <Text style={styles.cardDate}>
@@ -169,13 +260,24 @@ export default function DiaryGalleryScreen() {
                 <Text style={styles.cardMeta}>Entry Date: {item.entryDate}</Text>
                 {!!item.photo.caption && <Text style={styles.cardCaption}>Caption: {item.photo.caption}</Text>}
                 <Text style={styles.cardHint}>Open photo to pinch, zoom, and move around.</Text>
-                <Pressable style={styles.exportButton} onPress={() => exportSingle(item)}>
-                  <Ionicons name="share-outline" size={16} color={Colors.accent} />
-                  <Text style={styles.exportButtonText}>Export Photo</Text>
+                <Pressable
+                  style={styles.exportButton}
+                  onPress={() => void exportSingle(item)}
+                  disabled={busy !== null}
+                >
+                  {busy === item.id ? (
+                    <ActivityIndicator size="small" color={Colors.accent} />
+                  ) : (
+                    <Ionicons name="share-outline" size={16} color={Colors.accent} />
+                  )}
+                  <Text style={styles.exportButtonText}>
+                    {busy === item.id ? "Preparing…" : "Export Photo"}
+                  </Text>
                 </Pressable>
               </View>
             </View>
-          ))
+            ))}
+          </>
         )}
       </ScrollView>
 
@@ -199,10 +301,12 @@ export default function DiaryGalleryScreen() {
                 showsHorizontalScrollIndicator={false}
                 showsVerticalScrollIndicator={false}
               >
-                <Image
-                  source={{ uri: selectedItem.photo.uri }}
+                <EvidenceImage
+                  photo={selectedItem.photo}
                   style={styles.previewImage}
                   resizeMode="contain"
+                  variant="full"
+                  tone="dark"
                 />
               </ScrollView>
             )}
@@ -248,6 +352,23 @@ const styles = StyleSheet.create({
     width: "100%",
     height: 220,
     backgroundColor: Colors.borderLight,
+  },
+  galleryWarning: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: Colors.warningBorder,
+    backgroundColor: Colors.warningBg,
+  },
+  galleryWarningText: {
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 17,
+    fontFamily: "Inter_500Medium",
+    color: Colors.warningText,
   },
   cardBody: { padding: 12, gap: 4 },
   cardDate: { fontSize: 14, color: Colors.text, fontFamily: "Inter_600SemiBold" },
