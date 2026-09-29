@@ -22,8 +22,11 @@ interface DataContextType {
   pendingCount: number;
   addSite: (site: Omit<Site, "id" | "createdAt">) => Promise<void>;
   deleteSite: (id: string) => Promise<void>;
-  addEntry: (entry: Omit<Entry, "id" | "timestamp" | "createdAt">) => Promise<void>;
-  updateEntry: (id: string, patch: Partial<Entry>) => Promise<void>;
+  addEntry: (
+    entry: Omit<Entry, "id" | "timestamp" | "createdAt">,
+    onProgress?: SaveProgressCallback
+  ) => Promise<void>;
+  updateEntry: (id: string, patch: Partial<Entry>, onProgress?: SaveProgressCallback) => Promise<void>;
   deleteEntry: (id: string) => Promise<void>;
   addDiary: (diary: Omit<GeneratedDiary, "id" | "generatedAt">) => GeneratedDiary;
   updateDiary: (id: string, patch: Partial<GeneratedDiary>) => void;
@@ -205,8 +208,43 @@ async function uploadPhoto(photo: Entry["photos"][number]): Promise<Entry["photo
   throw lastErr;
 }
 
-export async function uploadPhotos(photos: Entry["photos"]) {
-  return Promise.all(photos.map((photo) => uploadPhoto(photo)));
+/**
+ * What a save is doing right now, so the UI can say so instead of appearing to
+ * have ignored the tap. Saving an entry with photos on site data is slow — the
+ * uploads are the slow part, and they retry with backoff (see uploadPhoto), so
+ * "a while with no feedback" is the normal case, not the pathological one.
+ */
+export type SaveProgress =
+  | { phase: "uploading"; completed: number; total: number }
+  | { phase: "saving" };
+
+export type SaveProgressCallback = (progress: SaveProgress) => void;
+
+export async function uploadPhotos(
+  photos: Entry["photos"],
+  onProgress?: (completed: number, total: number) => void
+) {
+  // `total` counts only the photos that will actually hit the network.
+  // uploadPhotoOnce returns immediately for a uri that is already managed
+  // server-side, so counting every photo would make an edit that adds one photo
+  // to five existing ones report "0 of 6" and then jump to "5 of 6" instantly —
+  // a progress number that is technically true and completely useless.
+  const total = photos.filter((photo) => !isManagedMediaUri(photo.uri)).length;
+  let completed = 0;
+  onProgress?.(0, total);
+  return Promise.all(
+    photos.map(async (photo) => {
+      // Decided BEFORE the await: uploadPhoto rewrites the uri to the managed
+      // form on success, so testing afterwards would count every photo.
+      const needsUpload = !isManagedMediaUri(photo.uri);
+      const uploaded = await uploadPhoto(photo);
+      if (needsUpload) {
+        completed += 1;
+        onProgress?.(completed, total);
+      }
+      return uploaded;
+    })
+  );
 }
 
 /**
@@ -529,9 +567,15 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     await persistCache(user?.email, updatedSites, updatedEntries, updatedDiaries);
   };
 
-  const addEntry = async (entryData: Omit<Entry, "id" | "timestamp" | "createdAt">) => {
+  const addEntry = async (
+    entryData: Omit<Entry, "id" | "timestamp" | "createdAt">,
+    onProgress?: SaveProgressCallback
+  ) => {
     try {
-      const uploadedPhotos = await uploadPhotos(entryData.photos);
+      const uploadedPhotos = await uploadPhotos(entryData.photos, (completed, total) =>
+        onProgress?.({ phase: "uploading", completed, total })
+      );
+      onProgress?.({ phase: "saving" });
       await savePhotoPayloads(uploadedPhotos);
       const response = await apiJson<{ entry: Entry }>("/projects/entries", {
         method: "POST",
@@ -584,10 +628,12 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     await persistCache(user?.email, sites, updated, diaries);
   };
 
-  const updateEntry = async (id: string, patch: Partial<Entry>) => {
+  const updateEntry = async (id: string, patch: Partial<Entry>, onProgress?: SaveProgressCallback) => {
     const existing = entries.find((entry) => entry.id === id);
     if (patch.photos) {
-      const uploadedPhotos = await uploadPhotos(patch.photos);
+      const uploadedPhotos = await uploadPhotos(patch.photos, (completed, total) =>
+        onProgress?.({ phase: "uploading", completed, total })
+      );
       patch = { ...patch, photos: uploadedPhotos };
       await savePhotoPayloads(uploadedPhotos);
       if (existing) {
@@ -596,6 +642,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         await deletePhotoPayloads(removedIds);
       }
     }
+    onProgress?.({ phase: "saving" });
     const response = await apiJson<{ entry: Entry }>(`/projects/entries/${id}`, {
       method: "PATCH",
       body: JSON.stringify(
