@@ -340,24 +340,41 @@ Note that the enumeration signal is not confined to the status code. Timing is a
 
 Related: the same consideration applies to any other endpoint that distinguishes "this identifier exists" from "it does not" — `forgot-password` should be checked for the same leak at the same time.
 
-### L19 — pnpm's isolated `node-linker` breaks native build scripts that `require.resolve` a transitive dependency — MEDIUM (build fragility)
+### L19 — pnpm's isolated `node-linker` breaks tooling that resolves a transitive dependency from the app directory — MEDIUM (build fragility)
 
 There is no `.npmrc` in the repo, so pnpm uses its default **isolated** node-linker: `apps/mobile/node_modules` contains symlinks for that package's **direct** dependencies only, and everything else lives in the content-addressed `Projects/node_modules/.pnpm/` store, reachable through the dependency graph but **not** by a bare Node resolution walk from the app directory.
 
-React Native's native build scripts do exactly that bare walk. Two independent instances failed the first EAS iOS builds:
+Three independent instances have hit this. The first two are native build scripts doing exactly that bare walk, and both failed the first EAS iOS builds; the third is a Babel config and failed the first `eas update`:
 
 - **`RNReanimated.podspec`** (`find_config()`) shells out to `node -e "require.resolve('react-native-worklets/package.json')"` with the CWD set to `apps/mobile/ios`. `react-native-worklets` is a **peer** dependency of `react-native-reanimated@4.1.6`, not a direct dependency of the app, so it was present in the store but unresolvable from there → `MODULE_NOT_FOUND` → `Invalid Podfile file` → the `Install pods` phase failed.
 - **`@sentry/react-native`'s Xcode build phase** does the same for `@sentry/cli/package.json`, which it pins at `3.4.1` as its own dependency → the `Run fastlane` phase failed.
+- **`babel.config.js`** names `babel-preset-expo` as a preset. Babel resolves a bare preset name by `require`-ing it relative to the **config file's own directory** — `apps/mobile` — and the preset arrives transitively through `expo`, so it was in the store and unresolvable from there. This one did not fail a native build: `eas build` bundles on Expo's servers, so it was invisible for months. `eas update` bundles **locally**, and `APP_ENV=production eas update --branch production` failed with `SyntaxError: … expo-router/entry.js: Cannot find module 'babel-preset-expo'` — i.e. the fault surfaced only once OTA updates were first attempted, on a path with no CI coverage at all.
 
-Both present as an error in a *third-party* file, which is what makes them expensive to diagnose: nothing in the repo is wrong, and the same `package.json` installs and typechecks perfectly under npm or Yarn. Note also that neither is caught by any local gate — `typecheck`, `lint` and the full test suite all pass, because no JavaScript ever imports these packages. Only a real native build exercises the path.
+All three present as an error in a *third-party* file, which is what makes them expensive to diagnose: nothing in the repo is wrong, and the same `package.json` installs and typechecks perfectly under npm or Yarn. None of them was caught by any local gate — `typecheck`, `lint` and the full test suite all passed in every case, because the resolution happens in a podspec, an Xcode phase or Babel's own config loader, not in any JavaScript the suite imports. Each needed the *specific* path exercised: a real native build for the first two, a real `eas update` for the third.
 
-**Current remedy (applied):** add each offending package as a **direct** dependency of `apps/mobile`, pinned to the exact version already resolved transitively (`react-native-worklets@~0.7.4`, `@sentry/cli@3.4.1`), so pnpm links it into `apps/mobile/node_modules` without moving any other package in the graph. Verified by `require.resolve` from the app directory failing before and succeeding after — the same check the podspec runs.
+**Current remedy (applied):** add each offending package as a **direct** dependency of `apps/mobile`, pinned to the version already resolved transitively, so pnpm links it into `apps/mobile/node_modules` without moving any other package in the graph. Verified by `require.resolve` from the app directory failing before and succeeding after — the same check the podspec runs.
 
-This is per-instance whack-a-mole. It will recur on the next native dependency whose build script resolves a transitive package, and the failure will again surface as an opaque error inside someone else's podspec.
+| package | where declared | pinned |
+|---|---|---|
+| `react-native-worklets` | `dependencies` | `0.5.1` |
+| `@sentry/cli` | `dependencies` | `3.4.1` |
+| `babel-preset-expo` | `devDependencies` | `~54.0.12` |
 
-**Disposition:** OPEN, deliberately deferred. The structural fix is `node-linker=hoisted` in a root `.npmrc`, which is the documented remedy for exactly this class and is what most React Native + pnpm monorepos run. It was **consciously not taken during the pre-launch EAS work**: it changes the install layout for **all** workspaces — `services/api` and `apps/supervisor-web` included, neither of which has this problem — and hoisting makes previously-unresolvable packages resolvable, which can mask a genuinely missing dependency declaration and change which transitive version wins a bare import. That is a poor trade to make days before a first TestFlight submission, on a shared lockfile, to fix a problem that already has a working targeted workaround.
+`babel-preset-expo` is in `devDependencies`, not `dependencies`, because it is build-time only — it sits alongside `babel-plugin-module-resolver` (its sibling in `babel.config.js`) and `@expo/cli`, and EAS Build installs devDependencies. Its range is not an arbitrary pin: it is byte-identical to `expo@54.0.37`'s own `dependencies["babel-preset-expo"]`, which is the only constraint the SDK actually publishes for it (it is **not** in `expo/bundledNativeModules.json`, so `npx expo install` offers no protection here). Installing it without a range would have given `babel-preset-expo@57.0.13` — two SDK majors ahead.
 
-Take it up as its own branch once the release is out, and gate it on: a green `./scripts/ci.sh` (full, with DB), a successful iOS simulator build, and a successful `services/api` Docker build — the three consumers of the install layout. If it lands, the two direct dependencies added above become redundant and should be removed in the same commit, so the workaround does not outlive the reason for it.
+**Correction (2026-09-30):** this entry previously recorded the worklets pin as `~0.7.4`. `apps/mobile/package.json` says `0.5.1`. The table above reflects the code. Which of the two is *correct* has not been investigated — only that the doc had drifted from the file.
+
+This is per-instance whack-a-mole. It will recur on the next dependency whose build script or config resolves a transitive package, and the failure will again surface as an opaque error inside someone else's file.
+
+The `babel-preset-expo` instance adds a failure mode the first two did not have, because its pin must track the SDK: if `expo`'s own constraint moves and ours does not, **two** copies of the preset land in the graph and the one declared in `apps/mobile` wins the bare resolution from `apps/mobile` — so the app would transform with the wrong preset and **not error**. `Projects/scripts/assert-babel-preset-expo.mjs`, run as the second step of `scripts/ci.sh`, is what makes that loud: it asserts the declared range is identical to `expo`'s, that the preset resolves from `apps/mobile` (the exact resolution Babel performs), and that the installed version satisfies `expo`'s range. All three failure modes were confirmed to fail red before the guard was accepted.
+
+**Disposition (original, 2026-09, pre-launch):** OPEN, deliberately deferred. The structural fix is `node-linker=hoisted` in a root `.npmrc`, which is the documented remedy for exactly this class and is what most React Native + pnpm monorepos run. It was **consciously not taken during the pre-launch EAS work**: it changes the install layout for **all** workspaces — `services/api` and `apps/supervisor-web` included, neither of which has this problem — and hoisting makes previously-unresolvable packages resolvable, which can mask a genuinely missing dependency declaration and change which transitive version wins a bare import. That is a poor trade to make days before a first TestFlight submission, on a shared lockfile, to fix a problem that already has a working targeted workaround.
+
+**Re-decided 2026-09-30, and declined again.** `node-linker=hoisted` was put forward as the fix for the third instance and declined, recorded in full in [`docs/DECISIONS.md`](DECISIONS.md) (ADR-0001) — read that rather than this summary before revisiting. The reason, which stands on its own: hoisting makes **undeclared** packages resolvable, which converts a visible one-line problem into an invisible one, and this repo's recurring failure pattern is precisely code that works in one place and fails silently in another. Its gate is a green `eas build` run deliberately as verification — which is **available and simply unspent**, not blocked — and on this branch that cost was not paid, so (b) remained a bet.
+
+**What would change the answer: a FOURTH instance of this finding.** Three made hoisting worth considering; a fourth is the point at which the recurring cost of per-instance workarounds exceeds the one-time cost of verifying a layout change. Deliberately *not* "once the gates are available" — all three consumers of the install layout (`eas build`, a full `./scripts/ci.sh` with Postgres and Redis, a `services/api` Docker build) are runnable today; they are unspent, not unavailable. So availability is not the condition and never was. When it is taken up, those three gates are what it must pass. If it lands, the three direct dependencies above become redundant, and `assert-babel-preset-expo.mjs` and its `ci.sh` step should be deleted in the same commit, so neither workaround outlives its reason.
+
+**If you are reading this because you just hit a fourth instance: that is the trigger. Do not add a fourth pin without reading ADR-0001 first.**
 
 ### L20 — Incident push notifications go to the reporter, not to supervisors — MEDIUM (notification targeting)
 
@@ -380,3 +397,35 @@ The exposure was in the UI. The Settings screen carried, as settled fact: *"Noti
 **Disposition:** the UI claim is CLOSED; the feature is OPEN. The Notifications section was deleted outright from Settings rather than reworded, on the grounds that no wording is accurate while the delivery path is absent, and a section describing a feature that cannot fire is worse than no section. The deletion is recorded in the commit and in a comment at the top of `app/(tabs)/settings.tsx` so it reads as a deliberate removal rather than an oversight, and the section comes back with the feature.
 
 Remaining work, in order: client registration and permission request; POST the token to the existing `/push/tokens` endpoint; fix recipient targeting (L20); then add senders for diary approval and new site entries if those promises are to be kept. Revisit the `NSUserNotificationsUsageDescription` copy at the same time — it currently describes three notifications the app does not send.
+
+### L22 — `babel.config.js` still lists `expo-router/babel`, a no-op removed in SDK 50 — LOW (build noise)
+
+`Projects/apps/mobile/babel.config.js` has `plugins: ["expo-router/babel", …]`. In SDK 54 that entry resolves to a shim whose entire body is a deprecation warning:
+
+```js
+// expo-router/babel.js, verbatim
+let hasWarned = false;
+module.exports = (api) => ({
+  name: 'expo-router-babel-deprecated',
+  visitor: { Program() { if (!hasWarned) { hasWarned = true; console.warn(
+    'expo-router/babel is deprecated in favor of babel-preset-expo in SDK 50. To fix the issue, remove "expo-router/babel" from "plugins" in your babel.config.js file.'
+  ); } } },
+});
+```
+
+It performs no transform. Its only effect is to print that warning on every bundle — it fired during the `eas update` verification run in the `babel-preset-expo` work (L19) and is presumably in every build log to date. The functionality it used to provide is in `babel-preset-expo`, which the config already applies.
+
+**Disposition:** OPEN, logged deliberately rather than fixed. It surfaced while fixing L19's third instance, in the same file, one line away — and was left alone because that branch was scoped to "a working `eas update`" and nothing else, and because a Babel plugin removal changes what every bundle produces. It is a one-line deletion and should be its own change with its own bundle comparison, not a drive-by on a dependency fix.
+
+### L23 — `pnpm store` retains an orphaned `babel-preset-expo@54.0.10` — LOW (housekeeping)
+
+`Projects/node_modules/.pnpm/` holds two copies of the preset:
+
+```
+babel-preset-expo@54.0.10_…_expo@54.0.33_…    <- orphan, not in pnpm-lock.yaml
+babel-preset-expo@54.0.12_…_expo@54.0.37_…    <- the one in use
+```
+
+The `54.0.10` copy pairs with `expo@54.0.33` and does not appear in `pnpm-lock.yaml` at all; it is residue from an install before the `expo` bump. It is inert — nothing resolves to it — but it matters for diagnosis: **"what is in `.pnpm`" is not a reliable answer to "what is installed"**, and reading the store directly during the L19 work produced two candidate versions where the lockfile has one.
+
+**Disposition:** OPEN, trivial. `pnpm store prune` clears it. Not done on the L19 branch because pruning the store is a machine-local action with no repo diff, so it cannot be reviewed, and it would have muddied a branch whose whole point was a provable before/after.
