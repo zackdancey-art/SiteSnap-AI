@@ -245,7 +245,7 @@ The other eight tables' INSERTs (`project_sites/entries/diaries/templates`, `cre
 ### H7 — Uploaded media has no company scoping; cross-tenant file access (IDOR) — HIGH
 
 Surfaced by the X1 isolation matrix. `GET /api/uploads/:id/:filename` (`routes/uploads.ts:97`) authorizes purely on "is the bearer token valid" OR "is the HMAC signature valid" (`verifyUploadSignature`) — never on which company owns the file. There is no `company_id` anywhere in the upload/media path: no DB table for uploads, and `mediaStorage.ts` keys objects as `uploads/{id}-{filename}` with no tenant dimension. Any authenticated user from any company can fetch any upload if they know the `id`+`filename`. IDOR-class (ids are uuidv7, unguessable), but a real cross-tenant exposure of site photos — and it affects production, not just the in-memory path.
-**Disposition:** FIXED (post-X1, 3 verifier rounds). Ownership is bound at **upload time** in an `uploads(id, company_id)` table (migration 023, `storage/uploadsStore.ts`) written from the authenticated uploader — unforgeable. `uploadBelongsToActorCompany` (RLS-scoped) now gates all three media paths: the bearer `GET /uploads/:id/:filename`, `POST /uploads/sign` (issuance), and the `generate-diary` vision read in `ai.ts` (which read a client `storageKey`/`storagePath`). Migration 023 backfills existing files from `project_entries`, attributing each id to the **earliest** referencing entry (a forged later entry can't claim it) and running at boot so there is no post-deploy window; unattributable files fail closed. Two rejected/partial attempts along the way: v1 inferred ownership from caller-writable entry JSON (forgeable); v2 left a path-traversal decoupling in the `ai.ts` `storagePath` read (local-disk only). v3 requires the canonical `uploads/<id>-<filename>` key and reads only by validated key. **Residuals (tracked, not blocking):** (a) a legitimately-issued signed URL remains usable until its 2h TTL if leaked — inherent to signed URLs; (b) within a company, media is not crew-scoped (any member can fetch any company photo); (c) — RESOLVED: the `ai.ts` vision branch now has an automated red-on-revert regression test (`routes/ai-vision-isolation.test.ts`) using an OpenAI boundary mock (`openaiClient` NODE_ENV=test fake); verifier-confirmed that reverting the ownership check turns it red.
+**Disposition:** FIXED (post-X1, 3 verifier rounds). Ownership is bound at **upload time** in an `uploads(id, company_id)` table (migration 023, `storage/uploadsStore.ts`) written from the authenticated uploader — unforgeable. `uploadBelongsToActorCompany` now gates all three media paths (it was RLS-scoped *only* until **H9** — it carried no `company_id` predicate of its own, so the policy was the sole mechanism; the original wording of this very sentence is **L25**): the bearer `GET /uploads/:id/:filename`, `POST /uploads/sign` (issuance), and the `generate-diary` vision read in `ai.ts` (which read a client `storageKey`/`storagePath`). Migration 023 backfills existing files from `project_entries`, attributing each id to the **earliest** referencing entry (a forged later entry can't claim it) and running at boot so there is no post-deploy window; unattributable files fail closed. Two rejected/partial attempts along the way: v1 inferred ownership from caller-writable entry JSON (forgeable); v2 left a path-traversal decoupling in the `ai.ts` `storagePath` read (local-disk only). v3 requires the canonical `uploads/<id>-<filename>` key and reads only by validated key. **Residuals (tracked, not blocking):** (a) a legitimately-issued signed URL remains usable until its 2h TTL if leaked — inherent to signed URLs; (b) within a company, media is not crew-scoped (any member can fetch any company photo); (c) — RESOLVED: the `ai.ts` vision branch now has an automated red-on-revert regression test (`routes/ai-vision-isolation.test.ts`) using an OpenAI boundary mock (`openaiClient` NODE_ENV=test fake); verifier-confirmed that reverting the ownership check turns it red.
 
 ### H8 — `worker_locations` in-memory fallback leaked cross-tenant — FIXED in X1
 
@@ -429,3 +429,71 @@ babel-preset-expo@54.0.12_…_expo@54.0.37_…    <- the one in use
 The `54.0.10` copy pairs with `expo@54.0.33` and does not appear in `pnpm-lock.yaml` at all; it is residue from an install before the `expo` bump. It is inert — nothing resolves to it — but it matters for diagnosis: **"what is in `.pnpm`" is not a reliable answer to "what is installed"**, and reading the store directly during the L19 work produced two candidate versions where the lockfile has one.
 
 **Disposition:** OPEN, trivial. `pnpm store prune` clears it. Not done on the L19 branch because pruning the store is a machine-local action with no repo diff, so it cannot be reviewed, and it would have muddied a branch whose whole point was a provable before/after.
+
+### H9 — The media ownership check had no company predicate; isolation on that path rested on RLS alone — HIGH (defence-in-depth, not an incident)
+
+Found while fixing the photo-display regression. `uploadBelongsToActorCompany` (`storage/uploadsStore.ts`) is the application-layer ownership check H7 installed in front of all three media paths — the bearer `GET /uploads/:id/:filename`, `POST /uploads/sign`, and the `generate-diary` vision read. Its Postgres branch was:
+
+```sql
+SELECT 1 FROM uploads WHERE id = $1 LIMIT 1
+```
+
+No `company_id`. H7's disposition above describes this function as "(RLS-scoped)", and that was the whole of it: the function did not check ownership, so isolation on the media path depended **entirely** on migration 023's FORCE RLS policy.
+
+**The cross-tenant read was reproduced.** Against a local disposable Postgres, company B fetched company A's photo with HTTP 200 and the correct bytes, and `POST /uploads/sign` issued B a valid signed URL for A's object. That database's role is a superuser — as CI's `postgres:16` user also is — and RLS is bypassed outright for a superuser or any role holding `BYPASSRLS`; `FORCE` removes only the table *owner's* ordinary exemption, not those two.
+
+**Production was not exposed. Verified 2026-10-01, read-only:**
+
+```sql
+SELECT current_user, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user;
+-- current_user: (verified: non-superuser, NOBYPASSRLS)
+-- rolsuper:     false
+-- rolbypassrls: false
+```
+
+Both false, so migration 023's policy was enforced in production throughout and no tenant read another tenant's media. This is defence-in-depth, not an incident — neither overstate it nor dismiss it.
+
+**Why it mattered anyway.** A single infrastructure property that nobody reviews was the only thing standing between two tenants' site evidence, and that property can change with no code change, no failing test and no log line: a role change, a managed-database migration, a restore run as a different user, or a provider handing the application an owner-level role. H1's notes already record that Neon's `neondb_owner` carries `BYPASSRLS`. Isolation should not rest on it, and now does not.
+
+**Disposition:** FIXED (`122db1c`, branch `fix/photo-display-signed-uris`). The query is now `WHERE id = $1 AND company_id = $2` — the predicate every other tenant-scoped read in the codebase already carries — with RLS behind it as the second layer. Covered by `routes/uploads-media-isolation.test.ts`: 6 tests against real Postgres, both directions proven (a tenant cannot read another tenant's media; a tenant can read its own), a positive control on the same endpoint inside every negative test, two tests driven through a purpose-made `NOBYPASSRLS` probe role so the RLS layer itself is still proven rather than assumed, and red-on-revert verified (restoring `WHERE id = $1` fails exactly the cross-tenant read and sign tests, leaving the other four green).
+
+**Why the existing suites missed it.** `routes/tenant-isolation-matrix.test.ts` — the suite built for exactly this question — runs in memory with `DATABASE_URL=""`, so it exercises the `memoryUploads` branch, which *does* compare `companyId`; migration 023's RLS never executes there, and the matrix never fetches a signed URL at all. The DB-gated suites, meanwhile, ran as a superuser, where the missing predicate is invisible because RLS is silently inert. The new suite is DB-gated *and* uses a non-superuser role for the RLS assertions, which is the combination neither had.
+
+**On how this survived the write-up as well as the code:** H7's disposition vouched for the broken function in two words. That is named as its own pattern in **L25**, because it is not specific to H7.
+
+**Note on the dated fact above.** The role verification is recorded here, with its date, rather than in a comment beside the code. `uploadsStore.ts` states the durable principle — tenant isolation must not depend on a database role attribute — and deliberately records no point-in-time role check: if the role ever changes, a dated verification sitting next to security code would be telling its reader something false.
+
+### L24 — Orphaned upload objects and rows, with no sweep — LOW (housekeeping; one named item)
+
+Three sources of `uploads` rows and S3 objects that nothing references:
+
+1. **Duplicates from the pre-fix re-upload bug.** `uploadPhotoOnce` decided a photo was already stored by testing `/^https?:\/\//`, which never matched the relative `/api/uploads/<id>/<name>` that is actually persisted — so every edit of an entry re-uploaded every photo it already held, writing a byte-identical object under a fresh id and orphaning the previous one. Fixed in `78d5e3c` (the test is now `isManagedMediaUri`), but the objects and rows already written remain.
+2. **One audit probe object.** `uploads/1790717610354-7870983cd172d-probe.jpg`, 201 B, written while verifying the signed-media path during the H9 work. **The S3 object was deleted on 2026-10-01** (confirmed by a follow-up HEAD returning `NotFound`). **Its `uploads` row was deliberately left in place** — id `1790717610354-7870983cd172d`. See below.
+3. **Any file whose entry was later edited to drop the photo.** Same shape as (1), pre-dating it.
+
+**Disposition:** OPEN. Needs one sweep that reconciles the `uploads` table and the bucket against `project_entries.photos_json`, run through `withTenant` per company, and **reporting what it would delete before deleting anything** — this is a compliance-evidence product, so over-eager reconciliation is worse than the orphans, and the operator decides what happens to each record.
+
+**Why the probe row was not simply deleted by hand.** `uploads` carries `FORCE ROW LEVEL SECURITY` (migration 023), which applies to the table owner too, so a bare `DELETE FROM uploads WHERE id = '…'` with no `app.company_id` set matches zero rows and reports success — the fail-closed behaviour H1 was built for, and a silent no-op if run as a one-off production statement. Removing it correctly means going through `withTenant`, which is what the sweep does for every orphan. Recorded here so this one row is not forgotten: it has no object behind it and should go when the sweep runs.
+
+For scale: 692 objects under `uploads/` in `sitesnapai-media` as of 2026-10-01, counted before the probe object was removed.
+
+### L25 — A finding's own disposition vouched for the code that was broken — LOW (documentation pattern, repo-wide)
+
+Recorded as a pattern rather than as a correction, because the correction is one line and the pattern is the reason H9 survived as long as it did.
+
+H7's disposition described `uploadBelongsToActorCompany` as "**(RLS-scoped)**". That parenthesis was simultaneously accurate and actively misleading: the function was scoped by RLS *and by nothing else*, which is precisely what H9 is. A reviewer opening H7 to answer "is the media path tenant-safe?" received something that reads as a guarantee, from the very document whose job is to be sceptical.
+
+**The general shape: documentation that reassures is more dangerous than documentation that is absent.** An absent note sends the reader to the code. A reassuring note ends the inquiry. H9 sat in the media path through three subsequent passes over that exact code — the X1 isolation matrix, the H7 verifier rounds, and the photo-display diagnosis — and in each one H7's disposition was read in place of the query.
+
+Three sibling instances of the same class, for calibration:
+
+- `storage/uploadsStore.ts`'s file-header JSDoc asserted the same reassurance in the same words, next to the query that disproved it.
+- `CLAUDE.md`'s test-counter table still read `EXPECTED_DB_SUITES=5` / "exactly 12 skips" after `run-tests.sh` had moved to 6 / 13 — a document stating a number that the enforcing script already disagreed with, which is worse than stating no number, because the reader has no reason to check.
+- `docs/VACUITY-AUDIT.md` M7 is this class expressed as a test rather than as prose: an assertion that passes whether or not the code under test ran. Same failure, same cause — something that *looks* like verification standing in for verification.
+
+**Two habits this earns, for every future disposition:**
+
+1. **State the mechanism, not a quality.** "(RLS-scoped)" is a quality. "scoped by migration 023's RLS policy, with no `company_id` predicate in the query itself" is a mechanism — and written that way in 2025 it would have read as an open question rather than a closed one.
+2. **Treat a parenthetical inside a disposition as load-bearing.** It is the clause a reviewer skims and trusts precisely because it is short, so it carries more weight per word than the prose around it and deserves more scrutiny, not less.
+
+**Disposition:** No code change. Adopted as a convention for dispositions written from here on. H7's own wording is corrected in the same commit that records this (`fb64b33`), and the `uploadsStore.ts` header JSDoc was corrected in `122db1c`.

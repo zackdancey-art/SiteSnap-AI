@@ -63,15 +63,27 @@ export async function uploadBelongsToActorCompany(
   // the second layer rather than the only one.
   //
   // This query used to be `WHERE id = $1` alone, relying entirely on the RLS
-  // policy to scope the row to the caller's company. That is not a safe thing to
-  // rely on here, because RLS — FORCE included — is bypassed outright for a
-  // superuser or any role with BYPASSRLS, and FORCE only removes the table
-  // OWNER's exemption. With such a role this function returned true for another
-  // tenant's upload id, and routes/uploads.ts would then serve the file and mint
-  // a signed URL for it. Verified: against a Postgres whose app role has
-  // rolbypassrls, company B fetched company A's media with HTTP 200 until this
-  // predicate was added (uploads-media-isolation.test.ts covers it, and the
-  // NOBYPASSRLS probe test in the same file still covers the policy itself).
+  // policy to scope the row to the caller's company. The problem with that is
+  // not that RLS is weak. It is that RLS is a property of the DATABASE ROLE,
+  // not of this code: it is bypassed outright for a superuser or any role with
+  // BYPASSRLS, and FORCE removes only the table owner's ordinary exemption. On
+  // such a connection this function returns true for ANOTHER tenant's upload
+  // id, and routes/uploads.ts then both streams that file and mints a signed
+  // URL for it — reproduced against a Postgres whose role has BYPASSRLS, which
+  // is what CI's own postgres:16 user is, and what H1's notes record Neon's
+  // owner role as.
+  //
+  // THE RULE: tenant isolation must not depend on a database role attribute.
+  // A role attribute can change with no code change, no failing test and no log
+  // line — a managed-database migration, a restore run as a different user, a
+  // provider that hands the application an owner-level role. Isolation resting
+  // on one is isolation nobody reviews. So this check asserts ownership itself,
+  // and RLS stays behind it.
+  //
+  // Whether a particular deployment's role bypasses RLS *today* is deliberately
+  // NOT recorded here. That is a dated fact about infrastructure, and a comment
+  // next to security code that quietly goes stale is worse than no comment at
+  // all. docs/AUDIT.md H9 carries the dated verification.
   //
   // Every other tenant-scoped read in this codebase already carries its own
   // `WHERE company_id = ...`; this was the one place where RLS was the sole
