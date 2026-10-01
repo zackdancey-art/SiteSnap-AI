@@ -46,7 +46,39 @@ function RootLayoutNav() {
     <>
       {/* Navy-forward chrome: navy headers/tab bar need light status-bar content. */}
       <StatusBar style="light" />
-      <Stack screenOptions={{ headerBackTitle: "Back" }}>
+      <Stack
+        screenOptions={{
+          headerBackTitle: "Back",
+          // Every native-stack header in this file is now painted explicitly
+          // rather than inheriting one from iOS.
+          //
+          // app.config.ts declares `userInterfaceStyle: "automatic"` while
+          // constants/colors.ts is a single fixed LIGHT palette with no dark
+          // counterpart. A UINavigationBar with no headerStyle is drawn by iOS,
+          // not by us, so it followed the SYSTEM appearance: in dark appearance
+          // it renders near-black, and `headerTintColor: Colors.primary`
+          // (#0F2B46, navy) then drew a navy back chevron onto near-black —
+          // present and tappable but invisible. Nine screens were in that
+          // state; the one reported from the device was terms-of-service.
+          //
+          // Navy rather than Colors.surface, for two reasons beyond taste. The
+          // StatusBar style="light" above declares white status-bar content for
+          // the whole app, which is wrong over a light nav bar — so these nine
+          // screens were also broken in LIGHT appearance today, just less
+          // visibly. And the comment on that StatusBar states navy chrome as
+          // the intent. The cost is a visual difference from ScreenHeader's
+          // default light variant on the Pattern B screens; that is a real
+          // inconsistency and is called out in the PR rather than fixed by
+          // quietly restyling screens nobody reported.
+          //
+          // These props stay when app.config.ts flips to userInterfaceStyle
+          // "light" in the next native build: explicit beats inherited. See
+          // docs/DECISIONS.md ADR-0002.
+          headerStyle: { backgroundColor: Colors.primary },
+          headerTintColor: Colors.white,
+          headerTitleStyle: { color: Colors.white },
+        }}
+      >
         <Stack.Screen name="index" options={{ headerShown: false }} />
         <Stack.Screen name="login" options={{ headerShown: false }} />
         <Stack.Screen name="signup" options={{ headerShown: false }} />
@@ -59,7 +91,6 @@ function RootLayoutNav() {
           title: "New Site",
           presentation: "modal",
           headerShown: true,
-          headerTintColor: Colors.primary,
         }}
       />
       <Stack.Screen
@@ -80,7 +111,6 @@ function RootLayoutNav() {
           title: "New Entry",
           presentation: "modal",
           headerShown: true,
-          headerTintColor: Colors.primary,
         }}
       />
       <Stack.Screen
@@ -101,7 +131,6 @@ function RootLayoutNav() {
           title: "Profile",
           presentation: "modal",
           headerShown: true,
-          headerTintColor: Colors.primary,
         }}
       />
       <Stack.Screen
@@ -109,7 +138,6 @@ function RootLayoutNav() {
         options={{
           title: "Export Diaries",
           headerShown: true,
-          headerTintColor: Colors.primary,
         }}
       />
       <Stack.Screen
@@ -117,7 +145,6 @@ function RootLayoutNav() {
         options={{
           title: "Backup Data",
           headerShown: true,
-          headerTintColor: Colors.primary,
         }}
       />
       <Stack.Screen
@@ -125,7 +152,6 @@ function RootLayoutNav() {
         options={{
           title: "Privacy Policy",
           headerShown: true,
-          headerTintColor: Colors.primary,
         }}
       />
       {/* terms-of-service was reachable (Settings pushed to it) but never
@@ -138,7 +164,6 @@ function RootLayoutNav() {
         options={{
           title: "Terms of Service",
           headerShown: true,
-          headerTintColor: Colors.primary,
         }}
       />
       <Stack.Screen
@@ -146,7 +171,6 @@ function RootLayoutNav() {
         options={{
           title: "Help & Support",
           headerShown: true,
-          headerTintColor: Colors.primary,
         }}
       />
       <Stack.Screen
@@ -154,7 +178,6 @@ function RootLayoutNav() {
         options={{
           title: "Supervisor Dashboard",
           headerShown: true,
-          headerTintColor: Colors.primary,
         }}
       />
       <Stack.Screen name="invite" options={{ headerShown: false }} />
