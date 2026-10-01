@@ -9,6 +9,7 @@ import {
   resolvePhotoSource,
   type PhotoUnavailableReason,
 } from "@/lib/photo-uri";
+import { reportMediaFailure } from "@/lib/media-telemetry";
 import { describeGeneration } from "@/lib/provenance";
 import { LOGO_DATA_URI } from "@/lib/logo";
 
@@ -557,15 +558,26 @@ export type ExportPhoto = Photo & {
 async function fetchAsDataUri(url: string): Promise<string | null> {
   try {
     const res = await fetch(url);
-    if (!res.ok) return null;
+    if (!res.ok) {
+      reportMediaFailure({ kind: "export-fetch-failed", uri: url, status: res.status });
+      return null;
+    }
     const blob = await res.blob();
     return await new Promise<string | null>((resolve) => {
       const reader = new FileReader();
-      reader.onerror = () => resolve(null);
+      reader.onerror = () => {
+        reportMediaFailure({
+          kind: "export-fetch-failed",
+          uri: url,
+          reason: "FileReader could not encode the fetched blob",
+        });
+        resolve(null);
+      };
       reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : null);
       reader.readAsDataURL(blob);
     });
-  } catch {
+  } catch (err) {
+    reportMediaFailure({ kind: "export-fetch-failed", uri: url, cause: err });
     return null;
   }
 }

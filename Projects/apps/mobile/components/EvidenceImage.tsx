@@ -18,6 +18,7 @@ import {
   UNAVAILABLE_SHORT_LABEL,
   type PhotoUnavailableReason,
 } from "@/lib/photo-uri";
+import { reportMediaFailure } from "@/lib/media-telemetry";
 
 /**
  * The only component that renders site-evidence imagery.
@@ -129,7 +130,17 @@ export function EvidenceImage({
         style={[styles.image, imageStyle]}
         resizeMode={resizeMode}
         onLoad={() => setLoaded(true)}
-        onError={() => setLoadFailed(true)}
+        onError={(event) => {
+          setLoadFailed(true);
+          // The failure this whole component exists because of. <Image> reports
+          // it here and nowhere else — no throw, no log — so if this does not
+          // report it, nothing does.
+          reportMediaFailure({
+            kind: "image-load-failed",
+            uri: sourceUri,
+            reason: event?.nativeEvent?.error ? String(event.nativeEvent.error) : undefined,
+          });
+        }}
       />
       {!loaded && (
         <View style={styles.loadingOverlay} pointerEvents="none">

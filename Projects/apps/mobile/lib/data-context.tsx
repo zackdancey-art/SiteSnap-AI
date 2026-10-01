@@ -11,6 +11,7 @@ import {
 } from "@/lib/photo-payload-store";
 import { enqueue, peekQueue, dequeue, isNetworkError } from "@/lib/offline-queue";
 import { isManagedMediaUri, toCanonicalPath, toStorablePhotoUri } from "@/lib/photo-uri";
+import { reportMediaFailure } from "@/lib/media-telemetry";
 
 interface DataContextType {
   sites: Site[];
@@ -326,7 +327,7 @@ async function batchSignPaths(paths: string[], token: string): Promise<{ failed:
       body: JSON.stringify({ paths }),
     });
     if (!res.ok) {
-      console.warn(`[media] signing request failed (${res.status}) for ${paths.length} photo(s)`);
+      reportMediaFailure({ kind: "sign-request-failed", status: res.status, count: paths.length });
       return { failed: paths };
     }
     const data = (await res.json()) as { signed: { path: string; url: string | null }[] };
@@ -340,11 +341,16 @@ async function batchSignPaths(paths: string[], token: string): Promise<{ failed:
     }
     const failed = paths.filter((path) => !signed.has(path));
     if (failed.length > 0) {
-      console.warn(`[media] ${failed.length} of ${paths.length} photo(s) were refused a signed URL`);
+      // Reported per path, not once per batch: a signer that refuses ONE photo
+      // out of six is a different problem from one that refuses all six, and
+      // the scrubbed path is what identifies which object is unreachable.
+      for (const path of failed) {
+        reportMediaFailure({ kind: "sign-refused", uri: path, count: failed.length, total: paths.length });
+      }
     }
     return { failed };
   } catch (err) {
-    console.warn(`[media] signing threw for ${paths.length} photo(s):`, err);
+    reportMediaFailure({ kind: "sign-threw", count: paths.length, cause: err });
     return { failed: paths };
   }
 }
@@ -360,7 +366,7 @@ async function attachSignedPhotoUris(entries: Entry[], token: string | null): Pr
       0
     );
     if (unsignable > 0) {
-      console.warn(`[media] no auth token — ${unsignable} photo(s) cannot be signed and will show as unavailable`);
+      reportMediaFailure({ kind: "sign-no-token", count: unsignable });
     }
     return entries;
   }
@@ -386,6 +392,10 @@ async function attachSignedPhotoUris(entries: Entry[], token: string | null): Pr
     failed.push(...result.failed);
   }
   if (failed.length > 0) {
+    // Console only, deliberately. Every path in `failed` has already been
+    // reported to Sentry individually inside batchSignPaths; this line is the
+    // local summary of those, and reporting it again would duplicate each event
+    // and inflate the count on every screen that renders the same entry.
     console.warn(`[media] ${failed.length} photo(s) will render as unavailable — signing did not succeed`);
   }
 
