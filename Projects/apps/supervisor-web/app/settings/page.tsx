@@ -316,7 +316,7 @@ export default function SettingsPage() {
 
   return (
     <div className="app-shell">
-      <Sidebar userName={user?.name ?? user?.email ?? "Supervisor"} />
+      <Sidebar userName={user?.name ?? user?.email ?? "Manager"} />
       <div className="main">
 
         {/* Top bar */}
@@ -631,10 +631,10 @@ export default function SettingsPage() {
             {/* About */}
             {activeSection === "about" && (
               <Panel title="About SiteSnap AI" description="Version information and support contacts.">
-                <Row label="Application" sub="SiteSnap AI Supervisor Portal">
+                <Row label="Application" sub="SiteSnap AI Manager Portal">
                   <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text-secondary)" }}>v0.1.0</span>
                 </Row>
-                <Row label="Platform" sub="SiteSnap AI Supervisor Portal — web">
+                <Row label="Platform" sub="SiteSnap AI Manager Portal — web">
                   <span style={{ fontSize: 12, background: "var(--surface-secondary)", padding: "4px 12px", borderRadius: 8, color: "var(--text-secondary)", fontWeight: 600 }}>Web</span>
                 </Row>
                 <Row label="Compliance" sub="Privacy Act 1988 (AU) · Privacy Act 2020 (NZ) · WHS/HSWA 2015">

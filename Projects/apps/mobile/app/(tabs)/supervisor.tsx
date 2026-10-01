@@ -16,7 +16,7 @@ export default function SupervisorTabScreen() {
 
 /**
  * This screen had no safe-area handling at all: a bare `padding: 16` container
- * put "Supervisor Dashboard" 16pt from the physical top of the display, under
+ * put "Dashboard" 16pt from the physical top of the display, under
  * the status bar, on both the normal and the Access Restricted branch. It is the
  * only screen in the app with that fault — the other two tab screens size their
  * own headers off the top inset, the seven pushed screens get it from the shared
@@ -51,14 +51,14 @@ function SupervisorContent() {
     return (
       <View style={containerStyle}>
         <Text style={styles.title}>Access Restricted</Text>
-        <Text style={styles.subtitle}>Supervisor dashboard is only visible for assigned supervisor accounts.</Text>
+        <Text style={styles.subtitle}>Owner and manager accounts only.</Text>
       </View>
     );
   }
 
   return (
     <View style={containerStyle}>
-      <Text style={styles.title}>Supervisor Dashboard</Text>
+      <Text style={styles.title}>Dashboard</Text>
       <Text style={styles.subtitle}>Monitor project activity and report readiness.</Text>
       <View style={styles.card}>
         <Text style={styles.metric}>Sites: {sites.length}</Text>

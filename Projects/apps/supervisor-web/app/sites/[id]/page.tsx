@@ -227,7 +227,7 @@ export default function SiteDetailPage() {
 
   return (
     <div className="app-shell">
-      <Sidebar userName={user?.name ?? user?.email ?? "Supervisor"} />
+      <Sidebar userName={user?.name ?? user?.email ?? "Manager"} />
       <div className="main">
         {/* Top bar */}
         <div className="topbar">

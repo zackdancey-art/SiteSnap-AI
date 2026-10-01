@@ -30,7 +30,7 @@ export default function Sidebar({ userName }: { userName: string }) {
         <Image src="/logo.png" alt="SiteSnap AI" width={36} height={36} style={{ borderRadius: 10, flexShrink: 0 }} />
         <div>
           <div className="sidebar-logo-text">SiteSnap AI</div>
-          <div className="sidebar-logo-sub">Supervisor Portal</div>
+          <div className="sidebar-logo-sub">Manager Portal</div>
         </div>
       </div>
 

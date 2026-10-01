@@ -45,7 +45,7 @@ export default function LoginPage() {
         </div>
         <div style={{ textAlign: "center" }}>
           <div className="auth-brand-name">SiteSnap AI</div>
-          <div className="auth-brand-sub">Supervisor Portal</div>
+          <div className="auth-brand-sub">Manager Portal</div>
         </div>
       </div>
 
@@ -107,7 +107,7 @@ export default function LoginPage() {
         </form>
 
         <p style={{ marginTop: 20, textAlign: "center", fontSize: 12, color: "var(--text-tertiary)" }}>
-          Supervisor and admin accounts only.
+          Owner and manager accounts only.
         </p>
       </div>
     </div>

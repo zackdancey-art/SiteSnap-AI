@@ -76,7 +76,7 @@ export default function LocationsPage() {
 
   return (
     <div className="app-shell">
-      <Sidebar userName={user?.name ?? user?.email ?? "Supervisor"} />
+      <Sidebar userName={user?.name ?? user?.email ?? "Manager"} />
       <div className="main">
         <Topbar title="Live Locations" right={
           <>

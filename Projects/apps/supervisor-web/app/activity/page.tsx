@@ -42,7 +42,7 @@ export default function ActivityPage() {
 
   return (
     <div className="app-shell">
-      <Sidebar userName={user?.name ?? user?.email ?? "Supervisor"} />
+      <Sidebar userName={user?.name ?? user?.email ?? "Manager"} />
       <div className="main">
         <Topbar title="Activity" />
         <div className="page-body">

@@ -346,7 +346,7 @@ export default function SignUpScreen() {
                   <Text style={styles.label}>Full Name</Text>
                   <TextInput
                     style={styles.input}
-                    placeholder="Jane Supervisor"
+                    placeholder="Jane Smith"
                     value={fullName}
                     onChangeText={setFullName}
                     autoCapitalize="words"

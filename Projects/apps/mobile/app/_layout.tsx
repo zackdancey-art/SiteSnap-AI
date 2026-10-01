@@ -176,7 +176,7 @@ function RootLayoutNav() {
       <Stack.Screen
         name="supervisor-dashboard"
         options={{
-          title: "Supervisor Dashboard",
+          title: "Dashboard",
           headerShown: true,
         }}
       />
