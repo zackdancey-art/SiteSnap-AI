@@ -152,3 +152,130 @@ six unreviewed mobile commits — to a store binary. The bundling path is what w
 under test, and an unmapped branch exercises it identically while being
 undeliverable. **Verify update tooling on an unmapped branch; ship to
 `production` as its own deliberate step.**
+
+---
+
+## ADR-0002 — Force the light appearance in JS on every surface iOS themes itself
+
+**Date:** 2026-10-01
+**Status:** Accepted, with an expiry condition (below)
+**Finding:** device pass items 1 and 4 — two symptoms, one cause
+**Scope:** every iOS-rendered control in `apps/mobile` (native stack headers, `UIDatePicker`, uncoloured `ActivityIndicator`, unpainted screen backgrounds)
+
+### The problem
+
+`app.config.ts:47` declares `userInterfaceStyle: "automatic"`, which tells iOS the
+app supports both appearances. `constants/colors.ts` is a single fixed **light**
+palette. There is no dark counterpart — and the shape that would hold one is
+already there and half-filled: `Colors.light` is a five-key sub-object with no
+`Colors.dark` beside it, the remains of a template that assumed both.
+
+So anything **we** paint is light, and anything **iOS** paints follows the phone's
+system setting. In dark appearance the two meet on the same screen:
+
+| surface | what iOS drew | what we drew on it | result |
+|---|---|---|---|
+| `UIDatePicker` (`crew/[siteId].tsx`) | near-white wheel text | `Colors.surface` card, `#FFFFFF` | white on white; only the selection band visible — reported as "the picker is empty" |
+| `UINavigationBar`, 10 screens | near-black bar | `headerTintColor: Colors.primary`, navy | navy chevron on near-black; present, tappable, invisible — reported as "the back button does nothing" |
+| `ActivityIndicator`, no `color` | appearance-adaptive grey, near-white | `Colors.background` | invisible spinner |
+| screen content view, no `backgroundColor` (`+not-found.tsx`) | near-black | unstyled `<Text>`, default black | black on near-black |
+
+Two of these were reported from a device as separate bugs. They are one bug with
+four faces, and the fourth was found by enumeration rather than by a user.
+
+### Options considered
+
+| | Option | Cost | Risk |
+|---|---|---|---|
+| **(a)** | Explicit light-appearance props on each affected surface, in JS | One prop or style per surface; ships OTA today | Recurs per new surface. Nothing enforces it — the next `DateTimePicker` added without `themeVariant` has the bug again |
+| **(b)** | `userInterfaceStyle: "light"` in `app.config.ts` | A native rebuild and a store submission; cannot ship OTA | None to the UI — it is the correct declaration of what the app actually supports. The cost is entirely in the release path |
+| **(c)** | Add a real dark palette to `Colors` and honour the system setting | Every colour in the app decided twice, plus a theme context, plus re-checking every screen in both appearances | Large. A half-finished dark palette is worse than none: it produces exactly the mixed-appearance screens above, which is how this bug exists |
+
+### Decision: (a) now, (b) at the next native build, and keep (a) afterwards
+
+**(b) is the durable fix and is the honest declaration** — this app has one
+palette, so claiming to support both appearances is false. It is not available
+today: `userInterfaceStyle` becomes `UIUserInterfaceStyle` in `Info.plist`, which
+is native configuration. There is no `ios/` directory in the repo (it is generated
+by prebuild), the distributed build is a store binary, and `eas update` ships only
+the JS bundle — so (b) cannot reach the phone that reported these bugs without a
+new build and a submission. The two symptoms are live now.
+
+**(a) ships today and is kept permanently.** When (b) lands the explicit props
+become redundant in the sense that nothing should contradict them — and they stay
+anyway. A component that states the appearance it needs is correct under any
+app-level setting, including one changed by someone who does not know these four
+surfaces exist. Explicit beats inherited. **Do not remove them as cleanup when the
+native flip lands.**
+
+**(c) is not refused on merit, only on sequence.** It is the right end state for a
+product used outdoors at dusk. It is also the only option that cannot be done
+halfway, and this ADR exists because of what halfway looks like.
+
+The fourth column of the table above is the real argument for doing both: (a) fixes
+the four known surfaces, (b) fixes the one nobody has found yet.
+
+### What would change the answer
+
+**The condition is a dark palette existing in `Colors` — a `Colors.dark` beside
+`Colors.light`, with a counterpart for every token the app actually uses, not the
+five in the template stub.** On the day that exists, this entry is out of date in
+both directions:
+
+- `userInterfaceStyle` should go back to `"automatic"`, because the app would then
+  genuinely support both.
+- The explicit props in (a) become wrong rather than merely redundant — a
+  `themeVariant="light"` picker on a dark screen is this same bug with the colours
+  swapped. They must be revisited, not deleted en masse: each one says *"match the
+  light palette this screen is painted in"*, and under a theme system the right
+  value is whatever the theme resolves to.
+
+A secondary trigger, weaker but worth naming: **a fifth affected surface found in
+the wild.** Four were found by enumerating what iOS themes natively, and the
+enumeration below records what was checked and cleared. A fifth would mean the
+enumeration was incomplete, which is an argument for (c) sooner rather than for
+another per-surface prop.
+
+### Verification actually performed
+
+- The cause was read, not inferred: `app.config.ts:47` and the whole of
+  `constants/colors.ts`, which has no `dark` key at any level.
+- **Every surface iOS themes natively was enumerated**, not just the two reported.
+  Affected and fixed: the `crew` `DateTimePicker`; the native stack header on all ten
+  screens that show one — the nine `headerShown: true` entries in `_layout.tsx`
+  plus `+not-found`, which gets its header from `Stack.Screen options` and so
+  inherits the same root `screenOptions`; the uncoloured `ActivityIndicator` in
+  `inspections/[siteId].tsx`; `+not-found.tsx`'s background and title. Checked and
+  **not** affected: `Alert`, `ActionSheetIOS` and the share sheet (system-rendered
+  end to end, so internally consistent); all 79 `TextInput`s (each resolves an
+  explicit `color` through its style array — the seven styles without one are
+  modifiers composed over a base that sets it, checked individually); the single
+  `RefreshControl` (`tintColor` set); both tab bars. No `MapView`, `Switch`,
+  `SegmentedControl` or user-facing `WebView` exists.
+- `keyboardAppearance` is unset everywhere and deliberately left so. A
+  system-themed keyboard is legible in either appearance, and it is the one surface
+  where following the phone is right rather than merely tolerated.
+- **Not verified: any of it on a device, in either appearance.** This is the whole
+  of the gap. The nav-bar diagnosis is a HYPOTHESIS — the phone's appearance mode
+  during the device pass was not recorded, and "white digits on white with only the
+  selection band visible" is strong evidence for dark but it is inference. The
+  device checklist is written to kill the hypothesis if it is wrong: in **light**
+  appearance the chevron should already have worked before this change, so if it is
+  visible and still dead, the cause is something else and this entry's item 4
+  reasoning is void. The fix stands either way; the diagnosis does not.
+- **Not verified: the native flip.** `userInterfaceStyle: "light"` has not been
+  built, because doing so requires the build this decision defers.
+
+### A containment note worth keeping
+
+`StatusBar style="light"` in `app/_layout.tsx` is the part of this that was broken
+in **light** appearance, not dark — white status-bar glyphs over a system-default
+light navigation bar, on ten screens, every day, for anyone who never turns dark
+mode on. It was invisible as a bug because it reads as low contrast rather than as
+breakage, and because the global declaration and the per-screen headers were
+written at different times and never compared.
+
+The lesson is narrower than the appearance one: **a global declaration about
+chrome is a claim about every screen, and it is only true if every screen was
+checked against it.** Painting the headers navy is what makes that claim true
+here; it is not a styling preference.
