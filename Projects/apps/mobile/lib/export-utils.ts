@@ -1,4 +1,4 @@
-import { Platform, Share } from "react-native";
+import { Alert, Platform, Share } from "react-native";
 import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
 import { File, Paths } from "expo-file-system";
@@ -301,10 +301,23 @@ function downloadBlob(filename: string, mimeType: string, content: string) {
   return true;
 }
 
-async function shareNativeFile(uri: string, mimeType: string, dialogTitle: string) {
+/**
+ * `uti` is not optional, and it is the whole reason this signature changed.
+ *
+ * expo-sharing's `mimeType` option is ANDROID ONLY — it is ignored on iOS,
+ * which identifies file types by Uniform Type Identifier instead. With no
+ * `UTI`, iOS falls back to inferring one from the extension, and `.doc` is a
+ * type it resolves inconsistently: the share sheet offered no app able to open
+ * the file, which is the "Word export does nothing" report.
+ *
+ * Required rather than defaulted so a new caller has to state what it is
+ * sharing. A wrong UTI is a silent no-op in the share sheet, which is the
+ * failure mode this is fixing.
+ */
+async function shareNativeFile(uri: string, mimeType: string, uti: string, dialogTitle: string) {
   const canShare = await Sharing.isAvailableAsync();
   if (canShare) {
-    await Sharing.shareAsync(uri, { mimeType, dialogTitle });
+    await Sharing.shareAsync(uri, { mimeType, UTI: uti, dialogTitle });
     return;
   }
   await Share.share({ title: dialogTitle, message: uri });
@@ -329,12 +342,59 @@ export async function exportReportDocument(args: {
 
   if (args.format === "pdf") {
     const { uri } = await Print.printToFileAsync({ html: args.html });
-    await shareNativeFile(uri, "application/pdf", "Export PDF");
+    await shareNativeFile(uri, "application/pdf", "com.adobe.pdf", "Export PDF");
     return;
   }
 
   const docUri = writeCacheFile(`${filenameBase}.doc`, args.html);
-  await shareNativeFile(docUri, "application/msword", "Export Word Document");
+  // com.microsoft.word.doc is the UTI for the legacy .doc container this writes.
+  // NOT org.openxmlformats.wordprocessingml.document — that is .docx, and these
+  // bytes are HTML with a .doc extension, which Word opens and docx readers do
+  // not. Changing the extension without changing the generator would break it.
+  await shareNativeFile(docUri, "application/msword", "com.microsoft.word.doc", "Export Word Document");
+}
+
+/**
+ * `exportReportDocument` with the failure handled: the user is told, and so is
+ * telemetry. Returns whether a document was produced.
+ *
+ * WHY THIS EXISTS. Nine of the twelve export call sites were
+ * `void exportReportDocument(...)` — a floating promise, so a rejection became
+ * an unhandled rejection that React Native swallows with no log, no alert and
+ * no event. Tapping Word did nothing at all, and "nothing happens on failure"
+ * was indistinguishable from "nothing happened because it worked silently".
+ * That is the same shape as the photo-display bug: a failure on a path nobody
+ * was watching, found by a human weeks later.
+ *
+ * Nine identical try/catch blocks would have been the other answer. One
+ * function is better because the next call site gets the behaviour by default
+ * instead of by remembering, and the nine `void`s that remain at the call sites
+ * are now honest — this function does not reject.
+ *
+ * `label` completes the sentence "Could not export …" and is also the telemetry
+ * fingerprint, so a diary export failing is a different issue from a timesheet
+ * export failing rather than both collapsing into one.
+ *
+ * Alert rather than a toast or inline state: these are fire-and-forget actions
+ * launched from an ActionSheet, with no screen left to render an error into.
+ */
+export async function runReportExport(
+  args: {
+    filenameBase: string;
+    html: string;
+    format: ReportExportFormat;
+    fallbackText?: string;
+  } & { label: string }
+): Promise<boolean> {
+  const { label, ...rest } = args;
+  try {
+    await exportReportDocument(rest);
+    return true;
+  } catch (error) {
+    Alert.alert("Export Failed", `Could not export ${label}.`);
+    reportMediaFailure({ kind: "export-failed", label, format: rest.format, cause: error });
+    return false;
+  }
 }
 
 /**
@@ -387,8 +447,14 @@ export async function writeSharablePhotoFile(
   }
 }
 
+/**
+ * iOS needs a UTI here too, so it is derived from the mime type rather than
+ * left for the share sheet to infer. Images are the case iOS infers correctly
+ * from the extension, so this is for consistency, not a reported bug.
+ */
 export async function sharePhotoFile(uri: string, mimeType: string) {
-  await shareNativeFile(uri, mimeType, "Share Photo");
+  const uti = mimeType === "image/png" ? "public.png" : "public.jpeg";
+  await shareNativeFile(uri, mimeType, uti, "Share Photo");
 }
 
 function csvCell(value: string) {

@@ -13,7 +13,7 @@ import * as Crypto from "expo-crypto";
 import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
 import Colors from "@/constants/colors";
 import { formatDate } from "@/lib/format";
-import { buildHtmlDocument, exportReportDocument, escapeHtml, buildAnnotationOverlayHtml } from "@/lib/export-utils";
+import { buildHtmlDocument, runReportExport, escapeHtml, buildAnnotationOverlayHtml } from "@/lib/export-utils";
 import { EmptyState } from "@/components/EmptyState";
 import { SignaturePad } from "@/components/SignaturePad";
 import { AnnotatedImage } from "@/components/AnnotatedImage";
@@ -682,8 +682,8 @@ export default function InspectionsScreen() {
     const base = `sitesnap-inspection-${insp.date}-${insp.id}`;
     Alert.alert("Export Inspection Report", "Choose a format.", [
       { text: "Cancel", style: "cancel" },
-      { text: "Word", onPress: () => void exportReportDocument({ filenameBase: base, html, format: "doc" }) },
-      { text: "PDF", onPress: () => void exportReportDocument({ filenameBase: base, html, format: "pdf" }) },
+      { text: "Word", onPress: () => void runReportExport({ filenameBase: base, html, format: "doc", label: "the inspection report" }) },
+      { text: "PDF", onPress: () => void runReportExport({ filenameBase: base, html, format: "pdf", label: "the inspection report" }) },
     ]);
   };
 

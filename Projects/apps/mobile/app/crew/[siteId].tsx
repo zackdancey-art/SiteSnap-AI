@@ -13,7 +13,8 @@ import { formatDate } from "@/lib/format";
 import { EmptyState } from "@/components/EmptyState";
 import { useData } from "@/lib/data-context";
 import { useAuth } from "@/lib/auth-context";
-import { exportReportDocument, buildHtmlDocument } from "@/lib/export-utils";
+import { runReportExport, buildHtmlDocument } from "@/lib/export-utils";
+import { reportMediaFailure } from "@/lib/media-telemetry";
 import { getApiBaseUrl } from "@/lib/api-base-url";
 import { ScreenHeader } from "@/components/ScreenHeader";
 
@@ -239,12 +240,17 @@ export default function CrewTimecards() {
     setExporting(true);
     try {
       const html = buildTimecardHtml(timecards, site?.name ?? "Site");
-      await exportReportDocument({
+      await runReportExport({
         filenameBase: `timecards-${site?.name?.toLowerCase().replace(/\s+/g, "-") ?? siteId}-${new Date().toISOString().slice(0, 10)}`,
         html,
         format: "pdf",
+        label: "the timesheet",
       });
-    } catch { Alert.alert("Export failed", "Could not generate timesheet PDF."); }
+    } catch (error) {
+      // runReportExport does not reject, so this is buildTimecardHtml failing.
+      Alert.alert("Export Failed", "Could not export the timesheet.");
+      reportMediaFailure({ kind: "export-failed", label: "the timesheet (document build)", format: "pdf", cause: error });
+    }
     finally { setExporting(false); }
   };
 

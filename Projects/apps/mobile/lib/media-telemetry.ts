@@ -46,7 +46,18 @@ export type MediaFailureKind =
   /** <Image> raised onError for a uri we believed was displayable. */
   | "image-load-failed"
   /** An export could not fetch the bytes it needed to embed. */
-  | "export-fetch-failed";
+  | "export-fetch-failed"
+  /**
+   * An export threw and produced no document.
+   *
+   * Reported here rather than from a second module because this one already
+   * carries the parts that matter — never-throws, per-session de-duplication,
+   * and a scrubbing rule for anything that might contain a photo — and because
+   * `export-fetch-failed` above was already an export concern. The module name
+   * is now narrower than its contents; a third non-media caller is the point at
+   * which it should be renamed rather than stretched again.
+   */
+  | "export-failed";
 
 type MediaFailureReport = {
   kind: MediaFailureKind;
@@ -59,6 +70,10 @@ type MediaFailureReport = {
   uri?: string | null;
   /** Why the UI gave up, for a load failure. */
   reason?: string;
+  /** Which document the user was trying to produce, for an export failure. */
+  label?: string;
+  /** The export format requested. */
+  format?: string;
   /** The underlying error, where one was thrown. */
   cause?: unknown;
 };
@@ -83,6 +98,8 @@ function describeFailure(report: MediaFailureReport): string {
       return "Evidence image failed to load";
     case "export-fetch-failed":
       return "Export could not fetch photo bytes";
+    case "export-failed":
+      return `Export failed: ${report.label ?? "report"}${report.format ? ` (${report.format})` : ""}`;
   }
 }
 
@@ -156,10 +173,12 @@ export function reportMediaFailure(report: MediaFailureReport): void {
         ...(report.total !== undefined ? { total: report.total } : {}),
         ...(report.status !== undefined ? { status: report.status } : {}),
         ...(report.reason !== undefined ? { reason: report.reason } : {}),
+        ...(report.label !== undefined ? { label: report.label } : {}),
+        ...(report.format !== undefined ? { format: report.format } : {}),
       });
       // Set explicitly: when `cause` was a real Error its own message is the
       // title, and "Network request failed" would not say what broke.
-      scope.setFingerprint(["media-failure", report.kind]);
+      scope.setFingerprint(["media-failure", report.kind, ...(report.label ? [report.label] : [])]);
       Sentry.captureException(error);
     });
   } catch {

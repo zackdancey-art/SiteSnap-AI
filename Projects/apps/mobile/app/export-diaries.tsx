@@ -2,7 +2,7 @@ import React, { useMemo } from "react";
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useData } from "@/lib/data-context";
 import Colors from "@/constants/colors";
-import { buildDiariesReportHtml, buildDiariesCsv, exportReportDocument, shareOrDownloadText } from "@/lib/export-utils";
+import { buildDiariesReportHtml, buildDiariesCsv, runReportExport, shareOrDownloadText } from "@/lib/export-utils";
 
 export default function ExportDiariesScreen() {
   const { diaries, sites } = useData();
@@ -12,17 +12,15 @@ export default function ExportDiariesScreen() {
     [diaries, sites]
   );
 
+  // The try/catch this replaces alerted but reported nothing. runReportExport
+  // does both, so every export in the app fails the same way.
   const onExport = async (format: "pdf" | "doc") => {
-    try {
-      await exportReportDocument({
-        filenameBase: `sitesnap-diaries-${new Date().toISOString().slice(0, 10)}`,
-        html: exportHtml,
-        format,
-      });
-    } catch (error) {
-      console.error("Export failed", error);
-      Alert.alert("Export failed", "Could not export diaries.");
-    }
+    await runReportExport({
+      filenameBase: `sitesnap-diaries-${new Date().toISOString().slice(0, 10)}`,
+      html: exportHtml,
+      format,
+      label: "the diaries",
+    });
   };
 
   const onExportCsv = async () => {

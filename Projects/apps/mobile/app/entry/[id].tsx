@@ -19,7 +19,7 @@ import Colors from "@/constants/colors";
 import { Photo } from "@/lib/types";
 import {
   buildEntryPhotosReportHtml,
-  exportReportDocument,
+  runReportExport,
   resolvePhotosForExport,
   type ExportPhoto,
 } from "@/lib/export-utils";
@@ -151,19 +151,21 @@ export default function EntryDetailScreen() {
       {
         text: "Word",
         onPress: () =>
-          void exportReportDocument({
+          void runReportExport({
             filenameBase: `${site.name}-${entry.date}-entry-photos`,
             html,
             format: "doc",
+            label: "these entry photos",
           }),
       },
       {
         text: "PDF",
         onPress: () =>
-          void exportReportDocument({
+          void runReportExport({
             filenameBase: `${site.name}-${entry.date}-entry-photos`,
             html,
             format: "pdf",
+            label: "these entry photos",
           }),
       },
     ]);

@@ -19,7 +19,8 @@ import { apiRequest, BASE_URL } from "@/lib/query-client";
 import Colors from "@/constants/colors";
 import { DailyEntry, GeneratedDiary, DiarySection, DiaryEditLogEntry, DiaryGeneration } from "@/lib/types";
 import { describeGeneration } from "@/lib/provenance";
-import { buildDiaryReportHtml, exportReportDocument, ReportExportFormat } from "@/lib/export-utils";
+import { buildDiaryReportHtml, runReportExport, ReportExportFormat } from "@/lib/export-utils";
+import { reportMediaFailure } from "@/lib/media-telemetry";
 import { BackButton } from "@/components/BackButton";
 
 type ReportPeriod = "daily" | "weekly" | "monthly";
@@ -401,15 +402,18 @@ export default function DiaryPreviewScreen() {
         fullReport: resolvedFullReport,
         checklist: resolvedChecklist,
       });
-      await exportReportDocument({
+      await runReportExport({
         filenameBase: `${site.name}-${resolvedPeriod}-site-diary-${new Date(currentDiary.generatedAt).toISOString().slice(0, 10)}`,
         html,
         format,
         fallbackText: generateShareText(),
+        label: "this diary",
       });
     } catch (err) {
-      console.warn("Export diary failed", err);
+      // runReportExport does not reject, so reaching here means buildDiaryReportHtml
+      // or generateShareText threw — a different failure, reported the same way.
       Alert.alert("Export Failed", "Could not export this diary.");
+      reportMediaFailure({ kind: "export-failed", label: "this diary (document build)", format, cause: err });
     }
   };
 

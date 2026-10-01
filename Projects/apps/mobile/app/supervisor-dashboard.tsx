@@ -4,7 +4,7 @@ import { router } from "expo-router";
 import { useData } from "@/lib/data-context";
 import { useAuth } from "@/lib/auth-context";
 import Colors from "@/constants/colors";
-import { buildDiariesReportHtml, exportReportDocument } from "@/lib/export-utils";
+import { buildDiariesReportHtml, runReportExport } from "@/lib/export-utils";
 
 function Metric({ label, value }: { label: string; value: string | number }) {
   return (
@@ -50,19 +50,21 @@ export default function SupervisorDashboardScreen() {
       {
         text: "Word",
         onPress: () =>
-          void exportReportDocument({
+          void runReportExport({
             filenameBase: `portfolio-report-${new Date().toISOString().slice(0, 10)}`,
             html,
             format: "doc",
+            label: "the portfolio report",
           }),
       },
       {
         text: "PDF",
         onPress: () =>
-          void exportReportDocument({
+          void runReportExport({
             filenameBase: `portfolio-report-${new Date().toISOString().slice(0, 10)}`,
             html,
             format: "pdf",
+            label: "the portfolio report",
           }),
       },
     ]);
