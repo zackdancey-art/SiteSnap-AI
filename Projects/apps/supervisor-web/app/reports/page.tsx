@@ -108,7 +108,7 @@ function buildHtml(diary: Diary, site: Site, orgName: string): string {
   ${diary.fullReport && sections.length === 0 ? `<div class="section"><h3>Full Report</h3><div style="padding:14px;line-height:1.7;">${esc(diary.fullReport).replace(/\n/g, "<br/>")}</div></div>` : ""}
   ${checklistHtml}
   <div class="footer">
-    <span>SiteSnap AI — Supervisor Portal</span>
+    <span>SiteSnap AI — Manager Portal</span>
     <span>Printed ${new Date().toLocaleDateString("en-AU")}</span>
   </div>
 </body>
@@ -417,7 +417,7 @@ function ReportsPageInner() {
 
   return (
     <div className="app-shell">
-      <Sidebar userName={user?.name ?? user?.email ?? "Supervisor"} />
+      <Sidebar userName={user?.name ?? user?.email ?? "Manager"} />
       <div className="main">
         <Topbar title="Reports" right={data ? (
           <button className="btn-ghost" style={{ fontSize: 13 }} onClick={() => exportCsv(visibleDiaries, data.sites)}>

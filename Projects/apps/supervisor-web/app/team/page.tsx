@@ -12,13 +12,16 @@ import {
   updateMemberRole, removeCompanyMember,
 } from "@/lib/api";
 import { useRole } from "@/lib/useRole";
+import { COMPANY_ROLE_LABELS } from "@/lib/roles";
 import type { CompanyProfile, CompanyMember } from "@/lib/api";
 
+// The labels come from lib/roles so this file and ProfileDropdown cannot drift
+// into two vocabularies again; the colours stay local, they are only used here.
 const ROLE_CFG: Record<string, { label: string; color: string; bg: string }> = {
-  owner:   { label: "Owner",   color: "#7C3AED", bg: "#F5F3FF" },
-  manager: { label: "Manager", color: "#E8731A", bg: "#FFF7ED" },
-  viewer:  { label: "Viewer",  color: "#0EA5E9", bg: "#F0F9FF" },
-  crew:    { label: "Crew",    color: "#22C55E", bg: "#F0FDF4" },
+  owner:   { label: COMPANY_ROLE_LABELS.owner,   color: "#7C3AED", bg: "#F5F3FF" },
+  manager: { label: COMPANY_ROLE_LABELS.manager, color: "#E8731A", bg: "#FFF7ED" },
+  viewer:  { label: COMPANY_ROLE_LABELS.viewer,  color: "#0EA5E9", bg: "#F0F9FF" },
+  crew:    { label: COMPANY_ROLE_LABELS.crew,    color: "#22C55E", bg: "#F0FDF4" },
 };
 
 function RoleBadge({ role }: { role: string }) {
@@ -151,7 +154,7 @@ export default function TeamPage() {
 
   return (
     <div className="app-shell">
-      <Sidebar userName={user?.name ?? user?.email ?? "Supervisor"} />
+      <Sidebar userName={user?.name ?? user?.email ?? "Manager"} />
       <div className="main">
         <Topbar title="Team" right={<RoleBadge role={companyRole} />} />
 

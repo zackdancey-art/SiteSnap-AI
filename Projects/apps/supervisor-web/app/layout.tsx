@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "SiteSnap AI — Supervisor Portal",
-  description: "Supervisor analytics and site oversight portal for SiteSnap AI",
+  title: "SiteSnap AI — Manager Portal",
+  description: "Manager analytics and site oversight portal for SiteSnap AI",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

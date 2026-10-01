@@ -18,7 +18,7 @@ import {
   buildExportImageMarkup,
   buildHtmlDocument,
   buildIncompleteRecordNotice,
-  exportReportDocument,
+  runReportExport,
   formatPhotoCountForExport,
   resolvePhotosForExport,
   sharePhotoFile,
@@ -139,19 +139,21 @@ export default function DiaryGalleryScreen() {
       {
         text: "Word",
         onPress: () =>
-          void exportReportDocument({
+          void runReportExport({
             filenameBase: `sitesnap-gallery-${site.name}-${new Date().toISOString().slice(0, 10)}`,
             html,
             format: "doc",
+            label: "the photo gallery",
           }),
       },
       {
         text: "PDF",
         onPress: () =>
-          void exportReportDocument({
+          void runReportExport({
             filenameBase: `sitesnap-gallery-${site.name}-${new Date().toISOString().slice(0, 10)}`,
             html,
             format: "pdf",
+            label: "the photo gallery",
           }),
       },
     ]);

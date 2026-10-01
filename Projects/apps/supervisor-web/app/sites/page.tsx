@@ -48,7 +48,7 @@ export default function SitesPage() {
 
   return (
     <div className="app-shell">
-      <Sidebar userName={user?.name ?? user?.email ?? "Supervisor"} />
+      <Sidebar userName={user?.name ?? user?.email ?? "Manager"} />
       <div className="main">
         <Topbar title="Sites" />
         <div className="page-body">

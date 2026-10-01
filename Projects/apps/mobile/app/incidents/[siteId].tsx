@@ -9,7 +9,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Colors from "@/constants/colors";
 import { formatDate } from "@/lib/format";
-import { buildHtmlDocument, exportReportDocument, escapeHtml } from "@/lib/export-utils";
+import { buildHtmlDocument, runReportExport, escapeHtml } from "@/lib/export-utils";
 import { EmptyState } from "@/components/EmptyState";
 import { useData } from "@/lib/data-context";
 import { getApiBaseUrl } from "@/lib/api-base-url";
@@ -303,8 +303,8 @@ export default function IncidentsScreen() {
     const base = `sitesnap-incident-${inc.date}-${inc.id}`;
     Alert.alert("Export Incident Report", "Choose a format.", [
       { text: "Cancel", style: "cancel" },
-      { text: "Word", onPress: () => void exportReportDocument({ filenameBase: base, html, format: "doc" }) },
-      { text: "PDF", onPress: () => void exportReportDocument({ filenameBase: base, html, format: "pdf" }) },
+      { text: "Word", onPress: () => void runReportExport({ filenameBase: base, html, format: "doc", label: "the incident report" }) },
+      { text: "PDF", onPress: () => void runReportExport({ filenameBase: base, html, format: "pdf", label: "the incident report" }) },
     ]);
   };
 

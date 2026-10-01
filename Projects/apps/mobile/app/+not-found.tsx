@@ -20,15 +20,22 @@ export default function NotFoundScreen() {
 }
 
 const styles = StyleSheet.create({
+  // Both of these were unset, which is the same appearance bug as the nav bar
+  // one screen up: with no backgroundColor the native stack's content view is
+  // appearance-adaptive and goes near-black, and an unstyled <Text> defaults to
+  // black — so in dark appearance this screen was black text on near-black.
+  // Reachable by any unmatched route, including a malformed deep link.
   container: {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
     padding: 20,
+    backgroundColor: Colors.background,
   },
   title: {
     fontSize: 20,
     fontWeight: "bold",
+    color: Colors.text,
   },
   link: {
     marginTop: 15,

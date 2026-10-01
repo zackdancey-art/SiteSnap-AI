@@ -75,11 +75,11 @@ export default function DashboardPage() {
     );
   }, [data, search]);
 
-  const firstName = user?.name?.split(" ")[0] ?? "Supervisor";
+  const firstName = user?.name?.split(" ")[0] ?? "Manager";
 
   return (
     <div className="app-shell">
-      <Sidebar userName={user?.name ?? user?.email ?? "Supervisor"} />
+      <Sidebar userName={user?.name ?? user?.email ?? "Manager"} />
 
       <div className="main">
         {/* Top bar */}

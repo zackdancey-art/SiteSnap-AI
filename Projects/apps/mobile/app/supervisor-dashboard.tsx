@@ -4,7 +4,7 @@ import { router } from "expo-router";
 import { useData } from "@/lib/data-context";
 import { useAuth } from "@/lib/auth-context";
 import Colors from "@/constants/colors";
-import { buildDiariesReportHtml, exportReportDocument } from "@/lib/export-utils";
+import { buildDiariesReportHtml, runReportExport } from "@/lib/export-utils";
 
 function Metric({ label, value }: { label: string; value: string | number }) {
   return (
@@ -25,7 +25,7 @@ export default function SupervisorDashboardScreen() {
       <View style={[styles.container, styles.content]}>
         <Text style={styles.heading}>Access Restricted</Text>
         <Text style={styles.subheading}>
-          This dashboard is available only to assigned supervisor accounts.
+          Owner and manager accounts only.
         </Text>
       </View>
     );
@@ -42,7 +42,7 @@ export default function SupervisorDashboardScreen() {
     const html = buildDiariesReportHtml(
       diaries,
       sites,
-      "Supervisor Portfolio Report",
+      "Portfolio Report",
       "Operational snapshot across all tracked diaries and active projects."
     );
     Alert.alert("Export Report", "Choose an export format.", [
@@ -50,19 +50,21 @@ export default function SupervisorDashboardScreen() {
       {
         text: "Word",
         onPress: () =>
-          void exportReportDocument({
-            filenameBase: `supervisor-report-${new Date().toISOString().slice(0, 10)}`,
+          void runReportExport({
+            filenameBase: `portfolio-report-${new Date().toISOString().slice(0, 10)}`,
             html,
             format: "doc",
+            label: "the portfolio report",
           }),
       },
       {
         text: "PDF",
         onPress: () =>
-          void exportReportDocument({
-            filenameBase: `supervisor-report-${new Date().toISOString().slice(0, 10)}`,
+          void runReportExport({
+            filenameBase: `portfolio-report-${new Date().toISOString().slice(0, 10)}`,
             html,
             format: "pdf",
+            label: "the portfolio report",
           }),
       },
     ]);
@@ -70,7 +72,7 @@ export default function SupervisorDashboardScreen() {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.heading}>Supervisor Dashboard</Text>
+      <Text style={styles.heading}>Dashboard</Text>
       <Text style={styles.subheading}>Operations overview across all tracked sites and diaries.</Text>
 
       <View style={styles.metricsGrid}>
@@ -83,7 +85,7 @@ export default function SupervisorDashboardScreen() {
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Actions</Text>
         <Pressable style={styles.actionButton} onPress={onExportReport}>
-          <Text style={styles.actionButtonText}>Export Supervisor Report</Text>
+          <Text style={styles.actionButtonText}>Export Portfolio Report</Text>
         </Pressable>
       </View>
 

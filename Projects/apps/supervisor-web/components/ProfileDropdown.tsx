@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getSavedUser, saveUser, logout } from "@/lib/api";
 import type { User } from "@/lib/api";
+import { companyRoleLabel } from "@/lib/roles";
 
 export default function ProfileDropdown() {
   const router = useRouter();
@@ -13,6 +14,7 @@ export default function ProfileDropdown() {
   const [editing, setEditing] = useState(false);
   const [saved, setSaved] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const roleLabel = companyRoleLabel(user?.companyRole);
 
   useEffect(() => {
     const u = getSavedUser();
@@ -89,16 +91,24 @@ export default function ProfileDropdown() {
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 15, fontWeight: 700, color: "#fff", lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {user?.name ?? "Supervisor"}
+                  {user?.name ?? "Manager"}
                 </div>
                 <div style={{ fontSize: 12, color: "rgba(255,255,255,0.6)", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {user?.email}
                 </div>
-                <div style={{ marginTop: 6 }}>
-                  <span style={{ fontSize: 10, fontWeight: 700, background: "var(--accent)", color: "#fff", padding: "2px 8px", borderRadius: 6, letterSpacing: "0.05em" }}>
-                    {user?.role?.toUpperCase() ?? "SUPERVISOR"}
-                  </span>
-                </div>
+                {/* Was `user?.role?.toUpperCase() ?? "SUPERVISOR"`: the DEPRECATED
+                    legacy role (worker/supervisor/admin), so a manager's badge read
+                    "SUPERVISOR" here and "Manager" on the team page — two words for
+                    one role in one session. Now the company role through the shared
+                    label map, and nothing at all when the role is unknown, rather
+                    than a default that asserts permissions we cannot support. */}
+                {roleLabel && (
+                  <div style={{ marginTop: 6 }}>
+                    <span style={{ fontSize: 10, fontWeight: 700, background: "var(--accent)", color: "#fff", padding: "2px 8px", borderRadius: 6, letterSpacing: "0.05em" }}>
+                      {roleLabel.toUpperCase()}
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
           </div>

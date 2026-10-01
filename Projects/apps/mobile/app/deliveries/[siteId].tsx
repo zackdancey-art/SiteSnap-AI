@@ -9,7 +9,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Colors from "@/constants/colors";
 import { formatDate } from "@/lib/format";
-import { buildHtmlDocument, exportReportDocument, escapeHtml } from "@/lib/export-utils";
+import { buildHtmlDocument, runReportExport, escapeHtml } from "@/lib/export-utils";
 import { EmptyState } from "@/components/EmptyState";
 import { getApiBaseUrl } from "@/lib/api-base-url";
 import { useData } from "@/lib/data-context";
@@ -315,8 +315,8 @@ export default function DeliveriesScreen() {
     const base = `sitesnap-docket-${d.date}-${d.id}`;
     Alert.alert("Export Delivery Docket", "Choose a format.", [
       { text: "Cancel", style: "cancel" },
-      { text: "Word", onPress: () => void exportReportDocument({ filenameBase: base, html, format: "doc" }) },
-      { text: "PDF", onPress: () => void exportReportDocument({ filenameBase: base, html, format: "pdf" }) },
+      { text: "Word", onPress: () => void runReportExport({ filenameBase: base, html, format: "doc", label: "the delivery docket" }) },
+      { text: "PDF", onPress: () => void runReportExport({ filenameBase: base, html, format: "pdf", label: "the delivery docket" }) },
     ]);
   };
 

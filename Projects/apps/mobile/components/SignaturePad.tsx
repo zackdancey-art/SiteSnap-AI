@@ -75,6 +75,16 @@ export function SignaturePad({ onChange, viewBox, height }: SignaturePadProps) {
 
   return (
     <View style={styles.wrap}>
+      {/* Clear sits ABOVE the canvas. It used to render after it, 8pt below the
+          signing surface and right-aligned, which put a tappable control
+          immediately under the area being signed — close enough to be read as one
+          of the sheet's own buttons. Above the canvas it is unambiguous, and the
+          space under the canvas now belongs to Cancel/Save alone. */}
+      <View style={styles.toolbar}>
+        <Pressable style={styles.clearBtn} onPress={handleClear} hitSlop={8} disabled={!hasStrokes}>
+          <Text style={[styles.clearBtnText, !hasStrokes && styles.clearBtnTextDisabled]}>Clear</Text>
+        </Pressable>
+      </View>
       <GestureHandlerRootView style={{ flex: 1 }}>
         <GestureDetector gesture={pan}>
           <View style={[styles.surface, { height: surfaceHeight }]} onLayout={handleLayout}>
@@ -94,9 +104,6 @@ export function SignaturePad({ onChange, viewBox, height }: SignaturePadProps) {
           </View>
         </GestureDetector>
       </GestureHandlerRootView>
-      <Pressable style={styles.clearBtn} onPress={handleClear} hitSlop={8}>
-        <Text style={styles.clearBtnText}>Clear</Text>
-      </Pressable>
     </View>
   );
 }
@@ -119,6 +126,8 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: Colors.textTertiary,
   },
-  clearBtn: { alignSelf: "flex-end", paddingHorizontal: 12, paddingVertical: 6 },
+  toolbar: { flexDirection: "row", justifyContent: "flex-end" },
+  clearBtn: { paddingHorizontal: 12, paddingVertical: 6 },
   clearBtnText: { fontSize: 13, fontWeight: "700", color: Colors.accent },
+  clearBtnTextDisabled: { color: Colors.textTertiary },
 });

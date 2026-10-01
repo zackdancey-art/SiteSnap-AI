@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import {
   View, Text, Pressable, ScrollView, StyleSheet, Alert,
-  ActivityIndicator, TextInput, Modal,
+  ActivityIndicator, TextInput, Modal, KeyboardAvoidingView, Platform,
 } from "react-native";
 import { useLocalSearchParams } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
@@ -13,7 +13,7 @@ import * as Crypto from "expo-crypto";
 import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
 import Colors from "@/constants/colors";
 import { formatDate } from "@/lib/format";
-import { buildHtmlDocument, exportReportDocument, escapeHtml, buildAnnotationOverlayHtml } from "@/lib/export-utils";
+import { buildHtmlDocument, runReportExport, escapeHtml, buildAnnotationOverlayHtml } from "@/lib/export-utils";
 import { EmptyState } from "@/components/EmptyState";
 import { SignaturePad } from "@/components/SignaturePad";
 import { AnnotatedImage } from "@/components/AnnotatedImage";
@@ -301,6 +301,19 @@ export default function InspectionsScreen() {
   const { getSite } = useData();
   const site = getSite(siteId);
   const insets = useSafeAreaInsets();
+
+  // Bottom padding for the two bottom-anchored signature sheets.
+  //
+  // `useTabScreenInsets` from lib/useScreenInsets deliberately does NOT apply
+  // here: it is documented as being for the three screens inside (tabs) and it
+  // must be called under a TabScreenInsets provider, which this screen is not
+  // rendered beneath. So this is the plain inset.
+  //
+  // The Math.max floor is not padding-for-taste. These sheets are transparent
+  // Modals nested inside a `presentationStyle="pageSheet"` Modal, and inside a
+  // page sheet UIKit can report a bottom inset of 0 — which is almost certainly
+  // why the value being replaced here was a hardcoded 32.
+  const sheetPaddingBottom = Math.max(insets.bottom, 20);
 
   const [inspections, setInspections] = useState<Inspection[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
@@ -669,8 +682,8 @@ export default function InspectionsScreen() {
     const base = `sitesnap-inspection-${insp.date}-${insp.id}`;
     Alert.alert("Export Inspection Report", "Choose a format.", [
       { text: "Cancel", style: "cancel" },
-      { text: "Word", onPress: () => void exportReportDocument({ filenameBase: base, html, format: "doc" }) },
-      { text: "PDF", onPress: () => void exportReportDocument({ filenameBase: base, html, format: "pdf" }) },
+      { text: "Word", onPress: () => void runReportExport({ filenameBase: base, html, format: "doc", label: "the inspection report" }) },
+      { text: "PDF", onPress: () => void runReportExport({ filenameBase: base, html, format: "pdf", label: "the inspection report" }) },
     ]);
   };
 
@@ -707,7 +720,10 @@ export default function InspectionsScreen() {
       />
 
       {loading
-        ? <ActivityIndicator style={{ marginTop: 40 }} />
+        // An uncoloured ActivityIndicator uses iOS's appearance-adaptive grey,
+        // which goes near-white in dark appearance on top of a background that
+        // is always Colors.background. Same cause as the date picker.
+        ? <ActivityIndicator color={Colors.primary} style={{ marginTop: 40 }} />
         : inspections.length === 0
           ? <EmptyState icon="shield-checkmark-outline" title="No inspections yet" subtitle="Create a safety inspection checklist for this site." ctaLabel="New Inspection" onCta={() => setShowForm(true)} />
           : (
@@ -1113,24 +1129,47 @@ export default function InspectionsScreen() {
             </Modal>
 
             {/* Add Signature modal */}
+            {/* The canvas and the action row sit OUTSIDE the ScrollView on
+                purpose. Two reasons, both load-bearing:
+
+                1. SignaturePad captures a vertical pan. Inside a ScrollView the
+                   scroll responder wins that gesture, so a downward stroke would
+                   scroll the sheet instead of drawing. Keeping the pad out of the
+                   scrollable region removes the conflict rather than tuning it.
+                2. It guarantees the two requirements that failed on device: the
+                   whole canvas is visible, and Cancel/Save can never overlap it.
+
+                What scrolls instead is the form above — which is what actually
+                overflows at the largest Dynamic Type sizes, because the role
+                chips wrap to three rows. */}
             <Modal visible={showSignModal} animationType="slide" transparent>
-              <View style={styles.sigModalOverlay}>
-                <View style={styles.sigModalCard}>
-                  <Text style={styles.modalTitle}>Add Signature</Text>
-                  <TextInput
-                    style={[styles.input, { marginTop: 12 }]}
-                    value={sigName}
-                    onChangeText={setSigName}
-                    placeholder="Signer name"
-                    placeholderTextColor={Colors.textTertiary}
-                  />
-                  <View style={[styles.chipRow, { marginTop: 12 }]}>
-                    {(Object.keys(ROLE_LABELS) as SignatureRole[]).map((r) => (
-                      <Pressable key={r} style={[styles.chip, sigRole === r && styles.chipActive]} onPress={() => setSigRole(r)}>
-                        <Text style={[styles.chipText, sigRole === r && styles.chipTextActive]}>{ROLE_LABELS[r]}</Text>
-                      </Pressable>
-                    ))}
-                  </View>
+              <KeyboardAvoidingView
+                style={styles.sigModalOverlay}
+                behavior={Platform.OS === "ios" ? "padding" : "height"}
+              >
+                <View style={[styles.sigModalCard, { paddingBottom: sheetPaddingBottom }]}>
+                  <ScrollView
+                    style={styles.sigModalForm}
+                    contentContainerStyle={styles.sigModalFormContent}
+                    keyboardShouldPersistTaps="handled"
+                    showsVerticalScrollIndicator={false}
+                  >
+                    <Text style={styles.modalTitle}>Add Signature</Text>
+                    <TextInput
+                      style={[styles.input, { marginTop: 12 }]}
+                      value={sigName}
+                      onChangeText={setSigName}
+                      placeholder="Signer name"
+                      placeholderTextColor={Colors.textTertiary}
+                    />
+                    <View style={[styles.chipRow, { marginTop: 12 }]}>
+                      {(Object.keys(ROLE_LABELS) as SignatureRole[]).map((r) => (
+                        <Pressable key={r} style={[styles.chip, sigRole === r && styles.chipActive]} onPress={() => setSigRole(r)}>
+                          <Text style={[styles.chipText, sigRole === r && styles.chipTextActive]}>{ROLE_LABELS[r]}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  </ScrollView>
                   <View style={{ marginTop: 12 }}>
                     <SignaturePad viewBox={SIGNATURE_VIEWBOX} height={160} onChange={setSigPath} />
                   </View>
@@ -1150,13 +1189,19 @@ export default function InspectionsScreen() {
                     </Pressable>
                   </View>
                 </View>
-              </View>
+              </KeyboardAvoidingView>
             </Modal>
 
             {/* Void Signature modal */}
+            {/* Same treatment: this sheet has a multiline TextInput and a
+                destructive confirm button, so an un-avoided keyboard hid the
+                button the user had to reach. */}
             <Modal visible={!!voidTarget} animationType="slide" transparent>
-              <View style={styles.sigModalOverlay}>
-                <View style={styles.sigModalCard}>
+              <KeyboardAvoidingView
+                style={styles.sigModalOverlay}
+                behavior={Platform.OS === "ios" ? "padding" : "height"}
+              >
+                <View style={[styles.sigModalCard, { paddingBottom: sheetPaddingBottom }]}>
                   <Text style={styles.modalTitle}>Void Signature</Text>
                   <Text style={[styles.fieldLabel, { marginTop: 12 }]}>Reason</Text>
                   <TextInput
@@ -1181,7 +1226,7 @@ export default function InspectionsScreen() {
                     </Pressable>
                   </View>
                 </View>
-              </View>
+              </KeyboardAvoidingView>
             </Modal>
           </View>
         )}
@@ -1291,7 +1336,14 @@ const styles = StyleSheet.create({
   addSignatureBtnText: { fontSize: 14, fontWeight: "700", color: Colors.white },
 
   sigModalOverlay: { flex: 1, backgroundColor: Colors.overlay, justifyContent: "flex-end" },
-  sigModalCard: { backgroundColor: Colors.surface, borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, paddingBottom: 32 },
+  // maxHeight is what stops the card overflowing off the TOP of the screen: it is
+  // anchored with justifyContent "flex-end", so without a bound the title and
+  // name field are pushed off-screen with no way to scroll them back. The
+  // paddingBottom is supplied by the caller from the measured safe-area inset;
+  // it used to be a hardcoded 32.
+  sigModalCard: { backgroundColor: Colors.surface, borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, maxHeight: "92%" },
+  sigModalForm: { flexShrink: 1 },
+  sigModalFormContent: { paddingBottom: 4 },
   cancelBtn: { paddingHorizontal: 20, paddingVertical: 16, borderRadius: 14, borderWidth: 1, borderColor: Colors.border, alignItems: "center", justifyContent: "center" },
   cancelBtnText: { fontSize: 15, fontWeight: "700", color: Colors.textSecondary },
 });

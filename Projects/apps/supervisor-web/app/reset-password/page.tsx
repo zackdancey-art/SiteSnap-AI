@@ -45,7 +45,7 @@ function ResetPasswordForm() {
           <Image src="/logo.png" alt="SiteSnap AI" width={56} height={56} style={{ borderRadius: 14 }} />
           <div>
             <div className="auth-title">SiteSnap AI</div>
-            <div className="auth-sub">Supervisor Portal</div>
+            <div className="auth-sub">Manager Portal</div>
           </div>
         </div>
 
