@@ -47,13 +47,13 @@ cd "$(dirname "$0")/.."
 #               supposed to defer to the db run has stopped doing so.
 #
 # A non-empty-but-short list is the case the empty-list guard below cannot see:
-# if the selector matches 3 of 5, the run is green and 2 suites vanished. That
+# if the selector matches 4 of 6, the run is green and 2 suites vanished. That
 # is the same silent-success failure in a quieter form, so it is pinned.
 #
 # This number is EXPECTED TO CHANGE — raise it in the same commit that adds a
 # DB-gated suite. That is the point: the change has to be deliberate and shows
 # up in review, rather than a count drifting unobserved.
-EXPECTED_DB_SUITES=5
+EXPECTED_DB_SUITES=6
 
 # How many individual TESTS are gated on REDIS_TEST_URL.
 #

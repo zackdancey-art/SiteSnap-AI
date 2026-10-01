@@ -6,6 +6,7 @@ import { runOnJS } from "react-native-reanimated";
 import { Ionicons } from "@expo/vector-icons";
 import Colors from "@/constants/colors";
 import { AnnotationStroke, AnnotationVector, Photo } from "@/lib/types";
+import { describeUnavailable, resolvePhotoSource } from "@/lib/photo-uri";
 
 type PhotoAnnotatorProps = {
   photo: Photo;
@@ -23,11 +24,19 @@ const PALETTE = [
 ];
 
 export function PhotoAnnotator({ photo, onSave, onCancel }: PhotoAnnotatorProps) {
-  const source = photo.uri
-    ? { uri: photo.uri }
-    : photo.base64
-      ? { uri: `data:${photo.mimeType || "image/jpeg"};base64,${photo.base64}` }
-      : undefined;
+  /**
+   * This picked `photo.uri` whenever it was set, even when it was a bare
+   * /api/uploads/... path that React Native cannot load — the result was an empty
+   * canvas you could still draw on, producing strokes whose coordinates mean
+   * nothing against a photo nobody saw. Annotation is refused outright when the
+   * image cannot be shown.
+   *
+   * This component is not built on EvidenceImage because it needs the image's own
+   * onLayout to derive the SVG viewBox scale.
+   */
+  const resolved = resolvePhotoSource(photo);
+  const canAnnotate = resolved.status === "displayable";
+  const source = resolved.status === "displayable" ? { uri: resolved.uri } : undefined;
 
   const [boxSize, setBoxSize] = useState({ width: 0, height: 0 });
   const [vbHeight, setVbHeight] = useState(VIEWBOX_WIDTH);
@@ -72,6 +81,7 @@ export function PhotoAnnotator({ photo, onSave, onCancel }: PhotoAnnotatorProps)
   const pan = useMemo(
     () =>
       Gesture.Pan()
+        .enabled(canAnnotate)
         .minDistance(0)
         .onBegin((e) => {
           runOnJS(beginStroke)(e.x, e.y);
@@ -79,7 +89,7 @@ export function PhotoAnnotator({ photo, onSave, onCancel }: PhotoAnnotatorProps)
         .onUpdate((e) => {
           runOnJS(appendPoint)("L", e.x, e.y);
         }),
-    [beginStroke, appendPoint]
+    [beginStroke, appendPoint, canAnnotate]
   );
 
   const handleUndo = () => {
@@ -98,7 +108,7 @@ export function PhotoAnnotator({ photo, onSave, onCancel }: PhotoAnnotatorProps)
     onSave({ viewBox: `0 0 ${VIEWBOX_WIDTH} ${vbHeight}`, strokes });
   };
 
-  const hasStrokes = strokes.length > 0;
+  const hasStrokes = strokes.length > 0 && canAnnotate;
 
   return (
     <View style={styles.wrap}>
@@ -112,8 +122,20 @@ export function PhotoAnnotator({ photo, onSave, onCancel }: PhotoAnnotatorProps)
       <GestureHandlerRootView style={{ flex: 1 }}>
         <GestureDetector gesture={pan}>
           <View style={styles.imageBox} onLayout={handleImageLayout}>
-            {source && <Image source={source} style={StyleSheet.absoluteFillObject} resizeMode="contain" />}
-            {boxSize.width > 0 && (
+            {source ? (
+              <Image source={source} style={StyleSheet.absoluteFillObject} resizeMode="contain" />
+            ) : (
+              <View style={styles.unavailable}>
+                <Ionicons name="alert-circle" size={30} color={Colors.warningText} />
+                <Text style={styles.unavailableTitle}>Cannot annotate this photo</Text>
+                <Text style={styles.unavailableText}>
+                  {describeUnavailable(
+                    resolved.status === "unavailable" ? resolved.reason : "load-failed"
+                  )}
+                </Text>
+              </View>
+            )}
+            {canAnnotate && boxSize.width > 0 && (
               <Svg
                 width="100%"
                 height="100%"
@@ -187,6 +209,27 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontFamily: "Inter_700Bold",
     color: Colors.text,
+  },
+  unavailable: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    padding: 24,
+    backgroundColor: Colors.warningBg,
+  },
+  unavailableTitle: {
+    fontSize: 15,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.warningText,
+    textAlign: "center",
+  },
+  unavailableText: {
+    fontSize: 13,
+    lineHeight: 19,
+    fontFamily: "Inter_400Regular",
+    color: Colors.warningText,
+    textAlign: "center",
   },
   imageBox: {
     flex: 1,

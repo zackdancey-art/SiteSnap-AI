@@ -18,7 +18,7 @@ import * as ImagePicker from "expo-image-picker";
 import * as Crypto from "expo-crypto";
 import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
 import DateTimePicker, { DateTimePickerEvent } from "@react-native-community/datetimepicker";
-import { useData } from "@/lib/data-context";
+import { useData, type SaveProgress } from "@/lib/data-context";
 import Colors from "@/constants/colors";
 import { AnnotationVector, HourlyNote, Photo } from "@/lib/types";
 import { AddressSuggestion, fetchAddressSuggestions } from "@/lib/geo";
@@ -452,7 +452,31 @@ export default function NewEntryScreen() {
     setShowTemplatePicker(false);
   };
 
+  /**
+   * Describes an in-flight save, or null when no save is running.
+   *
+   * Saving with photos is slow — the uploads retry with backoff — and this
+   * screen used to say nothing at all between the tap and the navigation back,
+   * so a save in progress was indistinguishable from a tap the app had ignored.
+   * The natural response to that is to tap Save again.
+   */
+  const [saveProgress, setSaveProgress] = useState<SaveProgress | null>(null);
+  const saving = saveProgress !== null;
+
+  const saveProgressLabel = (progress: SaveProgress) => {
+    if (progress.phase === "uploading" && progress.total > 0) {
+      // A COMPLETION count, not "currently uploading photo N": uploadPhotos runs
+      // the uploads concurrently, so there is no single current photo. Worded to
+      // match what the number actually means.
+      return `Uploading photos — ${progress.completed} of ${progress.total} done`;
+    }
+    return isEditing ? "Saving changes…" : "Saving entry…";
+  };
+
   const handleSave = async () => {
+    // Second line of defence behind the button's `disabled`. setState is async,
+    // so a fast double-tap can land twice before React re-renders the button.
+    if (saving) return;
     if (!validate()) return;
     const savedAt = new Date().toISOString();
     const photosForApi: Photo[] = photos.map((photo) => ({
@@ -470,11 +494,14 @@ export default function NewEntryScreen() {
       notesMode,
       hourlyNotes,
     };
+    // Set before the first await so the indicator is up from the moment of the
+    // tap, not from whenever the first upload reports in.
+    setSaveProgress({ phase: "uploading", completed: 0, total: photosForApi.length });
     try {
       if (isEditing && entryId) {
-        await updateEntry(entryId, payload);
+        await updateEntry(entryId, payload, setSaveProgress);
       } else {
-        await addEntry(payload);
+        await addEntry(payload, setSaveProgress);
         await clearDraft(effectiveSiteId);
       }
       markSaved();
@@ -482,6 +509,11 @@ export default function NewEntryScreen() {
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to save entry.";
       Alert.alert("Save Failed", message);
+    } finally {
+      // In `finally`, so the indicator clears on failure exactly as it does on
+      // success. A spinner that keeps spinning after a failed save is a worse
+      // lie than no spinner at all — it reports work that has stopped.
+      setSaveProgress(null);
     }
   };
 
@@ -855,13 +887,54 @@ export default function NewEntryScreen() {
         </View>
 
         <Pressable
-          style={({ pressed }) => [styles.saveButton, pressed && styles.saveButtonPressed]}
+          style={({ pressed }) => [
+            styles.saveButton,
+            pressed && styles.saveButtonPressed,
+            saving && styles.saveButtonDisabled,
+          ]}
           onPress={handleSave}
+          disabled={saving}
+          accessibilityState={{ disabled: saving, busy: saving }}
         >
-          <Ionicons name="checkmark" size={22} color={Colors.white} />
-          <Text style={styles.saveButtonText}>{isEditing ? "Save Changes" : "Save Entry"}</Text>
+          {saving ? (
+            <ActivityIndicator size="small" color={Colors.white} />
+          ) : (
+            <Ionicons name="checkmark" size={22} color={Colors.white} />
+          )}
+          <Text style={styles.saveButtonText}>
+            {saving
+              ? saveProgress.phase === "uploading" && saveProgress.total > 0
+                ? `Uploading ${saveProgress.completed}/${saveProgress.total}…`
+                : "Saving…"
+              : isEditing
+                ? "Save Changes"
+                : "Save Entry"}
+          </Text>
         </Pressable>
       </ScrollView>
+
+      {/*
+        Blocking overlay, not just a button spinner. The button alone stops the
+        button being tapped twice, but leaves every text field and the back
+        gesture live during a save that can run for many seconds — so a field
+        edited mid-save would be silently dropped (the payload was built before
+        the first await), and navigating away mid-save would trip the unsaved-
+        changes guard on an entry that is in fact being saved. onRequestClose is
+        deliberately a no-op: this is not dismissable, because there is nothing
+        the user can usefully do until the save resolves one way or the other.
+        It is rendered only while `saving`, so it cannot outlive the operation.
+      */}
+      <Modal visible={saving} transparent animationType="fade" onRequestClose={() => {}}>
+        <View style={styles.savingBackdrop}>
+          <View style={styles.savingCard}>
+            <ActivityIndicator size="large" color={Colors.accent} />
+            <Text style={styles.savingTitle}>
+              {saveProgress ? saveProgressLabel(saveProgress) : "Saving…"}
+            </Text>
+            <Text style={styles.savingSub}>Keep the app open until this finishes.</Text>
+          </View>
+        </View>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -1388,6 +1461,37 @@ const styles = StyleSheet.create({
   saveButtonPressed: {
     opacity: 0.9,
     transform: [{ scale: 0.98 }],
+  },
+  saveButtonDisabled: {
+    opacity: 0.6,
+  },
+  savingBackdrop: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(0,0,0,0.45)",
+    padding: 32,
+  },
+  savingCard: {
+    alignItems: "center",
+    gap: 12,
+    backgroundColor: Colors.surface,
+    borderRadius: 16,
+    paddingVertical: 28,
+    paddingHorizontal: 32,
+    minWidth: 240,
+  },
+  savingTitle: {
+    fontSize: 16,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.text,
+    textAlign: "center",
+  },
+  savingSub: {
+    fontSize: 13,
+    fontFamily: "Inter_400Regular",
+    color: Colors.textSecondary,
+    textAlign: "center",
   },
   saveButtonText: {
     fontSize: 17,

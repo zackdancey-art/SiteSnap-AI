@@ -132,11 +132,11 @@ The API `test` script cleans `dist/`, compiles, and then runs `node --test` over
 
 | counter | unit | what it gates |
 |---|---|---|
-| `EXPECTED_DB_SUITES=5` | per **suite** | `TEST_DATABASE_URL` — RLS, store round-trip |
+| `EXPECTED_DB_SUITES=6` | per **suite** | `TEST_DATABASE_URL` — RLS, store round-trip, upload-media isolation |
 | `EXPECTED_REDIS_TESTS=4` | per **test** | `REDIS_TEST_URL` — the reachable-Redis path |
 | `EXPECTED_LIVE_OPENAI_TESTS=3` | per **test** | `OPENAI_LIVE_TEST_KEY` — the live OpenAI request contract |
 
-So the in-memory run must report exactly **12** skips (5 + 4 + 3). Adding or removing a gated suite/test means changing the matching number **in the same commit** — that is the point, so the change is deliberate and visible in review rather than a count drifting unobserved.
+So the in-memory run must report exactly **13** skips (6 + 4 + 3). Adding or removing a gated suite/test means changing the matching number **in the same commit** — that is the point, so the change is deliberate and visible in review rather than a count drifting unobserved.
 
 **`test:openai` is opt-in and deliberately NOT in CI.** It makes real, billable calls. It exists because the `openaiClient.ts` boundary mock returns a canned success for *any* argument object, so it can prove we sent the parameters we meant to but never that OpenAI accepts them — the gap Sentry SITESNAP-API-9 lived in, where a `temperature` the mock was happy with drew a 400 from `gpt-5.6-terra` and every diary silently became a template. Run it by hand when changing the request shape or `OPENAI_MODEL`:
 

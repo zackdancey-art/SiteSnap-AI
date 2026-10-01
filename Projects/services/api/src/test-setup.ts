@@ -52,8 +52,8 @@ process.env.NODE_ENV = "test";
 const ALLOWED = new Set([
   // --- the suite's own switches ---
   "NODE_ENV",
-  // The DB-gated suites (RLS, store round-trip) select themselves on this.
-  // Blanking it would turn all 5 into permanent skips — a green build proving
+  // The DB-gated suites (RLS, store round-trip, media isolation) select
+  // themselves on this. Blanking it would turn all 6 into permanent skips — a green build proving
   // nothing about tenancy — which is the precise failure this file's whole
   // neighbourhood exists to prevent. It points at a scratch database created
   // by CI, never at production.

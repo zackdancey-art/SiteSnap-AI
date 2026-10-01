@@ -10,6 +10,8 @@ import {
   stripPhotoPayloads,
 } from "@/lib/photo-payload-store";
 import { enqueue, peekQueue, dequeue, isNetworkError } from "@/lib/offline-queue";
+import { isManagedMediaUri, toCanonicalPath, toStorablePhotoUri } from "@/lib/photo-uri";
+import { reportMediaFailure } from "@/lib/media-telemetry";
 
 interface DataContextType {
   sites: Site[];
@@ -21,8 +23,11 @@ interface DataContextType {
   pendingCount: number;
   addSite: (site: Omit<Site, "id" | "createdAt">) => Promise<void>;
   deleteSite: (id: string) => Promise<void>;
-  addEntry: (entry: Omit<Entry, "id" | "timestamp" | "createdAt">) => Promise<void>;
-  updateEntry: (id: string, patch: Partial<Entry>) => Promise<void>;
+  addEntry: (
+    entry: Omit<Entry, "id" | "timestamp" | "createdAt">,
+    onProgress?: SaveProgressCallback
+  ) => Promise<void>;
+  updateEntry: (id: string, patch: Partial<Entry>, onProgress?: SaveProgressCallback) => Promise<void>;
   deleteEntry: (id: string) => Promise<void>;
   addDiary: (diary: Omit<GeneratedDiary, "id" | "generatedAt">) => GeneratedDiary;
   updateDiary: (id: string, patch: Partial<GeneratedDiary>) => void;
@@ -143,7 +148,15 @@ async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 async function uploadPhotoOnce(photo: Entry["photos"][number]) {
-  if (/^https?:\/\//i.test(photo.uri)) {
+  // Already stored server-side? Then there is nothing to upload.
+  //
+  // This used to test `/^https?:\/\//` alone, which never matched: what we
+  // store — and what the API returns — is the RELATIVE canonical path
+  // `/api/uploads/<id>/<name>`. So every edit of an entry re-uploaded every
+  // photo it already held, writing a byte-identical duplicate into S3 each
+  // time (the bucket shows the same six images stored twice within one minute)
+  // and orphaning the previous object, which is still referenced by nothing.
+  if (isManagedMediaUri(photo.uri)) {
     return photo;
   }
 
@@ -196,15 +209,65 @@ async function uploadPhoto(photo: Entry["photos"][number]): Promise<Entry["photo
   throw lastErr;
 }
 
-export async function uploadPhotos(photos: Entry["photos"]) {
-  return Promise.all(photos.map((photo) => uploadPhoto(photo)));
+/**
+ * What a save is doing right now, so the UI can say so instead of appearing to
+ * have ignored the tap. Saving an entry with photos on site data is slow — the
+ * uploads are the slow part, and they retry with backoff (see uploadPhoto), so
+ * "a while with no feedback" is the normal case, not the pathological one.
+ */
+export type SaveProgress =
+  | { phase: "uploading"; completed: number; total: number }
+  | { phase: "saving" };
+
+export type SaveProgressCallback = (progress: SaveProgress) => void;
+
+export async function uploadPhotos(
+  photos: Entry["photos"],
+  onProgress?: (completed: number, total: number) => void
+) {
+  // `total` counts only the photos that will actually hit the network.
+  // uploadPhotoOnce returns immediately for a uri that is already managed
+  // server-side, so counting every photo would make an edit that adds one photo
+  // to five existing ones report "0 of 6" and then jump to "5 of 6" instantly —
+  // a progress number that is technically true and completely useless.
+  const total = photos.filter((photo) => !isManagedMediaUri(photo.uri)).length;
+  let completed = 0;
+  onProgress?.(0, total);
+  return Promise.all(
+    photos.map(async (photo) => {
+      // Decided BEFORE the await: uploadPhoto rewrites the uri to the managed
+      // form on success, so testing afterwards would count every photo.
+      const needsUpload = !isManagedMediaUri(photo.uri);
+      const uploaded = await uploadPhoto(photo);
+      if (needsUpload) {
+        completed += 1;
+        onProgress?.(completed, total);
+      }
+      return uploaded;
+    })
+  );
+}
+
+/**
+ * Signed URLs expire (2 h server-side) and are credential-bearing. Writing them
+ * into AsyncStorage stores something that is guaranteed to stop working and
+ * leaves a fetchable media URL at rest for no benefit — every load path calls
+ * attachSignedPhotoUris, which re-signs from the canonical path anyway. Local
+ * `file://` uris on a not-yet-uploaded photo are left exactly as they are.
+ */
+function toStorableEntry(entry: Entry): Entry {
+  const stripped = stripPhotoPayloads(entry);
+  return {
+    ...stripped,
+    photos: stripped.photos.map((photo) => ({ ...photo, uri: toStorablePhotoUri(photo.uri) })),
+  };
 }
 
 async function persistCache(email: string | null | undefined, sites: Site[], entries: Entry[], diaries: GeneratedDiary[]) {
   const keys = getCacheKeys(email);
   await Promise.all([
     AsyncStorage.setItem(keys.sites, JSON.stringify(sites)),
-    AsyncStorage.setItem(keys.entries, JSON.stringify(entries.map((entry) => stripPhotoPayloads(entry)))),
+    AsyncStorage.setItem(keys.entries, JSON.stringify(entries.map((entry) => toStorableEntry(entry)))),
     AsyncStorage.setItem(keys.diaries, JSON.stringify(diaries)),
   ]);
 }
@@ -244,35 +307,69 @@ async function loadCache(email: string | null | undefined) {
 const signedUrlCache = new Map<string, { url: string; expiresAt: number }>();
 const SIGNED_URL_CACHE_TTL_MS = 90 * 60 * 1000; // 90 min — well under 2-hr server TTL
 
-function toCanonicalPath(uri: string): string | null {
-  // Strip legacy ?authToken= or ?sig= query params to recover the canonical path
-  const cleaned = uri.replace(/[?&](authToken|sig|exp)=[^&]*/g, "").replace(/[?&]$/, "");
-  // Accept absolute URLs pointing to our API or relative /api/uploads/ paths
-  const match = cleaned.match(/(\/api\/uploads\/[^?#]+)/);
-  return match ? match[1] : null;
-}
-
-async function batchSignPaths(paths: string[], token: string): Promise<void> {
-  if (paths.length === 0) return;
+/**
+ * Sign a batch of canonical paths, and say how many did not sign.
+ *
+ * The previous version returned void and swallowed every failure with the
+ * comment "Signing failure is non-fatal — photos just won't display". That is
+ * exactly the fault: an unsigned photo still rendered as a grey tile, so
+ * "won't display" meant "will lie". Failures are still non-fatal to the save —
+ * losing the entry over a signing hiccup would be worse — but they are now
+ * counted, logged with the reason, and visible in the UI as an explicit
+ * unavailable tile rather than an empty one.
+ */
+async function batchSignPaths(paths: string[], token: string): Promise<{ failed: string[] }> {
+  if (paths.length === 0) return { failed: [] };
   try {
     const res = await fetch(`${BASE_URL}/api/uploads/sign`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify({ paths }),
     });
-    if (!res.ok) return;
+    if (!res.ok) {
+      reportMediaFailure({ kind: "sign-request-failed", status: res.status, count: paths.length });
+      return { failed: paths };
+    }
     const data = (await res.json()) as { signed: { path: string; url: string | null }[] };
     const expiresAt = Date.now() + SIGNED_URL_CACHE_TTL_MS;
+    const signed = new Set<string>();
     for (const item of data.signed) {
-      if (item.url) signedUrlCache.set(item.path, { url: item.url, expiresAt });
+      if (item.url) {
+        signedUrlCache.set(item.path, { url: item.url, expiresAt });
+        signed.add(item.path);
+      }
     }
-  } catch {
-    // Signing failure is non-fatal — photos just won't display
+    const failed = paths.filter((path) => !signed.has(path));
+    if (failed.length > 0) {
+      // Reported per path, not once per batch: a signer that refuses ONE photo
+      // out of six is a different problem from one that refuses all six, and
+      // the scrubbed path is what identifies which object is unreachable.
+      for (const path of failed) {
+        reportMediaFailure({ kind: "sign-refused", uri: path, count: failed.length, total: paths.length });
+      }
+    }
+    return { failed };
+  } catch (err) {
+    reportMediaFailure({ kind: "sign-threw", count: paths.length, cause: err });
+    return { failed: paths };
   }
 }
 
 async function attachSignedPhotoUris(entries: Entry[], token: string | null): Promise<Entry[]> {
-  if (!token || entries.length === 0) return entries;
+  if (entries.length === 0) return entries;
+  if (!token) {
+    // Nothing can be signed without a token. The photos then keep their
+    // canonical `/api/uploads/…` uri, which EvidenceImage renders as an
+    // explicit "image unavailable" tile — not as an empty one.
+    const unsignable = entries.reduce(
+      (total, entry) => total + entry.photos.filter((photo) => isManagedMediaUri(photo.uri)).length,
+      0
+    );
+    if (unsignable > 0) {
+      reportMediaFailure({ kind: "sign-no-token", count: unsignable });
+    }
+    return entries;
+  }
   const now = Date.now();
 
   // Collect canonical paths that need (re-)signing
@@ -289,8 +386,17 @@ async function attachSignedPhotoUris(entries: Entry[], token: string | null): Pr
   // Deduplicate
   const unique = [...new Set(toSign)];
   // Batch in groups of 50 (server limit)
+  const failed: string[] = [];
   for (let i = 0; i < unique.length; i += 50) {
-    await batchSignPaths(unique.slice(i, i + 50), token);
+    const result = await batchSignPaths(unique.slice(i, i + 50), token);
+    failed.push(...result.failed);
+  }
+  if (failed.length > 0) {
+    // Console only, deliberately. Every path in `failed` has already been
+    // reported to Sentry individually inside batchSignPaths; this line is the
+    // local summary of those, and reporting it again would duplicate each event
+    // and inflate the count on every screen that renders the same entry.
+    console.warn(`[media] ${failed.length} photo(s) will render as unavailable — signing did not succeed`);
   }
 
   return entries.map((entry) => ({
@@ -471,16 +577,31 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     await persistCache(user?.email, updatedSites, updatedEntries, updatedDiaries);
   };
 
-  const addEntry = async (entryData: Omit<Entry, "id" | "timestamp" | "createdAt">) => {
+  const addEntry = async (
+    entryData: Omit<Entry, "id" | "timestamp" | "createdAt">,
+    onProgress?: SaveProgressCallback
+  ) => {
     try {
-      const uploadedPhotos = await uploadPhotos(entryData.photos);
+      const uploadedPhotos = await uploadPhotos(entryData.photos, (completed, total) =>
+        onProgress?.({ phase: "uploading", completed, total })
+      );
+      onProgress?.({ phase: "saving" });
       await savePhotoPayloads(uploadedPhotos);
       const response = await apiJson<{ entry: Entry }>("/projects/entries", {
         method: "POST",
         body: JSON.stringify(stripPhotoPayloads({ ...entryData, photos: uploadedPhotos } as Entry)),
       });
+      // THE FIX (root cause of the six-grey-tiles bug).
+      //
+      // `response.entry.photos[].uri` is the server's canonical path,
+      // `/api/uploads/<id>/<name>`. Putting that straight into state — which is
+      // what this did — hands <Image> a relative uri it cannot resolve, so the
+      // entry you have just saved shows one empty tile per photograph. Only
+      // refresh() signed, which is why a force-quit and reopen "fixed" it and
+      // why the photos were never actually missing.
       const [hydratedEntry] = await hydrateEntriesWithPhotoPayloads([response.entry]);
-      const updated = [hydratedEntry, ...entries];
+      const [displayableEntry] = await attachSignedPhotoUris([hydratedEntry], await getToken());
+      const updated = [displayableEntry, ...entries];
       setEntries(updated);
       await persistCache(user?.email, sites, updated, diaries);
     } catch (err) {
@@ -517,10 +638,12 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     await persistCache(user?.email, sites, updated, diaries);
   };
 
-  const updateEntry = async (id: string, patch: Partial<Entry>) => {
+  const updateEntry = async (id: string, patch: Partial<Entry>, onProgress?: SaveProgressCallback) => {
     const existing = entries.find((entry) => entry.id === id);
     if (patch.photos) {
-      const uploadedPhotos = await uploadPhotos(patch.photos);
+      const uploadedPhotos = await uploadPhotos(patch.photos, (completed, total) =>
+        onProgress?.({ phase: "uploading", completed, total })
+      );
       patch = { ...patch, photos: uploadedPhotos };
       await savePhotoPayloads(uploadedPhotos);
       if (existing) {
@@ -529,6 +652,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         await deletePhotoPayloads(removedIds);
       }
     }
+    onProgress?.({ phase: "saving" });
     const response = await apiJson<{ entry: Entry }>(`/projects/entries/${id}`, {
       method: "PATCH",
       body: JSON.stringify(
@@ -540,8 +664,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
           : patch
       ),
     });
+    // Same fix as addEntry: sign before the entry reaches state, or every photo
+    // in the edited entry renders as an empty tile until the next cold start.
     const [hydratedEntry] = await hydrateEntriesWithPhotoPayloads([response.entry]);
-    const updated = entries.map((e) => (e.id === id ? hydratedEntry : e));
+    const [displayableEntry] = await attachSignedPhotoUris([hydratedEntry], await getToken());
+    const updated = entries.map((e) => (e.id === id ? displayableEntry : e));
     setEntries(updated);
     await persistCache(user?.email, sites, updated, diaries);
   };

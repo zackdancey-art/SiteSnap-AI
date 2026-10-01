@@ -125,10 +125,22 @@ module.exports = {
       //   server.ts       shutdown drains the pool itself — no tenant context to set.
       //   routes/health.ts readiness probes `SELECT 1` and counts schema_migrations,
       //                   neither of which is tenanted data.
+      //   routes/uploads-media-isolation.test.ts
+      //                   a tenancy test cannot prove tenancy through the very
+      //                   wrapper it is testing. It needs the raw pool for three
+      //                   things a store cannot give it: applying migrations,
+      //                   creating a NOBYPASSRLS probe role to check that the RLS
+      //                   policy itself is enforced by Postgres (the app role is
+      //                   BYPASSRLS, so a withTenant query proves nothing about
+      //                   the policy), and reading `uploads.company_id` directly
+      //                   to confirm which tenant a row was actually attributed
+      //                   to. Exempted by exact filename, not by a *.test.ts
+      //                   glob, so the ban still holds for every other test.
       files: [
         "services/api/src/storage/**/*.{ts,tsx,js,jsx}",
         "services/api/src/server.ts",
         "services/api/src/routes/health.ts",
+        "services/api/src/routes/uploads-media-isolation.test.ts",
       ],
       rules: {
         "no-restricted-imports": [

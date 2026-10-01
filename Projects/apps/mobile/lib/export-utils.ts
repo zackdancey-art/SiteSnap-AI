@@ -1,9 +1,15 @@
 import { Platform, Share } from "react-native";
 import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
-import * as FileSystem from "expo-file-system";
-import { Paths } from "expo-file-system";
+import { File, Paths } from "expo-file-system";
 import type { DiarySection, GeneratedDiary, HourlyNote, Photo, Site } from "@/lib/types";
+import {
+  describeUnavailable,
+  isLoadableUri,
+  resolvePhotoSource,
+  type PhotoUnavailableReason,
+} from "@/lib/photo-uri";
+import { reportMediaFailure } from "@/lib/media-telemetry";
 import { describeGeneration } from "@/lib/provenance";
 import { LOGO_DATA_URI } from "@/lib/logo";
 
@@ -327,11 +333,62 @@ export async function exportReportDocument(args: {
     return;
   }
 
-  const docUri = `${Paths.cache.uri || Paths.document.uri || ""}${filenameBase}.doc`;
-  await FileSystem.writeAsStringAsync(docUri, args.html, {
-    encoding: "utf8",
-  });
+  const docUri = writeCacheFile(`${filenameBase}.doc`, args.html);
   await shareNativeFile(docUri, "application/msword", "Export Word Document");
+}
+
+/**
+ * Writes into the cache directory and returns the file's uri.
+ *
+ * This used `FileSystem.writeAsStringAsync` from the "expo-file-system" root
+ * import. On expo-file-system 19 that name is a deprecation stub whose body is
+ * `throw errorOnLegacyMethodUse(...)` — it throws unconditionally, so the Word
+ * export threw on every native invocation. The `File` class is the live API.
+ */
+function writeCacheFile(
+  filename: string,
+  content: string,
+  encoding: "utf8" | "base64" = "utf8"
+): string {
+  const file = new File(Paths.cache, filename);
+  // create() throws when the file already exists; a re-export of the same entry
+  // on the same day hits exactly that path.
+  if (file.exists) file.delete();
+  file.create();
+  file.write(content, { encoding });
+  return file.uri;
+}
+
+/**
+ * Materialises one photo as a real file in the cache so it can be shared as an
+ * image. Returns null when there is no image to share.
+ *
+ * The gallery shared `photo.uri` directly. For a synced photo that is a signed
+ * proxy URL that expires two hours later, so the recipient of a shared
+ * "photograph" got a link that 403s the next day — and the signature itself is a
+ * credential, sent to whoever the share sheet was pointed at.
+ */
+export async function writeSharablePhotoFile(
+  photo: Photo,
+  filenameBase: string
+): Promise<string | null> {
+  const [resolved] = await resolvePhotosForExport([photo]);
+  const dataUri = resolved?.exportDataUri;
+  if (!dataUri) return null;
+  const match = /^data:([^;,]*);base64,(.*)$/s.exec(dataUri);
+  if (!match) return null;
+  const extension = match[1] === "image/png" ? "png" : "jpg";
+  const name = `${normalizeFilename(filenameBase) || "sitesnap-photo"}.${extension}`;
+  try {
+    return writeCacheFile(name, match[2], "base64");
+  } catch (error) {
+    console.warn("[export] could not write photo to cache", error);
+    return null;
+  }
+}
+
+export async function sharePhotoFile(uri: string, mimeType: string) {
+  await shareNativeFile(uri, mimeType, "Share Photo");
 }
 
 function csvCell(value: string) {
@@ -481,19 +538,132 @@ export function buildDiariesReportHtml(diaries: GeneratedDiary[], sites: Site[],
   });
 }
 
+/**
+ * A photo prepared for export: either an embeddable data URI, or a recorded
+ * reason it has none.
+ */
+export type ExportPhoto = Photo & {
+  exportDataUri?: string;
+  exportUnavailableReason?: PhotoUnavailableReason;
+};
+
+/**
+ * Turn a signed remote image into an embeddable data URI.
+ *
+ * Remote <img src> is not an option: Print.printToFileAsync snapshots the
+ * WebView, and an image still in flight prints as a blank box — the paper
+ * version of the bug this branch exists to fix. Everything is inlined before
+ * any HTML is built.
+ */
+async function fetchAsDataUri(url: string): Promise<string | null> {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      reportMediaFailure({ kind: "export-fetch-failed", uri: url, status: res.status });
+      return null;
+    }
+    const blob = await res.blob();
+    return await new Promise<string | null>((resolve) => {
+      const reader = new FileReader();
+      reader.onerror = () => {
+        reportMediaFailure({
+          kind: "export-fetch-failed",
+          uri: url,
+          reason: "FileReader could not encode the fetched blob",
+        });
+        resolve(null);
+      };
+      reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : null);
+      reader.readAsDataURL(blob);
+    });
+  } catch (err) {
+    reportMediaFailure({ kind: "export-fetch-failed", uri: url, cause: err });
+    return null;
+  }
+}
+
+/**
+ * Resolve every photo to embeddable bytes BEFORE building the document.
+ *
+ * The export used to embed `photo.base64` and nothing else, so it depended
+ * entirely on the local payload cache: an entry synced from another device, or
+ * one whose payloads had been cleared, exported as a formal PDF headed
+ * "Photos: 6" containing six lines of small grey italic text. That document is
+ * the one that reaches a QS, an insurer or a lawyer, so it is the last place a
+ * silent gap is acceptable. Signed remote media is now fetched and inlined, and
+ * whatever still cannot be obtained is named in the document itself.
+ */
+export async function resolvePhotosForExport(photos: Photo[]): Promise<ExportPhoto[]> {
+  return Promise.all(
+    photos.map(async (photo): Promise<ExportPhoto> => {
+      if (photo.base64) {
+        return { ...photo, exportDataUri: `data:${photo.mimeType || "image/jpeg"};base64,${photo.base64}` };
+      }
+      if (isLoadableUri(photo.uri)) {
+        const dataUri = await fetchAsDataUri(photo.uri);
+        if (dataUri) return { ...photo, exportDataUri: dataUri };
+        return { ...photo, exportUnavailableReason: "load-failed" };
+      }
+      const resolved = resolvePhotoSource(photo);
+      return {
+        ...photo,
+        exportUnavailableReason: resolved.status === "unavailable" ? resolved.reason : "load-failed",
+      };
+    })
+  );
+}
+
+/**
+ * The image block for one exported photo — the picture, or a loud note that it
+ * is absent. Shared by every export surface so none of them can quietly go back
+ * to emitting an empty string for a photo it could not attach.
+ */
+export function buildExportImageMarkup(photo: ExportPhoto, maxHeight = 320): string {
+  if (photo.exportDataUri) {
+    return `<div style="position:relative;margin-bottom:12px;"><img src="${photo.exportDataUri}" style="width:100%;max-height:${maxHeight}px;object-fit:cover;border-radius:14px;display:block;" />${buildAnnotationOverlayHtml(photo)}</div>`;
+  }
+  // Deliberately loud. Small grey italic print — or, in the gallery export, an
+  // empty string — is how a document understates a gap in the evidence it
+  // claims to contain.
+  return `<div style="margin:0 0 12px;padding:18px;border:2px dashed #fcd34d;border-radius:14px;background:#fef3c7;color:#92400e;">
+             <div style="font-weight:700;font-size:14px;margin-bottom:4px;">&#9888; IMAGE NOT INCLUDED</div>
+             <div style="font-size:12px;line-height:1.5;">${escapeHtml(describeUnavailable(photo.exportUnavailableReason || "load-failed"))} This photograph is recorded in the entry but its image could not be attached to this document.</div>
+           </div>`;
+}
+
+/**
+ * Stated once at the top of a document, before anything else, so a reader
+ * cannot mistake it for a complete photographic record.
+ */
+export function buildIncompleteRecordNotice(unavailableCount: number, total: number): string {
+  if (unavailableCount <= 0) return "";
+  return `<section class="section" style="border:2px solid #fcd34d;background:#fef3c7;border-radius:14px;padding:16px;">
+           <h2 style="color:#92400e;margin-top:0;">&#9888; Incomplete photo record</h2>
+           <p style="color:#92400e;margin:0;font-size:13px;line-height:1.6;">
+             ${unavailableCount} of ${total} photographs could not be included in this export.
+             The missing images are marked individually below. This document is not a complete photographic record.
+           </p>
+         </section>`;
+}
+
+/** "6 (2 not included)" instead of a bare "6" that overstates what is attached. */
+export function formatPhotoCountForExport(total: number, unavailableCount: number): string {
+  return unavailableCount > 0 ? `${total} (${unavailableCount} not included)` : String(total);
+}
+
 export function buildEntryPhotosReportHtml(args: {
   site: Site;
   entryDate: string;
   notes: string;
-  photos: Photo[];
+  photos: ExportPhoto[];
   notesMode?: "free" | "hourly";
   hourlyNotes?: HourlyNote[];
 }) {
+  const unavailable = args.photos.filter((photo) => !photo.exportDataUri);
+
   const photoCards = args.photos
     .map((photo, index) => {
-      const imageMarkup = photo.base64
-        ? `<div style="position:relative;margin-bottom:12px;"><img src="data:${escapeHtml(photo.mimeType || "image/jpeg")};base64,${photo.base64}" style="width:100%;max-height:320px;object-fit:cover;border-radius:14px;display:block;" />${buildAnnotationOverlayHtml(photo)}</div>`
-        : `<p style="color:#6f8095;font-style:italic;margin:0 0 12px;">Image unavailable</p>`;
+      const imageMarkup = buildExportImageMarkup(photo);
       return `
         <section class="section">
           <h2>Photo ${index + 1}${photo.kind === "annotated" ? " (Annotated)" : ""}</h2>
@@ -501,11 +671,14 @@ export function buildEntryPhotosReportHtml(args: {
           <table class="detail-table">
             <tr><th>Captured</th><td>${escapeHtml(new Date(photo.timestamp).toLocaleString("en-AU"))}</td></tr>
             <tr><th>Caption</th><td>${escapeHtml(photo.caption || "Not recorded")}</td></tr>
+            <tr><th>Image</th><td>${photo.exportDataUri ? "Attached" : "NOT INCLUDED"}</td></tr>
           </table>
         </section>
       `;
     })
     .join("");
+
+  const completenessNotice = buildIncompleteRecordNotice(unavailable.length, args.photos.length);
 
   const notesMarkup =
     args.notesMode === "hourly"
@@ -517,12 +690,17 @@ export function buildEntryPhotosReportHtml(args: {
     subtitle: `${args.site.client} • ${args.entryDate}`,
     eyebrow: "Entry Photo Export",
     meta: [
-      { label: "Photos", value: String(args.photos.length) },
+      {
+        label: "Photos",
+        // The count alone was the lie: "6" next to six blank boxes.
+        value: formatPhotoCountForExport(args.photos.length, unavailable.length),
+      },
       { label: "Entry Date", value: args.entryDate },
       { label: "Site", value: args.site.name },
       { label: "Client", value: args.site.client },
     ],
     body: `
+      ${completenessNotice}
       <section class="section">
         <h2>${args.notesMode === "hourly" ? "Hourly Log" : "Entry Notes"}</h2>
         ${notesMarkup}
