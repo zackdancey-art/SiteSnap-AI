@@ -506,6 +506,16 @@ export default function CrewTimecards() {
                   value={picker === "date" ? ymdToDate(date) : picker === "start" ? hhmmToDate(startTime) : hhmmToDate(endTime)}
                   mode={picker === "date" ? "date" : "time"}
                   display="spinner"
+                  // UIDatePicker is rendered by iOS, not by us, so with no
+                  // themeVariant it follows the SYSTEM appearance while the card
+                  // behind it is always Colors.surface (#FFFFFF). In dark
+                  // appearance that drew white wheel text on white, leaving only
+                  // the selection band visible — the whole "empty picker" bug.
+                  // `Colors` has no dark palette, so the picker is pinned light
+                  // to match it. See docs/DECISIONS.md ADR-0002.
+                  themeVariant="light"
+                  textColor={Colors.text}
+                  style={styles.iosPickerWheel}
                   onChange={(_e: DateTimePickerEvent, d?: Date) => {
                     if (!d) return;
                     if (picker === "date") setDate(dateToYMD(d));
@@ -628,6 +638,9 @@ const styles = StyleSheet.create({
   moreToggle: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 4, paddingVertical: 12 },
   moreToggleTxt: { fontSize: 13, fontFamily: "Inter_500Medium", color: Colors.accent },
   iosPicker: { backgroundColor: Colors.surface, borderRadius: 14, marginTop: 8 },
+  // An explicit height, matching new-entry.tsx and create-site.tsx. Without one
+  // the spinner reports an intrinsic height that leaves a large empty band.
+  iosPickerWheel: { backgroundColor: Colors.surface, height: 180 },
   iosPickerDone: { alignItems: "flex-end", paddingHorizontal: 16, paddingTop: 10 },
   iosPickerDoneTxt: { fontSize: 15, fontFamily: "Inter_600SemiBold", color: Colors.accent },
 

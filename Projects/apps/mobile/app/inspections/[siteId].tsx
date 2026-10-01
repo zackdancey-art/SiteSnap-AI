@@ -707,7 +707,10 @@ export default function InspectionsScreen() {
       />
 
       {loading
-        ? <ActivityIndicator style={{ marginTop: 40 }} />
+        // An uncoloured ActivityIndicator uses iOS's appearance-adaptive grey,
+        // which goes near-white in dark appearance on top of a background that
+        // is always Colors.background. Same cause as the date picker.
+        ? <ActivityIndicator color={Colors.primary} style={{ marginTop: 40 }} />
         : inspections.length === 0
           ? <EmptyState icon="shield-checkmark-outline" title="No inspections yet" subtitle="Create a safety inspection checklist for this site." ctaLabel="New Inspection" onCta={() => setShowForm(true)} />
           : (
