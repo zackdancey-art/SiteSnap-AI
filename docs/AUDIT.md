@@ -465,11 +465,12 @@ Both false, so migration 023's policy was enforced in production throughout and 
 
 ### L24 — Orphaned upload objects and rows, with no sweep — LOW (housekeeping; one named item)
 
-Three sources of `uploads` rows and S3 objects that nothing references:
+Four sources of `uploads` rows and S3 objects that nothing references:
 
 1. **Duplicates from the pre-fix re-upload bug.** `uploadPhotoOnce` decided a photo was already stored by testing `/^https?:\/\//`, which never matched the relative `/api/uploads/<id>/<name>` that is actually persisted — so every edit of an entry re-uploaded every photo it already held, writing a byte-identical object under a fresh id and orphaning the previous one. Fixed in `78d5e3c` (the test is now `isManagedMediaUri`), but the objects and rows already written remain.
 2. **One audit probe object.** `uploads/1790717610354-7870983cd172d-probe.jpg`, 201 B, written while verifying the signed-media path during the H9 work. **The S3 object was deleted on 2026-10-01** (confirmed by a follow-up HEAD returning `NotFound`). **Its `uploads` row was deliberately left in place** — id `1790717610354-7870983cd172d`. See below.
 3. **Any file whose entry was later edited to drop the photo.** Same shape as (1), pre-dating it.
+4. **Duplicates from a double-tapped Save on the create path.** Two concurrent `handleSave` runs each upload the same local photos, so one of the two sets of objects is written and then orphaned by whichever entry row loses. Distinct from (1): (1) was one save re-uploading an *already stored* photo, this is two saves uploading a *not yet stored* photo twice. Recorded as **L26**, which also carries the guard that was missing.
 
 **Disposition:** OPEN. Needs one sweep that reconciles the `uploads` table and the bucket against `project_entries.photos_json`, run through `withTenant` per company, and **reporting what it would delete before deleting anything** — this is a compliance-evidence product, so over-eager reconciliation is worse than the orphans, and the operator decides what happens to each record.
 
@@ -497,3 +498,23 @@ Three sibling instances of the same class, for calibration:
 2. **Treat a parenthetical inside a disposition as load-bearing.** It is the clause a reviewer skims and trusts precisely because it is short, so it carries more weight per word than the prose around it and deserves more scrutiny, not less.
 
 **Disposition:** No code change. Adopted as a convention for dispositions written from here on. H7's own wording is corrected in the same commit that records this (`fb64b33`), and the `uploadsStore.ts` header JSDoc was corrected in `122db1c`.
+
+### L26 — A double-tapped Save on the create path could write an entry twice and upload every photo twice — LOW (concurrency; a second plausible origin of L24's duplicates)
+
+`app/new-entry.tsx`'s `handleSave` opened with `if (saving) return;`, where `saving` is `saveProgress !== null` — a value derived from React state. The comment above that line described the race correctly:
+
+> setState is async, so a fast double-tap can land twice before React re-renders the button
+
+and then defended against it with state. `saving` is whatever was true when the current render's closure was created, so two taps landing inside one frame both read the stale `false` and both proceed. The hazard was identified and the mechanism chosen could not prevent it.
+
+**What a second run does.** `handleSave` has no idempotency key: it uploads the photos, then creates the entry. So two runs mean two `POST /api/projects/:id/entries` and two full sets of upload objects under fresh ids, for the same photos. The duplicate entry is visible to the user and they would delete one; **the second set of S3 objects is not visible to anyone**, and it is still referenced by the `photos_json` of whichever entry was deleted, so it does not even present as an orphan until that row is gone.
+
+**Relationship to L24.** This is a plausible origin of some of the duplicate objects counted there, and it is worth writing down whether or not it is the only cause. It is **not** demonstrated to be a cause: no duplicate object in `sitesnapai-media` has been traced back to a double-tap, and the pre-fix `uploadPhotoOnce` bug recorded as L24(1) is sufficient on its own to explain duplicates. Two hypotheses, one of them proven, is a reason to fix both and attribute neither.
+
+**Fix.** Replaced with a `savingRef` claimed and read synchronously, so the second tap observes the claim the first tap made. Released in a `finally` on every exit including failure — a guard that latches on failure turns one failed save into a screen that can never be saved again without being left and re-entered. On branch `fix/device-pass-six`, in the commit that records this entry. The button's `disabled` and the blocking overlay are unchanged and remain the first line of defence; the ref is the one that holds inside a single frame.
+
+**Verification actually performed.** Typecheck only. The race was **not** reproduced before the fix and the fix was **not** proven to close it — neither is observable on a phone, because a working guard produces no symptom. What a device pass can confirm is the consequence, not the mechanism: one entry and one set of uploads per save. Proving the race itself needs a test that invokes the handler twice within a frame, which this repo cannot yet do — mobile has no test harness (`find Projects/apps -name '*.test.ts*'` returns nothing).
+
+**Disposition:** Code fixed. The orphaned objects this may have produced are **not** cleaned up and are in scope for L24's sweep, which still has no owner.
+
+**The edit path was checked and is not affected the same way.** It shares `handleSave`, so it gets the same guard, but a second run there re-saves the same entry id rather than creating a second one, and post-`78d5e3c` `isManagedMediaUri` correctly skips photos already stored — so the duplicate-object half does not arise on that path.

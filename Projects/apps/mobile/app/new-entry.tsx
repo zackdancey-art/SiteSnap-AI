@@ -462,6 +462,9 @@ export default function NewEntryScreen() {
    */
   const [saveProgress, setSaveProgress] = useState<SaveProgress | null>(null);
   const saving = saveProgress !== null;
+  // Synchronous companion to `saving`. See handleSave for why state cannot do
+  // this. `saving` still drives everything the user sees; this only gates entry.
+  const savingRef = useRef(false);
 
   const saveProgressLabel = (progress: SaveProgress) => {
     if (progress.phase === "uploading" && progress.total > 0) {
@@ -474,9 +477,38 @@ export default function NewEntryScreen() {
   };
 
   const handleSave = async () => {
-    // Second line of defence behind the button's `disabled`. setState is async,
-    // so a fast double-tap can land twice before React re-renders the button.
-    if (saving) return;
+    // THE double-tap guard, and a ref because only a ref can do this job.
+    //
+    // This replaces `if (saving) return;`. That check described this exact race
+    // in its own comment — "setState is async, so a fast double-tap can land
+    // twice before React re-renders the button" — and then used a value derived
+    // from state to defend against it. `saving` is whatever was true when the
+    // current render's closure was created, so two taps inside one frame both
+    // read the stale `false` and both proceed. The comment was correct about the
+    // hazard and the code could not prevent it.
+    //
+    // A ref is mutated synchronously, so the second tap observes the claim the
+    // first tap made. The button's `disabled` and the blocking overlay are still
+    // the first line of defence; this is the one that holds inside a single
+    // frame.
+    //
+    // Not observable from the outside, which is the point: if this works you see
+    // nothing. What the device check can confirm is the consequence — one entry
+    // and one set of uploads per save. Proving the race itself needs a test.
+    if (savingRef.current) return;
+    savingRef.current = true;
+    try {
+      await runSave();
+    } finally {
+      // Released on every exit, including a FAILED save and a failed validate.
+      // A guard that latches on failure turns one failed save into a screen that
+      // can never be saved again without being left and re-entered.
+      savingRef.current = false;
+      setSaveProgress(null);
+    }
+  };
+
+  const runSave = async () => {
     if (!validate()) return;
     const savedAt = new Date().toISOString();
     const photosForApi: Photo[] = photos.map((photo) => ({
@@ -509,12 +541,10 @@ export default function NewEntryScreen() {
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to save entry.";
       Alert.alert("Save Failed", message);
-    } finally {
-      // In `finally`, so the indicator clears on failure exactly as it does on
-      // success. A spinner that keeps spinning after a failed save is a worse
-      // lie than no spinner at all — it reports work that has stopped.
-      setSaveProgress(null);
     }
+    // No `finally` here any more: handleSave owns clearing the indicator and
+    // releasing the guard, so both happen on exactly one path. A spinner that
+    // keeps spinning after a failed save reports work that has stopped.
   };
 
   return (
