@@ -146,6 +146,43 @@ strings -a /tmp/bundle/_expo/static/js/ios/entry-*.hbc | grep -c -F "SIGPROBE_RE
 
 That must print `0`.
 
+### Shipping this branch over the air to an older binary
+
+This branch adds `expo-dev-client` as a dependency. A JS bundle pushed with
+`eas update` runs on a **binary that was built before that dependency existed**,
+and a bundle that referenced a native module the binary does not contain would
+crash the app on launch. That question was settled by measurement, not by
+reasoning, and the method is reusable the next time a dev-only dependency is
+added:
+
+1. **Is the family in the bundle at all?** `expo-dev-launcher` ships *no
+   JavaScript whatsoever* — no `main`, no `build/`, only `ios/`, `android/` and
+   a config plugin — so it cannot contribute to a bundle by construction.
+   `expo-dev-client`'s entire JS surface is one line, `export * from
+   'expo-dev-menu'`. Every marker from `expo-dev-menu`'s shipped JS
+   (`ExpoDevMenu`, `registeredCallbackFired`, `WebUnsupportedError`,
+   `expo-dev-menu`) is **0** in the production bundle, against a positive
+   control from the same layer (`expo-modules-core` 3, `requireNativeModule` 1)
+   proving that class of string does survive bundling.
+
+2. **The one hit is not from the dependency.** `EXDevLauncher` appears exactly
+   once, from `expo/src/Expo.fx.tsx`: `const IS_RUNNING_IN_DEV_CLIENT =
+   !!NativeModules.EXDevLauncher`. That is a **property read** on
+   `NativeModules`, which yields `undefined` for an absent module rather than
+   throwing, and it lives in the `expo` package — which ships regardless. It is
+   the only file in the whole `expo` package that names the string.
+
+3. **Proved by building the bundle without it.** The `expo-dev-client` symlink
+   was renamed so it could not resolve, and the bundle re-exported. Hermes's own
+   recorded SHA-1 of the JavaScript it compiled was **identical** in both runs
+   (`f33690a3f46acdfb5dee34698170db7e3b853572`), as was `metadata.json`, and
+   `EXDevLauncher` was `1` in both. The two files differ by a single byte — the
+   `fileLength` field in the Hermes header (6971060 vs 6971061), one byte of
+   trailing bytecode padding.
+
+So the dependency changes the **native** build inputs and nothing in the
+JavaScript. The OTA bundle is safe on a binary built before it.
+
 ## How it avoids changing what it measures
 
 A probe that moves the thing it is measuring is worse than no probe. So:
