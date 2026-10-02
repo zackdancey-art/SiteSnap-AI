@@ -518,3 +518,47 @@ and then defended against it with state. `saving` is whatever was true when the 
 **Disposition:** Code fixed. The orphaned objects this may have produced are **not** cleaned up and are in scope for L24's sweep, which still has no owner.
 
 **The edit path was checked and is not affected the same way.** It shares `handleSave`, so it gets the same guard, but a second run there re-saves the same entry id rather than creating a second one, and post-`78d5e3c` `isManagedMediaUri` correctly skips photos already stored — so the duplicate-object half does not arise on that path.
+
+### L27 — `flex: 1` resolves flexBasis to **zero**, so a flexed child of an auto-height parent occupies no layout space — MEDIUM (layout; one proven instance, which broke the signature sheet for three releases)
+
+**Read this before writing `flex: 1` anywhere in the mobile app.** It does not mean what it means on the web, and the difference is silent.
+
+**Mechanism.** In React Native, `flex: 1` with no explicit `flexBasis` resolves flexBasis to **zero points**, not to `auto`. This is not inference — it is in the Yoga source shipped with the installed React Native:
+
+```
+Projects/node_modules/.pnpm/react-native@0.81.5_.../node_modules/
+  react-native/ReactCommon/yoga/yoga/node/Node.cpp:334-336
+```
+
+`Node::processFlexBasis()` returns `StyleSizeLength::points(0)` and only returns `ofAuto()` when `useWebDefaults()` is set, which React Native does not set. CSS on the web uses `flex: 1 1 0%` too, but a web layout almost always has a definite-height chain to resolve against; a React Native screen frequently does not.
+
+The consequence: a flexBasis-0 child contributes **0** to an auto-height parent's content height, and `flexGrow` has no free space to claim because the parent has no definite height to take free space from. The child measures 0pt tall. Its own children still **paint**, because `overflow` defaults to `visible` — so the screen looks like it contains something that layout believes is not there.
+
+That split between painting and layout is what makes this so hard to see. The element is on screen. It is just not occupying any space, so everything after it is positioned as though it did not exist, and later siblings paint on top of it.
+
+**The proven instance.** `components/SignaturePad.tsx` wrapped its 160pt signing canvas in `<GestureHandlerRootView style={{ flex: 1 }}>`, inside `wrap: { gap: 8 }` — an auto-height column. Introduced in `a2839a3`. Measured on device before the fix:
+
+```
+padWrap  h=35.7      <- the Clear toolbar alone; the canvas contributes nothing
+canvas   h=160  bottom=932   window h=874   -> 58pt below the bottom of the screen
+actions  y=788                              -> drawn ON the signing surface
+```
+
+**Why three sheet-level fixes could not have worked.** The sheet was patched three times — keyboard avoidance, then `maxHeight`, then safe-area padding — each shipped and each still broken on the phone. Every one of them changed the *sheet*. None of them could change the fact that the canvas contributed 0pt to its parent's height, because that is decided inside `SignaturePad`, two components down, and predates all three. No amount of space given to the sheet reaches a child that declines to occupy any of it. A fix aimed at the container cannot correct a child that measures zero.
+
+**The trap inside the fix.** Deleting the `style` prop is *not* the fix, and looks like it. `react-native-gesture-handler` (2.28.0) renders `<View style={style ?? styles.container} />` where its own `container` is `{ flex: 1 }` — so omitting `style` applies the library's flex:1 instead of none. That no-op was tried first and only caught because the measurement harness reported byte-identical geometry. The style must be **displaced**, not removed:
+
+```tsx
+padRoot: { flexGrow: 0, flexBasis: "auto" },
+```
+
+**How this was found at all, and the real finding.** It was found by building something that could see the screen (`docs/SIGNATURE-LAYOUT-PROBE.md`), after three rounds of reasoning about the layout failed. The durable lesson is not about flexbox: a class of defect that is invisible to every test you own will be shipped repeatedly, confidently, with a correct-sounding explanation each time.
+
+**Repo-wide survey — the defect class has exactly one instance.** All 190 `flex: 1` elements in `Projects/apps/mobile` were enumerated by a script that reconstructs JSX nesting from indentation and resolves `styles.X` references. Excluding those on a **row** axis (where `flex: 1` sizes width and is both correct and idiomatic) and those with a definite-height ancestor leaves 7 candidates. All 7 were inspected by hand:
+
+- 6 in `app/incidents/[siteId].tsx` (lines 487, 492, 508, 513, 548, 553) are children of `rowFields: { flexDirection: "row", gap: 12 }` — width-axis, correct. The script failed to resolve the style alias, not a real finding.
+- 1 in `lib/useScreenInsets.tsx:181` is `<SafeAreaProvider style={{ flex: 1 }}>` at a tab screen root, whose effective parent fills the screen — correct, and the documented idiom.
+
+So: **no second instance exists today.** That claim is not vacuous — the same script was run against the pre-fix `SignaturePad.tsx` as a control and did flag line 99, so it has the power to find the shape it reports as absent. Its limits: it does not follow styles through component props, into imported stylesheets outside the file, or into `contentContainerStyle`. **Nothing else was changed** — this was a survey, not a sweep.
+
+**Disposition:** One instance fixed on `fix/signature-sheet-harness`, proved by measurement before and after. Mechanism recorded here because the next person to hit it should find this rather than rediscover it.
