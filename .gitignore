@@ -32,3 +32,6 @@
 # Local data stores
 **/data/auth-store.json
 **/data/projects-store.json
+
+# Local probe/diagnostic output (screenshots, reports, logs)
+scratchpad/

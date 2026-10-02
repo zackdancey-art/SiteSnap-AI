@@ -5,6 +5,17 @@ import { Gesture, GestureDetector, GestureHandlerRootView } from "react-native-g
 import { runOnJS } from "react-native-reanimated";
 import Colors from "@/constants/colors";
 
+// Dev-only layout probe. The require is deliberately INSIDE `if (__DEV__)`: a
+// top-level import of this module ships its code in production bundles, a gated
+// require eliminates it entirely. Both measured by grepping a production Hermes
+// bundle — see the header of lib/dev-signature-probe.ts. Do not convert this to
+// an import.
+let DevProbe: typeof import("@/lib/dev-signature-probe") | null = null;
+if (__DEV__) {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  DevProbe = require("@/lib/dev-signature-probe");
+}
+
 type SignaturePadProps = {
   onChange: (path: string) => void;
   viewBox: string;
@@ -74,7 +85,7 @@ export function SignaturePad({ onChange, viewBox, height }: SignaturePadProps) {
   const hasStrokes = path.length > 0;
 
   return (
-    <View style={styles.wrap}>
+    <View style={styles.wrap} ref={DevProbe ? DevProbe.nodeRef("padWrap") : undefined}>
       {/* Clear sits ABOVE the canvas. It used to render after it, 8pt below the
           signing surface and right-aligned, which put a tappable control
           immediately under the area being signed — close enough to be read as one
@@ -85,9 +96,31 @@ export function SignaturePad({ onChange, viewBox, height }: SignaturePadProps) {
           <Text style={[styles.clearBtnText, !hasStrokes && styles.clearBtnTextDisabled]}>Clear</Text>
         </Pressable>
       </View>
-      <GestureHandlerRootView style={{ flex: 1 }}>
+      {/* This style exists to DISPLACE the library's own default, and must not
+          be deleted as redundant. GestureHandlerRootView renders
+          `<View style={style ?? styles.container} />` with its container being
+          `{ flex: 1 }` (react-native-gesture-handler 2.28.0,
+          src/components/GestureHandlerRootView.tsx), so omitting `style` is NOT
+          the same as not flexing — it applies the library's flex:1 instead.
+
+          Why flex:1 is wrong here: in React Native, `flex: 1` with no explicit
+          `flexBasis` resolves flexBasis to ZERO points, not to `auto` as on the
+          web (react-native/ReactCommon/yoga/yoga/node/Node.cpp:334-336 —
+          processFlexBasis() returns points(0) unless useWebDefaults()). A
+          flexBasis-0 child of an auto-height parent contributes 0 to that
+          parent's content height, and flexGrow has no free space to claim, so
+          this view measured 0pt tall. Its 160pt canvas still painted (overflow
+          defaults to visible) but occupied no layout space, so the Cancel/Save
+          row below was positioned against a 0pt box and drew on top of the
+          signing surface, and the canvas ran off the bottom of the screen.
+          See AUDIT L27. */}
+      <GestureHandlerRootView style={styles.padRoot}>
         <GestureDetector gesture={pan}>
-          <View style={[styles.surface, { height: surfaceHeight }]} onLayout={handleLayout}>
+          <View
+            style={[styles.surface, { height: surfaceHeight }]}
+            onLayout={handleLayout}
+            ref={DevProbe ? DevProbe.nodeRef("canvas") : undefined}
+          >
             <Svg width="100%" height="100%" viewBox={viewBox}>
               <Path
                 d={`M0 ${vbHeight - 16} L${vbWidth} ${vbHeight - 16}`}
@@ -110,6 +143,9 @@ export function SignaturePad({ onChange, viewBox, height }: SignaturePadProps) {
 
 const styles = StyleSheet.create({
   wrap: { gap: 8 },
+  // Sizes to its content (the canvas's explicit height). See the comment at
+  // the usage site — this is here to override the library's flex:1 default.
+  padRoot: { flexGrow: 0, flexBasis: "auto" },
   surface: {
     borderWidth: 1,
     borderColor: Colors.border,
