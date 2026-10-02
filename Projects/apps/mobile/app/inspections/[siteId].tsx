@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   View, Text, Pressable, ScrollView, StyleSheet, Alert,
   ActivityIndicator, TextInput, Modal, KeyboardAvoidingView, Platform,
+  Keyboard, Dimensions,
 } from "react-native";
 import { useLocalSearchParams } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
@@ -23,6 +24,16 @@ import { useData, uploadPhotos } from "@/lib/data-context";
 import { hydratePhotos, savePhotoPayloads, stripPhotoArray } from "@/lib/photo-payload-store";
 import { ScreenHeader } from "@/components/ScreenHeader";
 import { AnnotationVector, Photo } from "@/lib/types";
+
+// Dev-only layout probe for the Add Signature sheet. The require sits INSIDE
+// `if (__DEV__)` on purpose — see the header of lib/dev-signature-probe.ts for
+// the bundle-grep evidence that a top-level import would ship this code and a
+// gated require does not. Do not convert this to an import.
+let DevProbe: typeof import("@/lib/dev-signature-probe") | null = null;
+if (__DEV__) {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  DevProbe = require("@/lib/dev-signature-probe");
+}
 
 type InspectionResult = { item: string; passed: boolean | null; notes: string; na?: boolean; photos?: Photo[] };
 type InspectionDefect = { description: string; severity: string; owner: string; dueDate: string | null; status: string };
@@ -315,6 +326,11 @@ export default function InspectionsScreen() {
   // why the value being replaced here was a hardcoded 32.
   const sheetPaddingBottom = Math.max(insets.bottom, 20);
 
+  // ---- dev-only layout probe state (stripped from production bundles) ----
+  const [probeText, setProbeText] = useState<string | null>(null);
+  const [probeGreen, setProbeGreen] = useState(false);
+  const probeInputRef = useRef<TextInput | null>(null);
+
   const [inspections, setInspections] = useState<Inspection[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [loading, setLoading] = useState(true);
@@ -377,6 +393,105 @@ export default function InspectionsScreen() {
   };
 
   useEffect(() => { load(); }, [siteId]);
+
+  // Dev-only: drive the real Add Signature sheet and measure it.
+  //
+  // This opens the actual sheet in the actual screen rather than a replica. The
+  // defect being hunted lives in the interaction between SignaturePad's internal
+  // flex wrapper and this sheet's auto-height card, so a replica that differs by
+  // one style prop would test nothing. Only the inspection DATA is synthetic —
+  // every view, style and prop below the card is the product's own, which is why
+  // this needs no auth, no API and no database to be meaningful about geometry.
+  useEffect(() => {
+    if (!__DEV__ || !DevProbe) return;
+    const PROBE_SITE_ID = "__signature_probe__";
+    if (siteId !== PROBE_SITE_ID) return;
+    const probe = DevProbe;
+    let cancelled = false;
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+    const waitForKeyboard = (ms: number) =>
+      new Promise<boolean>((resolve) => {
+        const sub = Keyboard.addListener("keyboardDidShow", () => {
+          clearTimeout(t);
+          sub.remove();
+          resolve(true);
+        });
+        const t = setTimeout(() => {
+          sub.remove();
+          resolve(false);
+        }, ms);
+      });
+
+    const run = async () => {
+      probe.resetNodes();
+      const synthetic: Inspection = {
+        id: "probe-inspection",
+        siteId: PROBE_SITE_ID,
+        name: "Layout Probe",
+        date: new Date().toISOString().split("T")[0],
+        results: [],
+        status: "pending",
+        scope: "",
+        areaInspected: "",
+        time: "",
+        inspectorName: "",
+        inspectorRole: "",
+        inspectorCompany: "",
+        defects: [],
+        overallOutcome: "",
+        followUpRequired: false,
+      };
+      setLoading(false);
+      setShowActive(synthetic);
+      // The outer sheet is a pageSheet Modal with a presentation animation, and
+      // the signature sheet is a second Modal nested inside it. Both need to
+      // finish presenting before any frame is meaningful.
+      await sleep(1200);
+      if (cancelled) return;
+      setShowSignModal(true);
+      await sleep(1200);
+      if (cancelled) return;
+
+      const keys = [...probe.PROBE_KEYS];
+      // Pass 1 is measured while no report overlay exists in the tree at all,
+      // so for this pass the probe provably cannot have affected what it read.
+      const win1 = Dimensions.get("window");
+      const rects1 = await probe.measureAll(keys);
+      const pass1 = probe.evaluate("pass 1: keyboard closed", rects1, win1);
+
+      // Pass 2: raise the keyboard by focusing the signer-name field.
+      probeInputRef.current?.focus();
+      const shown = await waitForKeyboard(2500);
+      let pass2;
+      if (!shown) {
+        pass2 = probe.skipped(
+          "pass 2: keyboard open",
+          "keyboardDidShow never fired — the simulator is most likely using the hardware keyboard (Simulator > I/O > Keyboard > Connect Hardware Keyboard). Not counted as a pass.",
+          Dimensions.get("window")
+        );
+      } else {
+        await sleep(700);
+        const win2 = Dimensions.get("window");
+        const rects2 = await probe.measureAll(keys);
+        pass2 = probe.evaluate("pass 2: keyboard open", rects2, win2);
+      }
+      if (cancelled) return;
+
+      const passes = [pass1, pass2];
+      const report = probe.formatReport(passes);
+      const verdict = probe.verdictOf(passes);
+      // eslint-disable-next-line no-console
+      console.log(report);
+      setProbeGreen(verdict.green);
+      setProbeText(report);
+    };
+
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [siteId]);
 
   const getItems = () => {
     if (selectedTemplate) {
@@ -1147,7 +1262,10 @@ export default function InspectionsScreen() {
                 style={styles.sigModalOverlay}
                 behavior={Platform.OS === "ios" ? "padding" : "height"}
               >
-                <View style={[styles.sigModalCard, { paddingBottom: sheetPaddingBottom }]}>
+                <View
+                  style={[styles.sigModalCard, { paddingBottom: sheetPaddingBottom }]}
+                  ref={DevProbe ? DevProbe.nodeRef("card") : undefined}
+                >
                   <ScrollView
                     style={styles.sigModalForm}
                     contentContainerStyle={styles.sigModalFormContent}
@@ -1156,6 +1274,7 @@ export default function InspectionsScreen() {
                   >
                     <Text style={styles.modalTitle}>Add Signature</Text>
                     <TextInput
+                      ref={DevProbe ? probeInputRef : undefined}
                       style={[styles.input, { marginTop: 12 }]}
                       value={sigName}
                       onChangeText={setSigName}
@@ -1173,7 +1292,10 @@ export default function InspectionsScreen() {
                   <View style={{ marginTop: 12 }}>
                     <SignaturePad viewBox={SIGNATURE_VIEWBOX} height={160} onChange={setSigPath} />
                   </View>
-                  <View style={{ flexDirection: "row", gap: 12, marginTop: 16 }}>
+                  <View
+                    style={{ flexDirection: "row", gap: 12, marginTop: 16 }}
+                    ref={DevProbe ? DevProbe.nodeRef("actions") : undefined}
+                  >
                     <Pressable
                       style={styles.cancelBtn}
                       onPress={() => { setShowSignModal(false); setSigName(""); setSigPath(""); setSigRole("inspector"); }}
@@ -1189,6 +1311,10 @@ export default function InspectionsScreen() {
                     </Pressable>
                   </View>
                 </View>
+                {/* Dev-only probe report. The overlay and its styles live in the
+                    gated module so that not even a style key survives into a
+                    production bundle. */}
+                {__DEV__ && DevProbe && probeText ? DevProbe.renderReport(probeText, probeGreen) : null}
               </KeyboardAvoidingView>
             </Modal>
 

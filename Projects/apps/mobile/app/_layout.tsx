@@ -1,6 +1,6 @@
 import * as Sentry from "@sentry/react-native";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { Stack } from "expo-router";
+import { Stack, useRouter } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import React, { useEffect } from "react";
@@ -42,6 +42,23 @@ if (sentryDsn) {
 SplashScreen.preventAutoHideAsync();
 
 function RootLayoutNav() {
+  // Dev-only: drive the Add Signature layout probe.
+  //
+  // This is navigation, not measurement — the probe itself lives in
+  // lib/dev-signature-probe.tsx behind a gated require. A deep link would be
+  // the obvious trigger and does NOT work here: expo-dev-launcher claims the
+  // `sitesnap://` scheme in a development build, so `simctl openurl` never
+  // reaches expo-router (verified — `sitesnap://privacy-policy` does not
+  // navigate either). An env var read at bundle time is the mechanism that
+  // actually works. Everything below is stripped from production bundles.
+  const router = useRouter();
+  useEffect(() => {
+    if (!__DEV__) return;
+    if (process.env.EXPO_PUBLIC_SIGNATURE_PROBE !== "1") return;
+    const t = setTimeout(() => router.push("/inspections/__signature_probe__"), 1500);
+    return () => clearTimeout(t);
+  }, [router]);
+
   return (
     <>
       {/* Navy-forward chrome: navy headers/tab bar need light status-bar content. */}

@@ -5,6 +5,17 @@ import { Gesture, GestureDetector, GestureHandlerRootView } from "react-native-g
 import { runOnJS } from "react-native-reanimated";
 import Colors from "@/constants/colors";
 
+// Dev-only layout probe. The require is deliberately INSIDE `if (__DEV__)`: a
+// top-level import of this module ships its code in production bundles, a gated
+// require eliminates it entirely. Both measured by grepping a production Hermes
+// bundle — see the header of lib/dev-signature-probe.ts. Do not convert this to
+// an import.
+let DevProbe: typeof import("@/lib/dev-signature-probe") | null = null;
+if (__DEV__) {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  DevProbe = require("@/lib/dev-signature-probe");
+}
+
 type SignaturePadProps = {
   onChange: (path: string) => void;
   viewBox: string;
@@ -74,7 +85,7 @@ export function SignaturePad({ onChange, viewBox, height }: SignaturePadProps) {
   const hasStrokes = path.length > 0;
 
   return (
-    <View style={styles.wrap}>
+    <View style={styles.wrap} ref={DevProbe ? DevProbe.nodeRef("padWrap") : undefined}>
       {/* Clear sits ABOVE the canvas. It used to render after it, 8pt below the
           signing surface and right-aligned, which put a tappable control
           immediately under the area being signed — close enough to be read as one
@@ -87,7 +98,11 @@ export function SignaturePad({ onChange, viewBox, height }: SignaturePadProps) {
       </View>
       <GestureHandlerRootView style={{ flex: 1 }}>
         <GestureDetector gesture={pan}>
-          <View style={[styles.surface, { height: surfaceHeight }]} onLayout={handleLayout}>
+          <View
+            style={[styles.surface, { height: surfaceHeight }]}
+            onLayout={handleLayout}
+            ref={DevProbe ? DevProbe.nodeRef("canvas") : undefined}
+          >
             <Svg width="100%" height="100%" viewBox={viewBox}>
               <Path
                 d={`M0 ${vbHeight - 16} L${vbWidth} ${vbHeight - 16}`}
