@@ -1,0 +1,13 @@
+# Generated native projects.
+#
+# `expo prebuild` (and `expo run:ios` / `run:android`, which call it) writes these
+# directories. They are build output, not source: this project is managed, the
+# native config lives in app.config.ts, and the directories are regenerated from
+# it. Committing them makes app.config.ts non-authoritative and the drift is
+# invisible until a build picks the stale copy.
+#
+# Until this file existed, nothing ignored them — the "no ios/ in commits" rule
+# was enforced only by whoever was paying attention at the time. One prebuild and
+# one `git add -A` was all it took.
+ios/
+android/
