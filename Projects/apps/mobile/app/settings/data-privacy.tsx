@@ -37,12 +37,15 @@ export default function DataPrivacySettingsScreen() {
             <SettingsDividerFull />
             <SettingsBody>
               <SettingsBodyStrong>Deletion & retention. </SettingsBodyStrong>
-              Deleting a record removes it from your app straight away. The record itself is kept to meet construction and WorkSafe record-keeping requirements — it is marked deleted rather than erased.
+              Deleting works two different ways, so this says which. An incident, timesheet, inspection or delivery is
+              flagged deleted and disappears from the app, but the row stays — these are compliance records a construction
+              business is expected to be able to produce years later. A site or a diary entry is genuinely removed from the
+              database. Either way the photograph files are not deleted; see below.
             </SettingsBody>
             <SettingsDividerFull />
             <SettingsBody>
               <SettingsBodyStrong>Deleting your account. </SettingsBodyStrong>
-              This removes your login and most of what is attached to it. Two things survive it, and the Privacy Policy sets out exactly which: the record of your uploads, and the photograph files themselves. Nothing in SiteSnap deletes a stored photograph — not on record delete, not on account delete, not on a schedule.
+              This removes your login and most of what is attached to it. Three things survive it, and the Privacy Policy sets out exactly which: the record of your uploads, the photograph files themselves, and your company's record. Nothing in SiteSnap deletes a stored photograph — not on record delete, not on account delete, not on a schedule.
             </SettingsBody>
             <SettingsDividerFull />
             <SettingsBody>

@@ -660,7 +660,17 @@ router.patch("/auth/profile", requireAuth, async (req: Request, res: Response) =
   });
 });
 
-// Permanently delete the authenticated user's account and all their data
+// Delete the authenticated user's account and the records in it.
+//
+// Deliberately NOT described as deleting "all their data", because it does not:
+//   - no code path in this service deletes a stored photograph. The media
+//     storage adapter (storage/mediaStorage.ts) exposes exactly saveFile and
+//     readFile, and the only S3 commands imported anywhere are GetObject and
+//     PutObject. Deleting the row removes the pointer; the object stays.
+//   - rows the user authored under a *former* company keep that company_id and
+//     are left untouched by design (see deleteAllUserProjectData).
+// The response message says what actually happened. Changing it to promise more
+// than the code does is how the old wording came about.
 router.delete("/auth/account", requireAuth, async (req: Request, res: Response) => {
   if (await isRateLimitedByIp(req, "delete-account", 3, 60 * 60 * 1000)) {
     return res.status(429).json({ error: "Too many account deletion attempts." });
@@ -669,7 +679,12 @@ router.delete("/auth/account", requireAuth, async (req: Request, res: Response) 
   try {
     await deleteAllUserProjectData(auth.email);
     await deleteUserAccount(auth.email);
-    return res.json({ ok: true, message: "Account and all associated data have been permanently deleted." });
+    return res.json({
+      ok: true,
+      message:
+        "Your account and the records in it have been deleted. Photographs you " +
+        "already uploaded stay in our file storage — see the Privacy Policy.",
+    });
   } catch (error) {
     console.error("[auth] delete-account failed", error);
     return res.status(500).json({ error: "Failed to delete account." });

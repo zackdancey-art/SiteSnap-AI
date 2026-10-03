@@ -62,7 +62,12 @@ function SettingsContent() {
   const handleDeleteAccount = () => {
     Alert.alert(
       "Delete Account",
-      "This will permanently delete your account and all your site data, entries, and reports. This cannot be undone.",
+      // Says only what the server does. "Permanently delete … all your site data"
+      // was the promise the audit flagged: nothing in the product deletes a
+      // photograph from file storage, so the files outlive the account.
+      "This deletes your account and the sites, entries and reports in it. It " +
+        "cannot be undone.\n\nPhotographs you already uploaded are not removed " +
+        "from our file storage. See the Privacy Policy.",
       [
         { text: "Cancel", style: "cancel" },
         {
