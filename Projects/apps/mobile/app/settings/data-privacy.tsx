@@ -23,7 +23,7 @@ export default function DataPrivacySettingsScreen() {
     <View style={styles.container}>
       <ScreenHeader title="Data & Privacy" paddingBottom={16} homeFallback="/(tabs)/settings" />
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        <SettingsSection description="Where your data lives and who can see it.">
+        <SettingsSection description="Where your data lives and who can see it. Operated by SiteSnap AI Limited, NZBN 9429053872258.">
           <SettingsCard>
             <SettingsBody>
               <SettingsBodyStrong>Company-scoped access. </SettingsBodyStrong>
@@ -37,10 +37,27 @@ export default function DataPrivacySettingsScreen() {
             <SettingsDividerFull />
             <SettingsBody>
               <SettingsBodyStrong>Deletion & retention. </SettingsBodyStrong>
-              Deleting a record removes it from your app straight away. A copy is kept for 7 years to meet construction and WorkSafe record-keeping requirements, then permanently purged.
+              Deleting a record removes it from your app straight away. The record itself is kept to meet construction and WorkSafe record-keeping requirements — it is marked deleted rather than erased.
+            </SettingsBody>
+            <SettingsDividerFull />
+            <SettingsBody>
+              <SettingsBodyStrong>Deleting your account. </SettingsBodyStrong>
+              This removes your login and most of what is attached to it. Two things survive it, and the Privacy Policy sets out exactly which: the record of your uploads, and the photograph files themselves. Nothing in SiteSnap deletes a stored photograph — not on record delete, not on account delete, not on a schedule.
+            </SettingsBody>
+            <SettingsDividerFull />
+            <SettingsBody>
+              <SettingsBodyStrong>Getting a copy of your data. </SettingsBodyStrong>
+              Email support@getsitesnapai.com with Privacy Request in the subject line and we will put it together by hand, within 20 working days. “Back up data” below saves what is cached on this phone; it is useful, but it is not a full copy of your records.
             </SettingsBody>
           </SettingsCard>
-          {/* TODO(legal): add an NZ Privacy Act / AU Privacy Principles statement here once the Privacy Policy has been reviewed by a lawyer. Do NOT assert compliance until then. */}
+          {/*
+            The Privacy Policy linked below is now written from the code audit rather than
+            from assumption, and it names the operator: SiteSnap AI Limited, NZBN
+            9429053872258. It still has NOT been reviewed by a lawyer — docs/legal/README.md
+            records that and the trigger for getting it done — so nothing here or there
+            asserts compliance with the Privacy Act 2020 or the Australian Privacy
+            Principles. It describes what the software does and leaves the conclusion alone.
+          */}
           <SettingsCard style={{ marginTop: 12 }}>
             <SettingsRow
               icon="download-outline"
@@ -52,7 +69,7 @@ export default function DataPrivacySettingsScreen() {
             <SettingsRow
               icon="cloud-upload-outline"
               label="Back up data"
-              description="Save a copy of your records to this device."
+              description="Save what is cached on this phone. Not a full data export — see Privacy Policy."
               onPress={() => router.push("/backup-data")}
             />
             <SettingsDivider />
