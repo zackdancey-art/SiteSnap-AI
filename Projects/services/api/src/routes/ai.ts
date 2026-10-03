@@ -549,6 +549,23 @@ export function buildDiaryRequest(
     // "json" to appear in the input messages, which SYSTEM_PROMPT satisfies;
     // that is a property of the parameter, not of the model.
     text: { format: { type: "json_object" } },
+    // Do not leave the input on OpenAI's servers.
+    //
+    // The Responses API retains Application State for at least 30 days "by
+    // default, OR when the `store` parameter is set to true" — not only when
+    // it is true (platform.openai.com/docs/guides/your-data). `store` was
+    // never passed anywhere in this codebase, so the default applied: site
+    // notes, per-entry text, photo captions and the photographs themselves
+    // were retained for at least 30 days on every generation.
+    //
+    // Safe to send because nothing on this path uses server-side state. There
+    // is no `previous_response_id` anywhere in the API, no responses.retrieve
+    // call, and one LLM call site — every request carries its whole context.
+    // Verified by search across services/api/src before this was added.
+    //
+    // Abuse-monitoring logs (also up to 30 days) are not affected by `store`
+    // and remain; the privacy policy says so rather than claiming otherwise.
+    store: false,
   };
 }
 
