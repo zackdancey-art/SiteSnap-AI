@@ -142,7 +142,7 @@ Australia, for photographs. Amazon S3 in Sydney holds and stores files for us, i
 agent position as Render. Australia's Privacy Act 1988 is the closest comparable regime to New
 Zealand's of any country our information reaches.
 
-The United States, for three things. Photographs and notes go to OpenAI when you generate an AI
+The United States, for five things. Photographs and notes go to OpenAI when you generate an AI
 diary, described in section 6. Email addresses and invitation links go to Resend to send email.
 Phone numbers and verification codes go to Twilio to send SMS. Crash reports from the server
 go to Sentry. The older photograph bucket named in section 4 is also in the United States.
