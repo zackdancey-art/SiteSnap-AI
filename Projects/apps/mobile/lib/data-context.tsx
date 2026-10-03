@@ -12,6 +12,7 @@ import {
 } from "@/lib/photo-payload-store";
 import { enqueue, peekQueue, dequeue, isNetworkError, updateQueuedPayload } from "@/lib/offline-queue";
 import { drainQueue } from "@/lib/offline-drain";
+import { materializeQueuedPhoto } from "@/lib/photo-bytes";
 import { isManagedMediaUri, toCanonicalPath, toStorablePhotoUri } from "@/lib/photo-uri";
 import { reportMediaFailure } from "@/lib/media-telemetry";
 
@@ -209,6 +210,24 @@ async function uploadPhoto(photo: Entry["photos"][number]): Promise<Entry["photo
     }
   }
   throw lastErr;
+}
+
+/**
+ * The uploader the offline drain is given.
+ *
+ * It differs from `uploadPhoto` in one respect: the bytes come from wherever
+ * they actually are. A photograph that has waited in the queue overnight may
+ * no longer have a readable `uri` — see `lib/photo-bytes.ts` — so it is written
+ * back out to a cache file first, and that file is deleted once the server has
+ * taken the bytes.
+ */
+async function uploadQueuedPhoto(photo: Entry["photos"][number]): Promise<Entry["photos"][number]> {
+  const materialized = materializeQueuedPhoto(photo);
+  try {
+    return await uploadPhoto(materialized.uri === photo.uri ? photo : { ...photo, uri: materialized.uri });
+  } finally {
+    materialized.release();
+  }
 }
 
 /**
@@ -440,7 +459,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       isNetworkError,
       stripPhotoPayloads,
       hydratePhotos,
-      uploadPhoto,
+      uploadPhoto: uploadQueuedPhoto,
       deletePhotoPayloads,
       isManagedMediaUri,
       updateQueuedPayload,
