@@ -610,7 +610,13 @@ if (op.type === "addEntry") {
 
 **Verification required when it is fixed.** Mobile has no test harness (`find Projects/apps -name '*.test.ts*'` returns nothing), so the red-on-revert proof has to come from either the first mobile test setup or an API-side test that asserts the posted payload shape. A device pass alone cannot prove it, because the device displays the photographs whether or not they uploaded — which is the whole problem.
 
-**Disposition:** Open, unfixed, recorded 3 October 2026 from `fix/stage-1-field-app-defects`. Ranked first in `docs/STAGE-1-3-REVIEW.md` Part 8, ahead of every feature on the backlog.
+**Disposition:** **Fixed** on `fix/offline-photo-sync`, 4 October 2026. Proved red first (`7e843a8`), then fixed (`9832592`).
+
+The drain loop was extracted from `data-context.tsx` into `apps/mobile/lib/offline-drain.ts` as a pure, dependency-injected function, because the verification this entry says is required could not otherwise be written: `data-context.tsx` cannot load under `node --test`. The extraction was a **verbatim transcription including the defect**, the provider was rewired to call it, and only then was it fixed — so the module under test is the shipped path, not a parallel copy. `apps/mobile` now has its first test harness, 15 tests in 2 files, zero new dependencies, no native rebuild.
+
+The fix is that the drain uploads before it posts. The bytes wait in the AsyncStorage payload store that `savePhotoPayloads` already wrote at capture time, so they survive an app restart and a phone reboot; `lib/photo-bytes.ts` materialises them back to a cache file at drain time because `uploadPhotoOnce` sends from a `uri`, and releases it afterwards. Per-photograph progress is written back into the queued op, so a drain that fails on the fourth of four photographs retries one rather than four and does not duplicate the three already in the bucket.
+
+**L6 got better, not worse.** The queued path now calls `deletePhotoPayloads` after a successful sync, released *after* the dequeue so a crash in between orphans bytes rather than losing them. Before this branch nothing ever deleted a queued payload.
 
 ### L29 — *(reserved)*
 
@@ -631,7 +637,11 @@ Not retrying a request the server has rejected is correct — an op that fails d
 
 **The correct shape** is a dead-letter state rather than a delete: mark the op failed, leave it in local storage, stop retrying it, and surface it in the UI as "this entry could not be synced" with the server's reason. That keeps the queue unblocked, which is what the `dequeue` was for, without destroying the record.
 
-**Disposition:** Open, unfixed. Fix alongside L28 — the same branch, and in that order, because an L28 fix that fails partway must not be silently swallowed by this.
+**Disposition:** **Fixed** on `fix/offline-photo-sync`, 4 October 2026 (`5e48e0b`). Dead-letter state rather than a delete, as this entry specified: `markOpFailed` sets `status: "failed"`, records the stage, HTTP status, the server's message, the time and how many photographs had already uploaded, and leaves the op in storage. Nothing in the app deletes a failed op.
+
+Visible from the app rather than from a log, in two places: a tappable banner on the sites list, and `app/settings/offline-sync.tsx` listing each failed op with what it was and why it failed. Retried by hand, not on a timer — the failures that land here have been refused on their merits, and the thing that has to change is usually outside the app, so the person who fixed it is the one who knows a retry is now worth making. There is deliberately **no discard action**: this is a compliance-evidence product and that deletion is the owner's decision, not a button.
+
+**A second defect in the same four lines, found while fixing this one.** The old loop `break`ed on *any* error, network or not. So one op the server refused did not merely vanish — it stopped every op queued behind it from being attempted at all, for as long as it sat at the head of the queue. Only a network error breaks now; a refusal dead-letters and the drain continues. Test: "a refused op does not stop the ops behind it".
 
 ### L31 — `EXPO_PUBLIC_SENTRY_DSN` is set in the **API's** `.env` and empty in the **mobile app's**, so there is no error telemetry from the field — MEDIUM (observability; the reason L28 and L30 would go unnoticed)
 
@@ -652,7 +662,76 @@ Nothing in the API reads an `EXPO_PUBLIC_`-prefixed variable — the prefix is E
 
 **One decision it creates rather than removes.** The Sentry init sets `attachScreenshot: true` (`apps/mobile/app/_layout.tsx:28`), so a crash report may carry a screenshot of a site photograph — which means supplying the mobile DSN sends image content to a US-hosted service and is a privacy decision, not a configuration switch. It is also the third US exposure path, alongside OpenAI and the legacy `us-east-1` bucket (see L32 and `docs/legal/README.md`). Recommended: `attachScreenshot: false` until L28 is closed.
 
-**Disposition:** Open. Owner action. Blocks nothing technically and blocks observing everything.
+**Disposition:** **Partly closed** on `fix/offline-photo-sync`, 4 October 2026 (`34b0cd2`, `5c0ed26`). The DSN half remains owner action and was not touched, read or printed. The two halves that were ours are done:
+
+**`attachScreenshot` is now `false`**, as this entry recommended. The reasoning is at the call site: a screenshot is a photograph of whatever was on screen, which on the capture screens is the note text, the site address and the photographs themselves — precisely what the redaction module below exists to withhold.
+
+**The failure modes now report themselves.** `lib/sync-telemetry.ts` raises a Sentry event for each of `queued-op-dead-lettered`, `queued-photo-upload-failed` and `queued-photo-bytes-missing`, de-duplicated per session so forty refused ops report forty distinct failures rather than forty copies of one. The payload rule is enforced by code rather than asserted in a comment: `lib/sync-telemetry-redaction.ts` imports nothing with a runtime and exports `transmittablePayload`, which *is* the whole payload, so its test asserts over all of it rather than over a sample. Identifiers and counts only. There is no `uri` field at all, so the signed-media `?sig=`/`?exp=` pair has nowhere to enter — the same closure as the logger fix, by structure rather than by filtering.
+
+Two leaks that were found while building it and are now closed: a server's own response message is withheld when a `status` is present, because we do not control what a 4xx body says and Stage 1's timecard validation echoes submitted values into it; and a server-originated `Error` is never handed to Sentry as the exception, because Sentry titles an issue with the exception's own message, which would have re-leaked in the title exactly what the payload had just withheld.
+
+**The disclosure consequence was carried, not deferred.** Section 5 of the published Privacy Policy said crash reports come from the server, and section 10 listed app crash reporting among the things not switched on. Both are now false and both were corrected in the canonical source and in both render copies, with the anti-drift check run to prove it (see L36 for the copies that check does not cover).
+
+### L36 — The supervisor portal publishes its **own** Privacy Policy and Terms, outside the anti-drift check, still carrying the superseded text — HIGH (disclosure accuracy; live false statements, including most of the thirteen the October remediation existed to remove)
+
+**Found while carrying the Sentry correction of L31, by grepping for other stale crash-reporting claims.**
+
+The October legal remediation replaced the canonical `docs/legal/` source, both in-app copies and both marketing-site copies — six files — and `Projects/scripts/ci.sh` was given an anti-drift check over exactly those six. `Projects/apps/supervisor-web/app/privacy/page.tsx` and `app/terms/page.tsx` are a **seventh and eighth** legal document. They were never touched, they carry no `BEGIN LEGAL TEXT` marker, and the drift check does not know they exist — so nothing reported the disagreement. The check passing is not evidence about them.
+
+They are not dead files. Both are reachable Next.js routes, linked from the live portal UI in two places: `app/settings/page.tsx:623` and `components/ProfileDropdown.tsx:150`.
+
+**What they still say.** Nearly the whole table of "claims in the previous drafts that the code contradicts" in `docs/legal/README.md`, verbatim, still published:
+
+| Still live on the portal | Why it is false |
+|---|---|
+| "Usage data: anonymised analytics events to improve the product" (`privacy/page.tsx:53`) | There is no analytics SDK in the product at all |
+| "Improving the product through aggregate, anonymised analytics" (`:62`) | Same |
+| "Resend / SendGrid (USA)" (`:71`) | No `SENDGRID_API_KEY` is configured anywhere; SendGrid receives nothing |
+| "Deleted account data is permanently purged within 30 days" (`:80`) | There is no scheduled job of any kind in the API |
+| "Portability — request a machine-readable data export" (`:89`) | `backup-data.tsx` reads the device cache and omits timesheets, incidents, inspections, signatures, locations, photographs and the account record |
+| "All overseas transfers … comply with … IPP 12" (`:76`) | Asserts a conclusion with no analysis, about providers it places in the wrong countries |
+| Processor list: OpenAI, Resend/SendGrid, Twilio, Sentry, AWS S3 | **Omits Render entirely**, so the Singapore hosting leg — the one the whole Principle 12 position turns on — is undisclosed. Places S3 in no country. |
+| "Subscriptions are billed in advance in New Zealand Dollars" and "change pricing with 30 days' notice" (`terms/page.tsx:75`, `:107`) | There is no payment code in the repo. No Stripe, no RevenueCat, no in-app purchase dependency. The product cannot charge anyone. |
+
+The retention-period and HSWA wording is the same uncited seven-year claim already flagged as question 3 for a lawyer in `docs/legal/README.md`.
+
+**The generalisable part, and the reason severity is HIGH rather than MEDIUM.** The remediation was thorough about the copies it knew about and then *built a check over that same set*. A drift check can only prove the copies it enumerates agree; it cannot discover a copy. So the check's green result actively created confidence about documents it had never read — the same failure shape as L35 (a copy defect fixed at the layer nobody reads) and as the vacuity findings generally. **The right question after writing an anti-drift check is not "does it pass" but "how would I find a copy it does not list", and the answer here was one grep.**
+
+**Not fixed on `fix/offline-photo-sync`, deliberately.** Two reasons, and the first is the real one. Making these pages correct means rendering 2,612 and 1,308 words of reviewed legal text through a third layout, and the owner has twice reserved final say on published legal wording; replacing two complete legal documents inside a branch about offline photograph sync would also bury it in review and make it impossible to revert on its own. Extending the drift check to cover them *first* would simply turn CI red and block the branch. This is the next piece of legal work, not a line of this one.
+
+**What the fix is, when it is taken.** Port the reviewed canonical text into both portal pages as data rendered through their existing `Section` component (the shape `apps/mobile/constants/legal/*-content.ts` already proves), add the `BEGIN/END LEGAL TEXT` markers, and extend `assert_legal_copies` to compare three render targets per document instead of two — so that the check's green result finally means what it appears to mean. `docs/legal/README.md` records a deliberate decision against a permanent generator; a one-off transcription respects that.
+
+**Disposition:** Open, recorded 4 October 2026 from `fix/offline-photo-sync`. **Highest-priority disclosure item**, ahead of L32 and L33, because unlike those it is not a question of wording accuracy about a real feature — it is text the owner has already reviewed and replaced, still being served.
+
+### L37 — Nothing in the app rendered the sync state at all, so the badge the fix was to be verified against did not exist — MEDIUM (observability; the fix for L28 was unobservable by the same mechanism as L28)
+
+`data-context.tsx` has exposed `syncStatus`, `pendingCount` and `isPending` for as long as the queue has existed. **No component read any of them.** Grepped across `app/` and `components/`: before this branch there were zero renderers. There was no pending badge, no "waiting to send" indicator, and no surface of any kind that distinguished an entry held on the phone from an entry the server has.
+
+This is worth its own entry rather than a footnote on L28, because it is the same defect one level up. L28 was a silent data loss; this is the silence. A user had no way to know a write was still queued, so "it looks saved" was the only available signal — which is precisely the signal L28 made unreliable.
+
+It also made the obvious device-verification instruction unperformable. "Capture in airplane mode, turn the network on, wait for the badge to clear, then check from somewhere that is not the phone" cannot be followed on a build with no badge; the only honest substitute is to watch the pending count go to zero and then check the second surface.
+
+**Partly closed by `5e48e0b` on `fix/offline-photo-sync`**, which added the first two renderers: `components/SyncStatusBanner.tsx` on the sites list, and the Offline Sync row and screen in Settings. The banner renders nothing when there is nothing to say. That is a sync *surface*, not a per-entry badge — an individual entry in a list still does not show whether it has reached the server.
+
+**Disposition:** Partly open. The per-entry indicator is the remaining half and is the more useful one, because the question a person actually asks is "has *this* entry arrived", not "is anything pending".
+
+### L38 — Only `addSite` and `addEntry` are ever queued; an offline **edit or delete** fails and is lost — MEDIUM (data loss; narrower than L28 but the same silence)
+
+`drainOfflineQueue` has branches for `updateEntry`, `deleteEntry` and `deleteSite`. Nothing enqueues them. Grepping every `enqueue(` call site in `apps/mobile`: only `addSite` and `addEntry`. So three of the five `QueuedOpType` members are **unreachable** — dead branches that have never executed.
+
+The live half of the finding is what happens instead. `updateEntry` and `deleteEntry` have no network-error catch at all: offline, the `apiJson` call rejects and the error propagates to the caller. So editing an entry with no coverage — correcting a crew count, fixing a note, adding a photograph to yesterday's record — fails at the point of saving and is never queued for later. Whether the user is told depends on the calling screen, which is not the same guarantee as the capture path has.
+
+Discovered while fixing L28 and not expanded into, because adding three queued op types brings ordering and conflict questions with it (an edit queued behind the create of the entry it edits; a delete queued behind an edit) that are the offline-first architecture piece, not this branch. The dead branches were kept rather than deleted precisely because that work is coming.
+
+**Disposition:** Open, recorded 4 October 2026. Scope it with the offline-first architecture work rather than alone — the queue needs ordering guarantees before it can safely carry mutations.
+
+### L39 — The server accepts an entry photograph with a `file://` uri and no storage key — LOW (missing validation; the defect L28 would have announced itself through)
+
+`EntrySchema` types photographs as `z.array(z.record(z.unknown()))`, so the API will store whatever shape the client posts, including a photograph whose `uri` points at a path on a phone. Nothing rejects it and nothing warns.
+
+This is why it is recorded even though no client now sends one. For the months L28 was live, every offline-captured entry posted photographs the server could never serve, and **the server was in a position to notice and did not**. A validation rule rejecting an entry photograph without a managed storage key would have turned L28 from a silent data loss into a 400 on the first offline entry ever synced. The permissive schema is also why L28 needed no migration to fix — the same looseness that hid it let storage keys pass straight through — so this is a trade-off to decide deliberately rather than an oversight to patch reflexively.
+
+**Disposition:** Open. Worth adding as a server-side assertion once the client is known good, because it converts any future recurrence of this class of defect into a loud failure. Do not add it before the fixed client is actually deployed — it would reject entries queued by an older build that are still sitting on a phone.
 
 ### L32 — Camera GPS coordinates are extracted and persisted, while the published privacy text said they were not stored — MEDIUM (disclosure accuracy; the data itself is arguably wanted)
 
