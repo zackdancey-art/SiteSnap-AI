@@ -118,10 +118,10 @@ hoursRegular: z.number().min(0).max(24),
 - **The hours chip is unconditionally success-green** (597-599): `hoursChip: { backgroundColor: Colors.success + "18" }`, `hoursChipText: { color: Colors.success }`. There is no zero state and no invalid state — `0.0h` renders in the identical green as `8.0h`. That is the green in your screenshot, and it is the reason the row reads as fine.
 - On AM/PM: the picker is `mode="time"` with a spinner display, and `hhmmToDate` (82-87) builds a `Date` at today's H:M. The AM/PM wheel is unconstrained — a picker opened for "finish" can land on AM, and nothing anywhere requires finish to be after start.
 
-**Q5 — existing rows, and how to find them.** `crew_timecards` is **FORCE ROW LEVEL SECURITY** (applied by migration 025 through a dynamic `DO` loop over `['site_members','material_deliveries','crew_timecards','inspections']` — note that the `grep -l "FORCE ROW LEVEL SECURITY"` procedure in `CLAUDE.md` misses all four of those, which is a separate finding below). So a bare query returns **zero rows even as the database owner**. Run this in the Render psql shell, read-only, both statements together:
+**Q5 — existing rows, and how to find them.** `crew_timecards` is **FORCE ROW LEVEL SECURITY** (applied by migration 025 through a dynamic `DO` loop over `['site_members','material_deliveries','crew_timecards','inspections']` — note that the `grep -l "FORCE ROW LEVEL SECURITY"` procedure in `CLAUDE.md` misses all four of those, which is a separate finding below). So a bare query returns **zero rows even as the database owner**. Run this in the Render psql shell, read-only, both statements together. **Substitute the owner's account email for `<owner email>` on the first line** — `company_id` is `'company_' || md5(owner_email)`, so the literal has to be the real address for the query to return anything, and leaving it parameterised here keeps the tenant-key derivation out of a document that may be handed to a customer:
 
 ```sql
-SET app.company_id = 'company_' || md5('zackdancey@gmail.com');
+SET app.company_id = 'company_' || md5('<owner email>');
 
 SELECT id, date, worker_name, start_time, end_time, break_minutes,
        hours_regular, hours_overtime, deleted_at,
@@ -501,6 +501,12 @@ Line 477 explains why the row was not hand-deleted: `uploads` is FORCE-RLS'd and
 
 All six carry `3 July 2026` and `SiteSnap AI Limited`. Two inconsistencies already exist: the **two marketing pages have no draft banner** while the four in-app screens do, so the public-facing copies look finished; and the **marketing footer asserts `NZBN 9429053872258`** while the in-app notice says the entity must be confirmed *"once the company is incorporated."* One of those is wrong, and it is a question only you can answer.
 
+> **Answered, and in the opposite direction to the one this report expected.** **NZBN 9429053872258 is correct and SiteSnap AI Limited is incorporated.** So the marketing footer is right and the **in-app wording is the stale claim** — `settings/data-privacy.tsx`'s *"once the company is incorporated"* must go. Stage 3 uses **SiteSnap AI Limited, NZBN 9429053872258** consistently across all six documents and removes the pending-incorporation wording wherever it appears.
+>
+> This is an upgrade rather than a correction: there is a real legal person behind the Terms and a named agency for the Privacy Act, instead of documents signed by nobody in particular.
+>
+> On how it was settled: this report could **not** verify the NZBN. Every path under the register API returns 404 without a subscription key — including a deliberately invalid NZBN and the service root — so "the register returned 404" carried no information about this one. The positive control is the only reason that was reported as *cannot verify* rather than as *does not exist*.
+
 **Anti-drift proposal, deliberately small.** This is a four-page problem and does not deserve a build step, a CMS or a generator.
 
 Put the canonical text in **`docs/legal/privacy-policy.md`** and **`docs/legal/terms-of-service.md`**, with a one-line header in each naming the four render targets. Then add one shell check to `Projects/scripts/ci.sh` that compares a normalised extraction (tags and whitespace stripped) of each rendered copy against its canonical source and fails the build on divergence. Roughly fifteen lines of `sed` and `diff`, no dependency, no codegen. Editing the markdown without updating the four copies fails CI; updating a copy without the markdown fails CI. That is the whole mechanism.
@@ -668,7 +674,7 @@ Separate from what merges do on their own.
 7. **Apple Developer portal → Identifiers → `nz.getsitesnapai.app`:** confirm **Associated Domains** is enabled on the App ID. EAS normally enables it during the build's credentials step; confirm rather than assume.
 8. **After the build installs:** tap the invite link from Messages or Notes — **not** from Safari's address bar, which bypasses universal links by design. A long-press showing "Open in SiteSnap" is the positive confirmation.
 9. **Delete the app from your phone and tap the link again** to see the no-app path. This is the only way to test it (see part 6).
-10. **Decide the entity question.** The marketing footer asserts `NZBN 9429053872258`; the in-app notice says the entity is pending incorporation. Stage 3 needs one answer.
+10. ~~**Decide the entity question.**~~ **Answered: SiteSnap AI Limited is incorporated and NZBN 9429053872258 is correct.** The marketing footer is right; the in-app *"once the company is incorporated"* is the stale claim and Stage 3 removes it. See the note in A6.
 11. ~~**Decide on `store: false`**~~ **Answered: approved**, to land in Stage 1 as its own commit, after confirming nothing relies on server-side response state.
 12. **Submit to TestFlight** (`eas submit`) and install from there.
 
