@@ -1,6 +1,11 @@
 node_modules
 dist
 **/dist
+
+# Compiled output of the mobile test run (`apps/mobile/package.json` -> test).
+# Same reason as dist: it is tsc output, not source, and has no tsconfig project.
+dist-test
+**/dist-test
 **/node_modules
 .env
 services/api/load-test.ts

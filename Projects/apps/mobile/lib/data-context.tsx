@@ -6,10 +6,12 @@ import { useAuth, isTokenExpiringSoon } from "@/lib/auth-context";
 import {
   deletePhotoPayloads,
   hydrateEntriesWithPhotoPayloads,
+  hydratePhotos,
   savePhotoPayloads,
   stripPhotoPayloads,
 } from "@/lib/photo-payload-store";
-import { enqueue, peekQueue, dequeue, isNetworkError } from "@/lib/offline-queue";
+import { enqueue, peekQueue, dequeue, isNetworkError, updateQueuedPayload } from "@/lib/offline-queue";
+import { drainQueue } from "@/lib/offline-drain";
 import { isManagedMediaUri, toCanonicalPath, toStorablePhotoUri } from "@/lib/photo-uri";
 import { reportMediaFailure } from "@/lib/media-telemetry";
 
@@ -427,47 +429,24 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const [lastSyncError, setLastSyncError] = useState<string | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
 
+  // The loop itself lives in `lib/offline-drain.ts` so it can be tested without a
+  // simulator; everything with an effect is injected from here. See that file's
+  // header for why, and `lib/offline-drain.test.ts` for what it proves.
   const drainOfflineQueue = async () => {
-    const queue = await peekQueue();
-    if (queue.length === 0) return;
-    setPendingCount(queue.length);
-    for (const op of queue) {
-      try {
-        if (op.type === "addEntry") {
-          const data = op.payload as Omit<Entry, "id" | "timestamp" | "createdAt">;
-          await apiJson<{ entry: Entry }>("/projects/entries", {
-            method: "POST",
-            body: JSON.stringify(stripPhotoPayloads({ ...data } as Entry)),
-          });
-        } else if (op.type === "addSite") {
-          await apiJson<{ site: Site }>("/projects/sites", {
-            method: "POST",
-            body: JSON.stringify(op.payload),
-          });
-        } else if (op.type === "updateEntry") {
-          const { id, patch } = op.payload as { id: string; patch: Partial<Entry> };
-          await apiJson<{ entry: Entry }>(`/projects/entries/${id}`, {
-            method: "PATCH",
-            body: JSON.stringify(patch),
-          });
-        } else if (op.type === "deleteEntry") {
-          await apiJson<{ ok: boolean }>(`/projects/entries/${op.payload as string}`, { method: "DELETE" });
-        } else if (op.type === "deleteSite") {
-          await apiJson<{ ok: boolean }>(`/projects/sites/${op.payload as string}`, { method: "DELETE" });
-        }
-        await dequeue(op.id);
-      } catch (err) {
-        if (!isNetworkError(err)) {
-          // Non-network error (e.g. 4xx): drop the op to avoid infinite retry
-          await dequeue(op.id);
-          console.warn("[queue] Dropping unrecoverable queued op", op.type, err);
-        }
-        // Network error: leave in queue for next refresh
-        break;
-      }
-    }
-    const remaining = await peekQueue();
-    setPendingCount(remaining.length);
+    await drainQueue({
+      peekQueue,
+      dequeue,
+      apiJson: (path, init) => apiJson(path, init as RequestInit),
+      isNetworkError,
+      stripPhotoPayloads,
+      hydratePhotos,
+      uploadPhoto,
+      deletePhotoPayloads,
+      isManagedMediaUri,
+      updateQueuedPayload,
+      onPending: setPendingCount,
+      warn: (...args) => console.warn(...args),
+    });
   };
 
   const refresh = async () => {

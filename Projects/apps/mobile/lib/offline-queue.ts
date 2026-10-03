@@ -40,6 +40,28 @@ export async function dequeue(id: string): Promise<void> {
   await saveQueue(queue.filter((op) => op.id !== id));
 }
 
+/**
+ * Replace one queued op's payload in place, keeping its id and queue position.
+ *
+ * The drain needs this to record per-photograph progress. Uploading four
+ * photographs is four independent network calls; if the fourth fails the first
+ * three are already on the server and their storage keys exist only in the
+ * drain's local variable. Writing the partial result back means the retry sees
+ * three photographs already carrying `/api/uploads/…` uris, which
+ * `uploadPhotoOnce` returns early for — so the retry uploads one photograph,
+ * not four, and the bucket does not accumulate a duplicate per attempt.
+ *
+ * A missing id is a no-op rather than an error: the op may have been dequeued
+ * by a concurrent drain, and in that case there is nothing to record.
+ */
+export async function updateQueuedPayload(id: string, payload: unknown): Promise<void> {
+  const queue = await loadQueue();
+  const index = queue.findIndex((op) => op.id === id);
+  if (index === -1) return;
+  queue[index] = { ...queue[index], payload };
+  await saveQueue(queue);
+}
+
 export async function peekQueue(): Promise<QueuedOp[]> {
   return loadQueue();
 }

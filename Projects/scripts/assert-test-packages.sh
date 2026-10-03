@@ -19,7 +19,8 @@ cd "$(dirname "$0")/.."
 
 # Packages expected to declare a "test" script, one per line, sorted.
 # Update this when a package gains or loses a test suite — that is the point.
-EXPECTED="services-api"
+EXPECTED="apps-mobile
+services-api"
 
 ACTUAL=$(
   for f in package.json shared/package.json services/*/package.json apps/*/package.json; do
