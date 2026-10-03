@@ -1,5 +1,5 @@
 import type { Entry, Photo } from "./types";
-import type { QueuedOp } from "./offline-queue";
+import type { QueuedOp, QueuedOpFailure } from "./offline-queue";
 
 /**
  * The offline queue drain, lifted out of DataProvider so it can be tested.
@@ -48,16 +48,27 @@ export interface DrainDeps {
   isManagedMediaUri: (uri: string | undefined | null) => boolean;
   updateQueuedPayload: (id: string, payload: unknown) => Promise<void>;
 
-  /** Mirrors the inline loop's `setPendingCount(queue.length)` before the first op. */
+  /**
+   * Dead-letters one op instead of deleting it. AUDIT L30 — the old loop
+   * dequeued anything the server refused, so the work vanished and the only
+   * record was a console line on a device with no console.
+   */
+  markOpFailed: (id: string, failure: Omit<QueuedOpFailure, "failedAt">) => Promise<void>;
+
+  /** Ops still waiting for coverage. */
   onPending: (count: number) => void;
+  /** Ops the drain has given up on, which the user must be shown. */
+  onFailed: (count: number) => void;
   warn: (...args: unknown[]) => void;
 }
 
 export interface DrainResult {
   /** Ops removed from the queue because the server accepted them. */
   synced: number;
-  /** Ops still in the queue when the drain stopped. */
+  /** Ops still pending when the drain stopped — waiting for coverage. */
   remaining: number;
+  /** Ops dead-lettered: retained, not retried, and needing a person. */
+  failed: number;
 }
 
 /**
@@ -108,10 +119,33 @@ async function uploadEntryPhotos(
   return photos;
 }
 
+/** `apiJson` attaches the response status to the error it throws. */
+function statusOf(err: unknown): number | undefined {
+  const status = (err as { status?: unknown } | null)?.status;
+  return typeof status === "number" ? status : undefined;
+}
+
+/**
+ * The message shown to the user beside a failed sync.
+ *
+ * Truncated because the API returns a JSON body for some errors and the whole
+ * of it is neither readable in a row nor wanted in telemetry.
+ */
+function messageOf(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const collapsed = raw.replace(/\s+/g, " ").trim();
+  return collapsed.length > 200 ? `${collapsed.slice(0, 199)}…` : collapsed || "Unknown error";
+}
+
 export async function drainQueue(deps: DrainDeps): Promise<DrainResult> {
-  const queue = await deps.peekQueue();
-  if (queue.length === 0) return { synced: 0, remaining: 0 };
+  const all = await deps.peekQueue();
+  // A dead-lettered op is not retried and does not hold the badge open. It sits
+  // in the failed list until a person asks for it to be tried again.
+  const queue = all.filter((op) => op.status !== "failed");
+  const failedBefore = all.length - queue.length;
   deps.onPending(queue.length);
+  deps.onFailed(failedBefore);
+  if (queue.length === 0) return { synced: 0, remaining: 0, failed: failedBefore };
 
   let synced = 0;
 
@@ -120,10 +154,18 @@ export async function drainQueue(deps: DrainDeps): Promise<DrainResult> {
     // after the op has left the queue, so a crash in between orphans bytes
     // (AUDIT L6, recoverable) rather than losing them (L28, not recoverable).
     let releasable: string[] = [];
+    // Which half of the work was in flight when it threw. Reported on a failure
+    // because "the photographs would not upload" and "the server refused the
+    // entry" need different things done about them.
+    let stage: QueuedOpFailure["stage"] = "request";
+    let photosUploaded = 0;
     try {
       if (op.type === "addEntry") {
         const data = op.payload as Entry;
+        stage = "upload";
         const photos = await uploadEntryPhotos(op, data, deps);
+        photosUploaded = photos.filter((photo) => deps.isManagedMediaUri(photo.uri)).length;
+        stage = "request";
         await deps.apiJson("/projects/entries", {
           method: "POST",
           body: JSON.stringify(deps.stripPhotoPayloads({ ...data, photos } as Entry)),
@@ -149,17 +191,37 @@ export async function drainQueue(deps: DrainDeps): Promise<DrainResult> {
       synced += 1;
       if (releasable.length > 0) await deps.deletePhotoPayloads(releasable);
     } catch (err) {
-      if (!deps.isNetworkError(err)) {
-        // Non-network error (e.g. 4xx): drop the op to avoid infinite retry
-        await deps.dequeue(op.id);
-        deps.warn("[queue] Dropping unrecoverable queued op", op.type, err);
+      if (deps.isNetworkError(err)) {
+        // Coverage is gone. The op stays exactly as it is, with whatever
+        // per-photograph progress was written back, and so does every op behind
+        // it — there is nothing to be gained by trying them without a network.
+        break;
       }
-      // Network error: leave in queue for next refresh
-      break;
+
+      // The server answered and refused. Retrying will get the same answer, so
+      // the op stops consuming attempts — but it is KEPT, with enough context
+      // to say what happened, and the user is shown that it did not sync.
+      // AUDIT L30; previously this was a dequeue and a console.warn.
+      await deps.markOpFailed(op.id, {
+        stage,
+        status: statusOf(err),
+        message: messageOf(err),
+        ...(op.type === "addEntry" ? { photosUploaded } : {}),
+      });
+      deps.warn("[queue] Retained a queued op the server refused", op.type, err);
+      // Continue rather than break: one refused op must not stop the ops behind
+      // it from syncing, which is the other half of why the old loop lost work.
+      continue;
     }
   }
 
-  const remaining = await deps.peekQueue();
-  deps.onPending(remaining.length);
-  return { synced, remaining: remaining.length };
+  const after = await deps.peekQueue();
+  const stillPending = after.filter((op) => op.status !== "failed");
+  deps.onPending(stillPending.length);
+  deps.onFailed(after.length - stillPending.length);
+  return {
+    synced,
+    remaining: stillPending.length,
+    failed: after.length - stillPending.length,
+  };
 }

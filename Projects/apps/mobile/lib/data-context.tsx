@@ -10,7 +10,17 @@ import {
   savePhotoPayloads,
   stripPhotoPayloads,
 } from "@/lib/photo-payload-store";
-import { enqueue, peekQueue, dequeue, isNetworkError, updateQueuedPayload } from "@/lib/offline-queue";
+import {
+  enqueue,
+  peekQueue,
+  peekFailedQueue,
+  dequeue,
+  isNetworkError,
+  markOpFailed,
+  retryFailedOps,
+  updateQueuedPayload,
+  type QueuedOp,
+} from "@/lib/offline-queue";
 import { drainQueue } from "@/lib/offline-drain";
 import { materializeQueuedPhoto } from "@/lib/photo-bytes";
 import { isManagedMediaUri, toCanonicalPath, toStorablePhotoUri } from "@/lib/photo-uri";
@@ -23,7 +33,16 @@ interface DataContextType {
   templates: SiteTemplate[];
   syncStatus: "idle" | "syncing" | "offline" | "error";
   lastSyncError: string | null;
+  /** Ops waiting for coverage. */
   pendingCount: number;
+  /**
+   * Ops the server refused and the drain has given up on. AUDIT L30: these used
+   * to be deleted, so this number and the list below it are the only way anyone
+   * holding the phone can learn that work did not sync.
+   */
+  failedOps: QueuedOp[];
+  /** Hands failed ops back to the drain. Returns how many were queued again. */
+  retryFailedSync: (ids?: string[]) => Promise<number>;
   addSite: (site: Omit<Site, "id" | "createdAt">) => Promise<void>;
   deleteSite: (id: string) => Promise<void>;
   addEntry: (
@@ -447,6 +466,17 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const [syncStatus, setSyncStatus] = useState<"idle" | "syncing" | "offline" | "error">("idle");
   const [lastSyncError, setLastSyncError] = useState<string | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
+  const [failedOps, setFailedOps] = useState<QueuedOp[]>([]);
+
+  // The failed list is read from storage rather than accumulated in memory:
+  // ops dead-lettered on a previous launch must still be visible on this one.
+  const refreshFailedOps = React.useCallback(async () => {
+    try {
+      setFailedOps(await peekFailedQueue());
+    } catch {
+      // Storage being unreadable must not take the screen down with it.
+    }
+  }, []);
 
   // The loop itself lives in `lib/offline-drain.ts` so it can be tested without a
   // simulator; everything with an effect is injected from here. See that file's
@@ -463,9 +493,21 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       deletePhotoPayloads,
       isManagedMediaUri,
       updateQueuedPayload,
+      markOpFailed,
       onPending: setPendingCount,
+      onFailed: () => {
+        // The count comes back with the list, so there is one source for both.
+        void refreshFailedOps();
+      },
       warn: (...args) => console.warn(...args),
     });
+  };
+
+  const retryFailedSync = async (ids?: string[]) => {
+    const retried = await retryFailedOps(ids);
+    await refreshFailedOps();
+    if (retried > 0) await drainOfflineQueue();
+    return retried;
   };
 
   const refresh = async () => {
@@ -521,6 +563,15 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       }
     })();
   }, [authLoading, isAuthenticated, user?.email, token]);
+
+  // An op dead-lettered on a previous launch must be visible on this one before
+  // any drain runs — the phone may not have coverage again for days.
+  useEffect(() => {
+    void refreshFailedOps();
+    peekQueue()
+      .then((queue) => setPendingCount(queue.filter((op) => op.status !== "failed").length))
+      .catch(() => {});
+  }, [refreshFailedOps]);
 
   useEffect(() => {
     if (authLoading) return;
@@ -809,6 +860,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         syncStatus,
         lastSyncError,
         pendingCount,
+        failedOps,
+        retryFailedSync,
         addSite,
         deleteSite,
         addEntry,

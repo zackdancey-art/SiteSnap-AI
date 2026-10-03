@@ -18,6 +18,7 @@ import { SettingsCard, SettingsSection } from "@/components/SettingsSection";
 import { TabScreenInsets, useTabScreenInsets } from "@/lib/useScreenInsets";
 import Colors from "@/constants/colors";
 import { DEFAULT_PROFILE, getLocalProfile } from "@/lib/profile-store";
+import { useData } from "@/lib/data-context";
 
 /**
  * Settings — a drill-down index, not a single long page.
@@ -50,6 +51,7 @@ export default function SettingsScreen() {
 function SettingsContent() {
   const insets = useTabScreenInsets();
   const { user, logout, token } = useAuth();
+  const { pendingCount, failedOps } = useData();
   const [profile, setProfile] = useState(DEFAULT_PROFILE);
   const [deletingAccount, setDeletingAccount] = useState(false);
 
@@ -164,6 +166,23 @@ function SettingsContent() {
               label="Data & Privacy"
               description="Where your data lives and who can see it."
               onPress={() => router.push("/settings/data-privacy")}
+            />
+            <SettingsDivider />
+            <SettingsRow
+              icon={failedOps.length > 0 ? "alert-circle-outline" : "cloud-upload-outline"}
+              label="Offline Sync"
+              // The row says the count itself rather than only leading to it:
+              // "did not send" has to be legible without opening anything.
+              // AUDIT L30.
+              description={
+                failedOps.length > 0
+                  ? `${failedOps.length} ${failedOps.length === 1 ? "item" : "items"} did not send.`
+                  : pendingCount > 0
+                    ? `${pendingCount} ${pendingCount === 1 ? "item" : "items"} waiting for coverage.`
+                    : "Everything on this phone has been sent."
+              }
+              danger={failedOps.length > 0}
+              onPress={() => router.push("/settings/offline-sync")}
             />
             <SettingsDivider />
             <SettingsRow

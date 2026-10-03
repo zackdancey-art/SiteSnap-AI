@@ -6,7 +6,10 @@ import {
   enqueue,
   dequeue,
   isNetworkError,
+  markOpFailed,
+  peekFailedQueue,
   peekQueue,
+  retryFailedOps,
   updateQueuedPayload,
 } from "./offline-queue";
 import {
@@ -99,10 +102,30 @@ function networkError(): Error {
 }
 
 /**
+ * What the server refusing something looks like. `apiJson` throws an Error with
+ * the response status attached, and `isNetworkError` reads false for it — which
+ * is precisely the class of failure the old loop deleted.
+ */
+function serverRefusal(status: number, message: string): Error {
+  return Object.assign(new Error(message), { status });
+}
+
+interface RecorderOptions {
+  /**
+   * 1-based index of the upload call that should fail; 0 means none fail.
+   * Defaults to a network error — pass `uploadError` for anything else.
+   */
+  failUploadOnCall?: number;
+  uploadError?: Error;
+  /** Thrown by `apiJson` instead of recording the request. */
+  postError?: Error;
+}
+
+/**
  * @param failUploadOnCall 1-based index of the upload call that should fail
  *                         with a network error; 0 means none fail.
  */
-function recorder(failUploadOnCall = 0): Recorder {
+function recorder(failUploadOnCall = 0, options: RecorderOptions = {}): Recorder {
   const posted: { path: string; body: Entry }[] = [];
   const uploaded: string[] = [];
   const released: string[] = [];
@@ -120,13 +143,17 @@ function recorder(failUploadOnCall = 0): Recorder {
     },
     isManagedMediaUri,
     updateQueuedPayload,
+    markOpFailed,
     apiJson: async (path, init) => {
+      if (options.postError) throw options.postError;
       posted.push({ path, body: JSON.parse(init.body ?? "{}") as Entry });
       return { entry: {} };
     },
     uploadPhoto: async (photo) => {
       uploaded.push(photo.id);
-      if (failUploadOnCall !== 0 && uploaded.length === failUploadOnCall) throw networkError();
+      if (failUploadOnCall !== 0 && uploaded.length === failUploadOnCall) {
+        throw options.uploadError ?? networkError();
+      }
       return {
         ...photo,
         uri: `/api/uploads/up-${photo.id}/${photo.id}.jpg`,
@@ -135,6 +162,7 @@ function recorder(failUploadOnCall = 0): Recorder {
       };
     },
     onPending: () => {},
+    onFailed: () => {},
     warn: (...args) => warnings.push(args),
   };
 
@@ -374,4 +402,130 @@ test("the drain does not alter a photograph beyond its address", async () => {
     assert.equal(sent.latitude, original.latitude, "the GPS fix must be untouched");
     assert.equal(sent.longitude, original.longitude, "the GPS fix must be untouched");
   }
+});
+
+/**
+ * AUDIT L30 — an op the server refuses must be kept, not deleted.
+ *
+ * The old loop's non-network branch was `await dequeue(op.id); console.warn(…)`.
+ * On a phone there is no console, so the work was deleted and nothing anywhere
+ * recorded that it had existed. Stage 1's timecard validation (a finish time
+ * before its start) produces exactly this class of 4xx.
+ */
+test("an op the server refuses is kept, with why, instead of deleted", async () => {
+  await captureEntryWhileOffline(2);
+
+  const { deps, warnings } = recorder(0, {
+    postError: serverRefusal(422, "finish must be after start"),
+  });
+  const result = await drainQueue(deps);
+
+  assert.equal(result.failed, 1, "the op must be reported as failed");
+  assert.equal(result.synced, 0, "and must not be counted as synced");
+
+  const stillThere = await peekQueue();
+  assert.equal(stillThere.length, 1, "the op must still be in the queue, not dequeued");
+
+  const [failed] = await peekFailedQueue();
+  assert.ok(failed, "the op must read as failed");
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.attempts, 1, "the refusal must be counted");
+  assert.equal(failed.failure?.status, 422, "the server's status must be retained");
+  assert.equal(failed.failure?.stage, "request", "and which half of the work refused it");
+  assert.match(failed.failure?.message ?? "", /finish must be after start/);
+  assert.ok(failed.failure?.failedAt, "and when it happened");
+
+  // The entry's own content must still be there — this is the only copy of it.
+  assert.equal((failed.payload as Entry).photos.length, 2);
+  assert.equal(warnings.length, 1, "and it must have been logged for a developer too");
+});
+
+/**
+ * Positive control for the test above AND a defect of its own: the old loop
+ * `break`s out of the whole drain on any error, so one op the server refused
+ * stopped every op behind it from ever being attempted.
+ */
+test("a refused op does not stop the ops behind it from syncing", async () => {
+  await captureEntryWhileOffline(1);
+  await enqueue({ type: "addSite", payload: { name: "Second op", client: "", address: "" } });
+
+  let call = 0;
+  const posted: string[] = [];
+  const base = recorder();
+  const result = await drainQueue({
+    ...base.deps,
+    apiJson: async (path) => {
+      call += 1;
+      if (call === 1) throw serverRefusal(403, "not a member of this site");
+      posted.push(path);
+      return { site: {} };
+    },
+  });
+
+  assert.deepEqual(posted, ["/projects/sites"], "the op behind the refused one must have been sent");
+  assert.equal(result.synced, 1);
+  assert.equal(result.failed, 1);
+  assert.equal(result.remaining, 0, "nothing may be left pending");
+});
+
+/**
+ * Constraint from Part 3: a dead-lettered op stops consuming retries, and a
+ * person can hand it back.
+ */
+test("a dead-lettered op is not retried until a person asks, and then it syncs", async () => {
+  await captureEntryWhileOffline(2);
+
+  const refused = recorder(0, { postError: serverRefusal(422, "weather is required") });
+  await drainQueue(refused.deps);
+
+  // Positive control: the uploads really did happen on the first attempt, so a
+  // second drain doing nothing cannot be explained by the queue being empty.
+  assert.equal(refused.uploaded.length, 2, "both photographs were uploaded before the refusal");
+
+  const quiet = recorder();
+  const quietResult = await drainQueue(quiet.deps);
+  assert.deepEqual(quiet.posted, [], "a failed op must not be retried by a later drain");
+  assert.deepEqual(quiet.uploaded, [], "and must not re-upload its photographs");
+  assert.equal(quietResult.failed, 1, "it must still be reported to the user as failed");
+  assert.equal(quietResult.remaining, 0, "and must not hold the pending badge open");
+
+  const retried = await retryFailedOps();
+  assert.equal(retried, 1, "the hand retry must find the op");
+
+  const after = recorder();
+  const afterResult = await drainQueue(after.deps);
+  assert.equal(after.posted.length, 1, "a retried op must be attempted again");
+  assert.deepEqual(
+    after.uploaded,
+    [],
+    "and must not re-upload photographs the server already has"
+  );
+  assert.equal(afterResult.synced, 1);
+  assert.equal(afterResult.failed, 0, "and leaves the failed list empty once it succeeds");
+});
+
+/**
+ * The upload half of L30. A photograph the server refuses — a 413, a revoked
+ * membership, an unsupported type — must not post an entry that claims it.
+ */
+test("a refused photograph dead-letters the op rather than posting the entry without it", async () => {
+  await captureEntryWhileOffline(3);
+
+  const { deps, posted, uploaded } = recorder(2, {
+    uploadError: serverRefusal(413, "file too large"),
+  });
+  const result = await drainQueue(deps);
+
+  assert.deepEqual(posted, [], "no entry may be POSTed when a photograph was refused");
+  assert.equal(uploaded.length, 2, "one photograph succeeded and the second was refused");
+  assert.equal(result.failed, 1);
+
+  const [failed] = await peekFailedQueue();
+  assert.equal(failed.failure?.stage, "upload", "the failure must name the upload, not the POST");
+  assert.equal(failed.failure?.status, 413);
+  assert.equal(
+    (failed.payload as Entry).photos.filter((photo) => isManagedMediaUri(photo.uri)).length,
+    1,
+    "and the one photograph that did get up must be recorded, so a retry does not re-upload it"
+  );
 });
