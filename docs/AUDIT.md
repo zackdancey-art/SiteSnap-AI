@@ -672,13 +672,64 @@ Two leaks that were found while building it and are now closed: a server's own r
 
 **The disclosure consequence was carried, not deferred.** Section 5 of the published Privacy Policy said crash reports come from the server, and section 10 listed app crash reporting among the things not switched on. Both are now false and both were corrected in the canonical source and in both render copies, with the anti-drift check run to prove it (see L36 for the copies that check does not cover).
 
-### L36 — The supervisor portal publishes its **own** Privacy Policy and Terms, outside the anti-drift check, still carrying the superseded text — HIGH (disclosure accuracy; live false statements, including most of the thirteen the October remediation existed to remove)
+### L36 — The supervisor portal publishes its **own** Privacy Policy and Terms, outside the anti-drift check, still carrying the superseded text — HIGH (disclosure accuracy; **confirmed live and publicly reachable 2026-10-04**, serving the 3 July draft plus two internal drafting notes)
 
 **Found while carrying the Sentry correction of L31, by grepping for other stale crash-reporting claims.**
 
 The October legal remediation replaced the canonical `docs/legal/` source, both in-app copies and both marketing-site copies — six files — and `Projects/scripts/ci.sh` was given an anti-drift check over exactly those six. `Projects/apps/supervisor-web/app/privacy/page.tsx` and `app/terms/page.tsx` are a **seventh and eighth** legal document. They were never touched, they carry no `BEGIN LEGAL TEXT` marker, and the drift check does not know they exist — so nothing reported the disagreement. The check passing is not evidence about them.
 
-They are not dead files. Both are reachable Next.js routes, linked from the live portal UI in two places: `app/settings/page.tsx:623` and `components/ProfileDropdown.tsx:150`.
+**They are deployed and publicly reachable. Measured 2026-10-04, not inferred:**
+
+```
+$ dig +short app.getsitesnapai.com
+sitesnap-dashboard.onrender.com.
+gcp-us-west1-1.origin.onrender.com.
+216.24.57.18  216.24.57.16
+
+$ curl -sS -o /dev/null -L -w 'HTTP %{http_code}  %{content_type}  %{size_download}B\n' …
+https://app.getsitesnapai.com/           HTTP 200  text/html; charset=utf-8   6351B
+https://app.getsitesnapai.com/privacy    HTTP 200  text/html; charset=utf-8  30001B
+https://app.getsitesnapai.com/terms      HTTP 200  text/html; charset=utf-8  28452B
+https://app.getsitesnapai.com/login      HTTP 404  text/html; charset=utf-8   6695B
+```
+
+No authentication is required for either legal page. The served text was fingerprinted against
+the repo file and matches it, so `app/privacy/page.tsx` is what is being published. They are also
+linked from the portal UI in two places (`app/settings/page.tsx:623`,
+`components/ProfileDropdown.tsx:150`), but that is now the lesser fact: the URLs answer to
+anyone.
+
+**This contradicts two of our own records, and `docs/deploy-supervisor-web.md` is the one that
+matters.** That runbook opens "The Next.js supervisor dashboard (`Projects/apps/supervisor-web`)
+has **never been deployed**", and L26 recorded `app.getsitesnapai.com` as not resolving. Both are
+stale: a Render service `sitesnap-dashboard` exists, the custom domain is attached, and the app
+is serving. Whoever deployed it did not run the runbook's verification steps — `/login` is a 404,
+so the login route the runbook checks in step 1 either moved or was never built. **Fix the
+runbook's opening claim in the same pass as the pages**; a deploy runbook that says a live
+service has never been deployed is worse than no runbook.
+
+**The served date is `3 July 2026`** — not the 3 October pre-remediation text, the *July* draft.
+The canonical source and all three remediated copies read `4 October 2026`. So the portal is two
+revisions behind, not one.
+
+**Two internal drafting notes are being served to the public.** Neither appears in any of the
+three remediated copies:
+
+- A banner above the document: *"Draft — not yet in effect. This document requires legal review
+  and sign-off before SiteSnap onboards paying customers. The registered entity name must also be
+  confirmed and updated below once the company is incorporated in New Zealand."*
+  (`privacy/page.tsx:30`, and the same on `terms/page.tsx`.)
+- A reviewer's TODO inside the document body: *"Third-party processors are OpenAI,
+  Resend/SendGrid, Twilio, Sentry, and AWS S3 — **verify this remains current**."*
+  (`privacy/page.tsx:121`.)
+
+The banner cuts both ways and the aggravating direction is stronger. It does mean the page is not
+holding itself out as an operative policy, which is a real mitigation against the false claims
+below. But it publishes, on a page linked from the marketing site's "Manager sign-in" path, that
+the company is not yet incorporated and that its privacy policy has not had legal review — two
+sentences before the document says "SiteSnap AI Limited **is** a New Zealand company that
+operates the SiteSnap mobile application and supervisor web portal." A public self-contradiction
+about corporate existence is a worse disclosure problem than a stale processor list.
 
 **What they still say.** Nearly the whole table of "claims in the previous drafts that the code contradicts" in `docs/legal/README.md`, verbatim, still published:
 
@@ -803,3 +854,58 @@ The promise a person actually reads is the `Alert` in the confirmation dialog, w
 **The generalisable part.** The item was found by grepping the API for promissory language, so it landed on the API's string. A copy defect found by searching the server is located at the wrong layer **by default** — mobile clients routinely discard response bodies. Fixing only what the grep found would have closed the item as done while changing nothing anybody reads, and the audit would have been wrong in a way that looked complete. When a finding is about what a person is told, the fix has to be traced to the surface that tells them.
 
 **Disposition:** No standing code issue. Recorded as a method note, in the manner of L25: check who renders a string before accepting that changing it fixed anything.
+
+---
+
+### L40 — An `eas update` published from a developer machine silently overrides the production build's API host with whatever the local `.env` says — MEDIUM (deploy integrity; the OTA path has no equivalent of `eas.json`'s per-profile `env`)
+
+**Found while answering whether `fix/offline-photo-sync` could be shipped over the air for the device pass.** Measured, not reasoned.
+
+`eas build` takes `EXPO_PUBLIC_API_URL` from the build profile's `env` block in `eas.json` — the `production` profile sets `https://api.getsitesnapai.com`, so that is what is inlined into the store binary. `eas update` does not use a build profile: it bundles **locally**, so `app.config.ts` and the Metro transform both see the publishing machine's environment, including `apps/mobile/.env`.
+
+What that resolves to on this machine today:
+
+```
+$ APP_ENV=production pnpm -C Projects --filter apps-mobile exec expo config --type public --json
+  runtimeVersion      : {"policy": "appVersion"}
+  updates.url         : https://u.expo.dev/0252315c-…
+  expo-updates plugin : present
+  extra.apiUrl        : 'https://sitesap-ai.onrender.com'      ← not api.getsitesnapai.com
+
+$ (APP_ENV unset → "development")
+  runtimeVersion      : ABSENT
+  updates.url         : ABSENT
+  expo-updates plugin : ABSENT
+  extra.apiUrl        : 'https://sitesap-ai.onrender.com'
+```
+
+So an OTA update published from here without an explicit override would move every production
+installation off the custom domain and onto the raw Render hostname. Both names currently answer
+from the same service (`api.getsitesnapai.com` is a CNAME to `sitesap-ai.onrender.com`), so **this
+does not break the app today** — which is precisely what makes it a finding rather than an
+incident. Nothing fails, nothing logs, and the installed app quietly stops depending on the name
+we control. The custom domain is the only thing that makes the host portable; an app pinned to
+`*.onrender.com` cannot be moved to another provider, or to a second Render service, without a
+further update.
+
+`resolveApiBaseUrl()` cannot catch this. Its two release guards reject an **empty** URL and a
+**localhost/plain-http** URL. `https://sitesap-ai.onrender.com` is neither, so it passes both and
+is used. The guards are correct for what they were written for; this is a different axis.
+
+**The `APP_ENV` half is already documented and is not the finding.** `app.config.ts:22-25` warns
+that `eas update` must carry `APP_ENV`, and the measurement above confirms it exactly: bare, there
+is no `runtimeVersion`, no updates URL and no `expo-updates` plugin. That one is a known trap with
+a written warning. The API host is the unwritten one, and it is worse because the `APP_ENV` mistake
+fails loudly at publish time while this one succeeds.
+
+**Fix (not taken here).** Either read the API URL for an update from the same single source the
+build profile uses, or add a publish-time assertion that refuses to publish to the `production`
+branch unless the resolved `extra.apiUrl` equals the `production` profile's `env` value in
+`eas.json`. The second is the cheaper one and fits the existing pattern — it is the same shape as
+`assert-ci-single-definition.sh` and `assert-babel-preset-expo.mjs`: a check whose whole purpose is
+that two definitions cannot drift without something reporting it. Until then the publish command
+must set it explicitly.
+
+**Disposition:** OPEN. No code change on `fix/offline-photo-sync`; recorded so the device pass does
+not publish an update that silently repoints the production app. Belongs with the next piece of
+release-path work, alongside fixing `docs/deploy-supervisor-web.md`'s stale opening claim (L36).

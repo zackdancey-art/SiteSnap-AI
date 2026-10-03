@@ -190,8 +190,31 @@ check over exactly those six. `Projects/apps/supervisor-web/app/privacy/page.tsx
 `app/terms/page.tsx` are a **seventh and eighth** legal document. They were never touched, they
 carry no `BEGIN LEGAL TEXT` marker, and the drift check does not know they exist.
 
-They are not dead files. Both are reachable Next.js routes linked from the live portal UI in two
-places: `app/settings/page.tsx:623` and `components/ProfileDropdown.tsx:150`.
+**Confirmed live, 4 October 2026 — and this was the one thing in the finding I had inferred rather
+than measured.** `app.getsitesnapai.com` resolves to a Render service `sitesnap-dashboard`, and
+`/privacy` and `/terms` both answer **HTTP 200** to an unauthenticated request. The served text was
+fingerprinted against the repo file and matches it. It reads `Last updated: 3 July 2026` — the
+*July* draft, two revisions behind the canonical 4 October text, not one.
+
+It also serves two internal drafting notes that appear in none of the three remediated copies: a
+banner saying the document is a draft requiring legal review and that the company is not yet
+incorporated, and a reviewer's TODO reading "verify this remains current". The banner cuts both
+ways and the aggravating direction is stronger. It is a real mitigation against the false claims
+below — the page does not hold itself out as an operative policy — but it publishes, on a page one
+click from the marketing site's "Manager sign-in" path, that the company is not yet incorporated
+and its privacy policy has not had legal review, two sentences before the same document says
+"SiteSnap AI Limited **is** a New Zealand company that operates the SiteSnap mobile application
+and supervisor web portal." Full evidence in AUDIT L36.
+
+This also contradicts two of our own records. `docs/deploy-supervisor-web.md` opens "has **never
+been deployed**", and L26 recorded the host as not resolving. Both are stale, and the runbook needs
+correcting in the same pass as the pages — a deploy runbook that says a live service was never
+deployed is worse than no runbook, and its step-1 verification checks a `/login` route that is
+currently a 404.
+
+Both pages are also reachable Next.js routes linked from the live portal UI in two places:
+`app/settings/page.tsx:623` and `components/ProfileDropdown.tsx:150` — now the lesser fact, since
+the URLs answer to anyone.
 
 What is still being served, from the same table in `docs/legal/README.md` that lists the claims
 the code contradicts:
@@ -329,8 +352,25 @@ having read nothing. It could: a silent AsyncStorage failure would have made "no
 lacks a storage key" pass over an empty list. That is why test 1 is a harness positive control
 and why the runner pins both the file count and the test count.
 
-**One thing of my own that was wrong.** In Part 7 of the last review I presented the anti-drift
+**"`attachScreenshot` stays `false`."** It was `true`. The instruction read as a statement about
+the current state, and the state was the opposite of what it described — so a section of the
+prompt that was really an instruction to *change* something looked like an instruction to leave
+it alone. Had it been taken at face value, the branch would have shipped a redaction module
+alongside a setting that posts a photograph of the note text, the site address and the
+photographs to Sentry on any crash on the capture screens. It is now `false`, with the reasoning
+at the call site, and the Privacy Policy asserts it.
+
+The generalisable form: an instruction phrased as an assertion about the code cannot be
+satisfied without reading the code. "Stays `false`" and "must be `false`" are the same
+instruction, but only the second one survives being wrong about the starting state.
+
+**Two things of my own that were wrong.** In Part 7 of the last review I presented the anti-drift
 check as proof the legal copies agree. It proves the six it lists agree. Two more exist (L36).
+
+And in L36 as first written I called the portal's two legal pages "reachable routes linked from
+the live portal UI", which was inference from a route file, not a measurement. The measurement
+is in L36 now and it is worse than the inference: the portal is deployed and both pages answer
+200 to anyone, unauthenticated.
 
 ---
 
@@ -342,6 +382,7 @@ check as proof the legal copies agree. It proves the six it lists agree. Two mor
 | **L37** | MEDIUM | Nothing rendered the sync state at all; the badge the device checklist refers to did not exist. Partly closed here |
 | **L38** | MEDIUM | Only `addSite`/`addEntry` are ever queued; an offline edit or delete fails to the caller and is lost |
 | **L39** | LOW | The server accepts an entry photograph with a `file://` uri and no storage key, and was in a position to notice L28 for months |
+| **L40** | MEDIUM | An `eas update` published from a developer machine silently overrides the production build's API host with the local `.env` value, because the OTA path has no equivalent of `eas.json`'s per-profile `env` |
 
 L28 closed, L30 closed, L31 part-closed (the DSN half remains yours). Each disposition records
 the mechanism rather than the outcome, and what was found while fixing it. L29 stays reserved.
@@ -374,8 +415,43 @@ not run.
 
 ## Part 7 — The device checklist
 
-Run this on a build from this branch. It needs a new native build to get onto a phone, but
-nothing in it required a native change.
+**This branch ships over the air. It does not need a native build** — an earlier draft of this
+review said it did, which contradicted "JS-only" in the same sentence and was simply wrong.
+
+Nothing here is native: the diff is JS/TS and documentation, the one `package.json` line is a
+`test` script rather than a dependency, `app.config.ts` is untouched, and `expo-file-system` has
+been declared at `^19.0.24` since the initial source commit `b2a51ba` and was never bumped — so
+the `File`/`Paths` class API `lib/photo-bytes.ts` uses is backed by a native module that is
+already inside every build ever made, iOS build 4 included.
+
+Two traps on the publish, both measured rather than reasoned (AUDIT L40):
+
+```
+cd Projects/apps/mobile
+APP_ENV=production \
+EXPO_PUBLIC_API_URL=https://api.getsitesnapai.com \
+eas update --branch production --message "L28/L30/L31: offline photographs reach the server"
+```
+
+- **`APP_ENV=production` is mandatory.** Bare, `app.config.ts` evaluates at
+  `APP_ENV=development`, and the resolved config has no `runtimeVersion`, no updates URL and no
+  `expo-updates` plugin. `app.config.ts:22-25` warns about this and the measurement confirms it.
+- **`EXPO_PUBLIC_API_URL` must be set on the command.** `eas update` bundles locally, so it reads
+  the publishing machine's `.env` rather than `eas.json`'s profile `env`. On this machine that
+  resolves to `https://sitesap-ai.onrender.com`, so an unqualified publish would move every
+  production installation off the custom domain onto the raw Render hostname. It would not break
+  anything — both names answer from the same service — which is exactly why nothing would report
+  it.
+
+**Separate from this branch: Stage 2's Universal Links entitlement is native and cannot arrive
+this way.** It is in iOS **build 4** (`466a694f-b8e8-4ae2-be44-2a4dda291968`, finished
+2026-10-03 17:02 NZST, commit `f98c425`, now on `main`), together with the
+`userInterfaceStyle: "light"` flip — `docs/DECISIONS.md` ADR-0002 records both. Whether that
+binary is on the phone is answered in the app, not from here: **Settings → About** reads
+`CFBundleVersion` out of the installed binary, so it shows `1.0.0 (4)` if build 4 is installed and
+an earlier number if it is not. An OTA update cannot change that label, which is what makes it the
+right check. If it does not read `(4)`, item 4 of the Stage 2 chain will fail no matter how many
+updates are published, and the install is the fix.
 
 **1. The core case — the one that matters.**
 Airplane mode on. New entry, four or five photographs, save. The entry appears with its
@@ -428,19 +504,49 @@ It is also cheap. The text exists and is reviewed; the work is transcription plu
 the drift check. That combination — live false statements in a published legal document, a
 known-good replacement already written, and a day's work — is what puts it first.
 
+### The fact the ranking turned on, now settled
+
+The owner's reply named the right test: *"Is `apps/supervisor-web` actually deployed and publicly
+reachable today? If nobody can reach those pages, L36 is a latent defect that must be closed
+before the portal deploys, not one ahead of my device pass. If they are live, you are right and it
+goes first."*
+
+**They are live.** `app.getsitesnapai.com` resolves to a Render service and both legal pages
+return HTTP 200 unauthenticated (measured 2026-10-04; evidence in AUDIT L36). The deploy happened
+without the runbook being run, which is why two of our own records still said it had not.
+
+Two honest qualifications, because the measurement found things that cut against me as well as
+for me:
+
+- **The `Draft — not yet in effect` banner is a real mitigation** and I had not known it was
+  there. The page tells its reader not to rely on it, which genuinely weakens "live false
+  statements". What it does not weaken is that a live portal's only reachable privacy policy is one
+  that disclaims being in effect, and that the banner itself publishes the company's
+  non-incorporation and the absence of legal review — neither of which was anything anyone chose
+  to publish.
+- **First among *build* work, not ahead of verification.** The owner is running the device pass
+  first — this branch, then Stage 1's seven sections, then Stage 2's chain — and that is the
+  correct sequence, not a deferral of L36. Three branches of work are stacked on foundations that
+  have only ever been proven by tests, and L28 in particular is closed on my word until a second
+  surface shows the photographs. Verification is not a backlog item competing with L36; it is the
+  thing that decides whether the backlog below is built on anything.
+
 **My order from here:**
 
+0. **The device pass in Part 7, and Stage 1's and Stage 2's.** Not a build item, which is why it
+   is numbered zero: it decides whether anything below it is standing on anything. Everything in
+   this branch is test-verified and nothing is field-verified.
 1. **L36** — the two portal legal documents, and extend the drift check so it can no longer be
-   green about a copy it has not read.
-2. **The device pass in Part 7.** Everything in this branch is test-verified and nothing is
-   field-verified. Until the second surface shows the photographs, L28 is closed on my word.
-3. **The Sentry DSN** (your half of L31). Until it moves, the telemetry this branch built reports
+   green about a copy it has not read. Fix `docs/deploy-supervisor-web.md`'s opening claim and its
+   `/login` verification step in the same commit, and take L40 with it: both are release-path
+   defects found by asking what is actually deployed rather than what the repo says is.
+2. **The Sentry DSN** (your half of L31). Until it moves, the telemetry this branch built reports
    to nowhere, and the December failure mode is still invisible.
-4. **L37's per-entry indicator.** "Has this entry arrived" is the question people actually ask,
+3. **L37's per-entry indicator.** "Has this entry arrived" is the question people actually ask,
    and after this branch it is answerable — the data is there and nothing shows it per row.
-5. **The evidence-integrity surface**, where you had it.
-6. **L6**, which got *better* here rather than worse and is less urgent than it was.
-7. **L38 / the offline-first architecture**, when you send the prompt. L38 is the honest reason
+4. **The evidence-integrity surface**, where you had it.
+5. **L6**, which got *better* here rather than worse and is less urgent than it was.
+6. **L38 / the offline-first architecture**, when you send the prompt. L38 is the honest reason
    it is still needed: the capture path is fixed and the edit path is not.
 
 **On L6, since you asked specifically: better.** The queued path now calls
