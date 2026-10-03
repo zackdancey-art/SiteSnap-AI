@@ -1,0 +1,21 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["3FALF4GK4D.nz.getsitesnapai.app"],
+        "components": [
+          {
+            "/": "/invite",
+            "?": { "token": "?*" },
+            "comment": "Crew invitation links. The API builds these as INVITE_URL + '?token=' + token (services/api/src/services/notificationService.ts, sendSiteInvite). A non-empty token is required so that a bare /invite link stays in the browser and shows the landing page instead of opening the app with nothing to redeem."
+          },
+          {
+            "/": "/invite/",
+            "?": { "token": "?*" },
+            "comment": "Same path with the trailing slash the static host uses to canonicalise a directory, so the claim holds whichever form INVITE_URL is set to."
+          }
+        ]
+      }
+    ]
+  }
+}

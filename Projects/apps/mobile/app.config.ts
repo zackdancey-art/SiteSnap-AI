@@ -44,7 +44,17 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     jsEngine: "hermes",
     platforms: ["ios", "android", "web"],
     icon: "./images/icon.png",
-    userInterfaceStyle: "automatic",
+    // Locked to light. The palette in constants/colors.ts is light-only — there
+    // is no Colors.dark — so "automatic" let iOS draw system-appearance chrome
+    // (navigation bars, content views, pickers) against light-only content. In
+    // dark appearance that produced near-black backgrounds behind dark text and
+    // a navy chevron on near-black. See docs/DECISIONS.md ADR-0002: this flips
+    // back to "automatic" only when a real Colors.dark exists.
+    //
+    // The explicit per-component props (headerStyle, headerTintColor,
+    // themeVariant) STAY. Explicit beats inherited, and they are what protects
+    // the OTA-updatable JS layer if this value is ever changed again.
+    userInterfaceStyle: "light",
     splash: {
       image: "./images/splash.png",
       resizeMode: "contain",
@@ -68,6 +78,24 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     ios: {
       bundleIdentifier: "nz.getsitesnapai.app",
       supportsTablet: true,
+      // Universal Links for crew invitations. Invitation emails previously
+      // linked to sitesnap://invite?token=..., which does nothing on a device
+      // that does not already have the app — i.e. every invited crew member.
+      //
+      // MUST be the www host, not the apex. getsitesnapai.com 301-redirects
+      // every path (including /.well-known/) to www, and Apple does NOT follow
+      // redirects when fetching the AASA file — so an apex entitlement would
+      // install cleanly and silently never activate. Measured, not assumed.
+      //
+      // Paired with website/.well-known/apple-app-site-association, which must
+      // be served from https://www.getsitesnapai.com with Content-Type
+      // application/json. appID there is <appleTeamId from eas.json>.<this
+      // bundleIdentifier> = 3FALF4GK4D.nz.getsitesnapai.app.
+      //
+      // The sitesnap:// scheme above is unchanged and keeps working: the API
+      // builds the invite URL from process.env.INVITE_URL and falls back to the
+      // custom scheme, and app/+native-intent.tsx already matches BOTH forms.
+      associatedDomains: ["applinks:www.getsitesnapai.com"],
       infoPlist: {
         NSCameraUsageDescription:
           "SiteSnap uses your camera to capture construction site photos for daily diaries.",
