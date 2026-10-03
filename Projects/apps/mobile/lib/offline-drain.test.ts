@@ -20,6 +20,7 @@ import {
 } from "./photo-payload-store";
 import { isManagedMediaUri } from "./photo-uri";
 import { asyncStorageKeys, resetAsyncStorageForTests } from "./test-setup";
+import type { SyncFailureReport } from "./sync-telemetry-redaction";
 import type { Entry, Photo } from "./types";
 
 /**
@@ -95,6 +96,8 @@ interface Recorder {
   uploaded: string[];
   released: string[];
   warnings: unknown[][];
+  /** Telemetry the drain raised. Asserted on for CONTENT, not just presence. */
+  reports: SyncFailureReport[];
 }
 
 function networkError(): Error {
@@ -130,6 +133,7 @@ function recorder(failUploadOnCall = 0, options: RecorderOptions = {}): Recorder
   const uploaded: string[] = [];
   const released: string[] = [];
   const warnings: unknown[][] = [];
+  const reports: SyncFailureReport[] = [];
 
   const deps: DrainDeps = {
     peekQueue,
@@ -161,12 +165,13 @@ function recorder(failUploadOnCall = 0, options: RecorderOptions = {}): Recorder
         storageKey: `media/companies/c1/up-${photo.id}/${photo.id}.jpg`,
       };
     },
+    report: (report) => reports.push(report),
     onPending: () => {},
     onFailed: () => {},
     warn: (...args) => warnings.push(args),
   };
 
-  return { deps, posted, uploaded, released, warnings };
+  return { deps, posted, uploaded, released, warnings, reports };
 }
 
 beforeEach(() => {

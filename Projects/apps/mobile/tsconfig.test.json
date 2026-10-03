@@ -34,6 +34,8 @@
     "lib/photo-uri.ts",
     "lib/offline-queue.ts",
     "lib/photo-payload-store.ts",
+    "lib/sync-telemetry-redaction.ts",
+    "lib/sync-telemetry-redaction.test.ts",
     "lib/offline-drain.ts",
     "lib/offline-drain.test.ts"
   ]

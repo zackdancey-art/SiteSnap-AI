@@ -1,5 +1,8 @@
 import type { Entry, Photo } from "./types";
 import type { QueuedOp, QueuedOpFailure } from "./offline-queue";
+// Type-only: this module stays free of anything with a runtime, so it can be
+// loaded by node --test. The reporter itself is injected.
+import type { SyncFailureReport } from "./sync-telemetry-redaction";
 
 /**
  * The offline queue drain, lifted out of DataProvider so it can be tested.
@@ -55,6 +58,13 @@ export interface DrainDeps {
    */
   markOpFailed: (id: string, failure: Omit<QueuedOpFailure, "failedAt">) => Promise<void>;
 
+  /**
+   * Telemetry for the failures below. Identifiers and counts only — see
+   * `sync-telemetry.ts` for why the report has no field a uri or a note could
+   * go in. Must never throw.
+   */
+  report: (report: SyncFailureReport) => void;
+
   /** Ops still waiting for coverage. */
   onPending: (count: number) => void;
   /** Ops the drain has given up on, which the user must be shown. */
@@ -69,6 +79,24 @@ export interface DrainResult {
   remaining: number;
   /** Ops dead-lettered: retained, not retried, and needing a person. */
   failed: number;
+}
+
+/** `apiJson` attaches the response status to the error it throws. */
+function statusOf(err: unknown): number | undefined {
+  const status = (err as { status?: unknown } | null)?.status;
+  return typeof status === "number" ? status : undefined;
+}
+
+/**
+ * The message shown to the user beside a failed sync.
+ *
+ * Truncated because the API returns a JSON body for some errors and the whole
+ * of it is neither readable in a row nor wanted in telemetry.
+ */
+function messageOf(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const collapsed = raw.replace(/\s+/g, " ").trim();
+  return collapsed.length > 200 ? `${collapsed.slice(0, 199)}…` : collapsed || "Unknown error";
 }
 
 /**
@@ -109,7 +137,25 @@ async function uploadEntryPhotos(
     // Throws on failure, deliberately: the caller's catch decides whether the
     // op waits for coverage or is dead-lettered, and either way the entry is
     // not POSTed. An entry must never claim a photograph the server lacks.
-    photos[i] = await deps.uploadPhoto(photos[i]);
+    try {
+      photos[i] = await deps.uploadPhoto(photos[i]);
+    } catch (err) {
+      // Reported here rather than in the caller's catch because this is the
+      // only frame that knows WHICH photograph it was and how many were
+      // already up. The error is rethrown unchanged.
+      deps.report({
+        kind: "queued-photo-upload-failed",
+        opType: op.type,
+        opId: op.id,
+        photoId: photos[i].id,
+        stage: "upload",
+        status: statusOf(err),
+        photoCount: photos.length,
+        photosUploaded: photos.filter((photo) => deps.isManagedMediaUri(photo.uri)).length,
+        cause: err,
+      });
+      throw err;
+    }
     await deps.updateQueuedPayload(
       op.id,
       deps.stripPhotoPayloads({ ...entry, photos } as Entry)
@@ -117,24 +163,6 @@ async function uploadEntryPhotos(
   }
 
   return photos;
-}
-
-/** `apiJson` attaches the response status to the error it throws. */
-function statusOf(err: unknown): number | undefined {
-  const status = (err as { status?: unknown } | null)?.status;
-  return typeof status === "number" ? status : undefined;
-}
-
-/**
- * The message shown to the user beside a failed sync.
- *
- * Truncated because the API returns a JSON body for some errors and the whole
- * of it is neither readable in a row nor wanted in telemetry.
- */
-function messageOf(err: unknown): string {
-  const raw = err instanceof Error ? err.message : String(err);
-  const collapsed = raw.replace(/\s+/g, " ").trim();
-  return collapsed.length > 200 ? `${collapsed.slice(0, 199)}…` : collapsed || "Unknown error";
 }
 
 export async function drainQueue(deps: DrainDeps): Promise<DrainResult> {
@@ -207,6 +235,18 @@ export async function drainQueue(deps: DrainDeps): Promise<DrainResult> {
         status: statusOf(err),
         message: messageOf(err),
         ...(op.type === "addEntry" ? { photosUploaded } : {}),
+      });
+      deps.report({
+        kind: "queued-op-dead-lettered",
+        opType: op.type,
+        opId: op.id,
+        stage,
+        status: statusOf(err),
+        ...(op.type === "addEntry"
+          ? { photoCount: (op.payload as Entry).photos?.length ?? 0, photosUploaded }
+          : {}),
+        attempts: (op.attempts ?? 0) + 1,
+        cause: err,
       });
       deps.warn("[queue] Retained a queued op the server refused", op.type, err);
       // Continue rather than break: one refused op must not stop the ops behind

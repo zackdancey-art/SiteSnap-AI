@@ -25,6 +25,7 @@ import { drainQueue } from "@/lib/offline-drain";
 import { materializeQueuedPhoto } from "@/lib/photo-bytes";
 import { isManagedMediaUri, toCanonicalPath, toStorablePhotoUri } from "@/lib/photo-uri";
 import { reportMediaFailure } from "@/lib/media-telemetry";
+import { reportSyncFailure } from "@/lib/sync-telemetry";
 
 interface DataContextType {
   sites: Site[];
@@ -494,6 +495,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       isManagedMediaUri,
       updateQueuedPayload,
       markOpFailed,
+      report: reportSyncFailure,
       onPending: setPendingCount,
       onFailed: () => {
         // The count comes back with the list, so there is one source for both.

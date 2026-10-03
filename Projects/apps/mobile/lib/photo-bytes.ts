@@ -1,5 +1,6 @@
 import { File, Paths } from "expo-file-system";
 
+import { reportSyncFailure } from "@/lib/sync-telemetry";
 import type { Photo } from "@/lib/types";
 
 /**
@@ -54,9 +55,24 @@ export function materializeQueuedPhoto(photo: Photo): MaterializedPhoto {
     // cannot be recovered: the cache file is gone and the durable copy was
     // never written. It must surface as a failed sync the user can see, not as
     // an entry quietly posted with one photograph fewer.
-    throw new Error(
+    //
+    // Reported from here rather than from the drain because this is where the
+    // cause is known. By the time the drain catches it, all it has is an
+    // exception; here we know the distinction that matters — the cache file was
+    // checked and absent, AND `savePhotoPayloads` left nothing behind. That
+    // pair says the durable write failed at capture time, which is a different
+    // defect from an upload that could not reach the server, and it is the one
+    // mode where the photograph is actually gone.
+    const err = new Error(
       `Photograph ${photo.id} has no local bytes: its cache file is gone and no payload was stored.`
     );
+    reportSyncFailure({
+      kind: "queued-photo-bytes-missing",
+      photoId: photo.id,
+      stage: "upload",
+      cause: err,
+    });
+    throw err;
   }
 
   const extension = photo.mimeType === "image/png" ? "png" : "jpg";
