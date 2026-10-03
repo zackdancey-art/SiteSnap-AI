@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en-NZ">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Your SiteSnap invitation</title>
+<meta name="description" content="Accept your invitation to collaborate on a site in SiteSnap AI." />
+<meta name="theme-color" content="#0F2B46" />
+<!-- The invitation token arrives in this page's query string. Three deliberate
+     choices keep it from travelling any further than it has to:
+       1. referrer no-referrer  — the token cannot leak in a Referer header to
+          any link on this page (including the mailto: and the policy pages).
+       2. robots noindex        — a token-bearing URL never enters a search index.
+       3. no third-party resources of any kind. No fonts, no analytics, no CDN.
+          Every byte of CSS and JS below is inline, so no outside host is ever
+          told that this URL was visited, let alone what its query string was.
+     The script also rewrites the address bar to drop the token once it has been
+     read, which keeps it out of browser history and off a shared screen. That
+     does NOT remove it from the web server's access log — see
+     docs/DECISIONS.md ADR-0002 for why that residual exposure is accepted. -->
+<meta name="referrer" content="no-referrer" />
+<meta name="robots" content="noindex, nofollow, noarchive" />
+<style>
+  :root{
+    --navy:#0F2B46; --navy-light:#1A3D5C; --accent:#E8731A; --accent-light:#F59542;
+    --bg:#F5F7FA; --surface:#FFFFFF; --surface-2:#EDF0F4;
+    --text:#0F2B46; --text-2:#6B7C93; --text-3:#9EAFC2; --border:#DDE3EB; --border-light:#EDF0F4;
+    --shadow:rgba(15,43,70,.08); --on-navy-muted:rgba(255,255,255,.62); --on-navy-border:rgba(255,255,255,.12);
+    --maxw:820px; --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  }
+  *,*::before,*::after{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font);font-size:16px;line-height:1.62;-webkit-font-smoothing:antialiased}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  img{display:block;max-width:100%}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+  [hidden]{display:none!important}
+  .wrap{width:100%;max-width:var(--maxw);margin:0 auto;padding:0 22px}
+  h1,h2,h3{margin:0;letter-spacing:-.02em;text-wrap:balance}
+  p{margin:0}
+
+  header.site{position:sticky;top:0;z-index:50;background:rgba(245,247,250,.85);backdrop-filter:saturate(180%) blur(12px);border-bottom:1px solid var(--border)}
+  .nav{display:flex;flex-wrap:wrap;align-items:center;gap:16px;min-height:64px;max-width:1080px;margin:0 auto;padding:0 22px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;color:var(--text);min-width:0;flex-shrink:1}
+  .brand span{font-size:1.06rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .back{margin-left:auto;color:var(--text-2);font-size:.95rem;font-weight:500;white-space:nowrap;flex-shrink:0}
+  .back:hover{color:var(--text);text-decoration:none}
+
+  .hero-card{background:linear-gradient(140deg,var(--navy),var(--navy-light));border-radius:22px;padding:clamp(26px,4vw,40px);color:#fff;margin:34px 0 24px;box-shadow:0 20px 50px -30px rgba(15,43,70,.14)}
+  .hero-card .eyebrow{font-size:.72rem;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--accent-light);margin:0 0 12px}
+  .hero-card h1{font-size:clamp(1.8rem,4vw,2.5rem);font-weight:800;color:#fff}
+  .hero-card .intro{margin-top:16px;color:rgba(255,255,255,.86);font-size:1.02rem;line-height:1.55;max-width:62ch}
+
+  main{padding-bottom:20px}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:22px 24px;margin-bottom:14px;box-shadow:0 1px 2px var(--shadow)}
+  .card h2{font-size:1.12rem;font-weight:700;color:var(--text)}
+  .card p{margin-top:10px;color:var(--text-2);font-size:.97rem}
+  .card ol{margin:12px 0 0;padding-left:0;list-style:none;counter-reset:step;display:flex;flex-direction:column;gap:10px}
+  .card ol li{position:relative;padding-left:32px;color:var(--text-2);font-size:.95rem;counter-increment:step}
+  .card ol li::before{
+    content:counter(step);position:absolute;left:0;top:1px;
+    width:22px;height:22px;border-radius:50%;background:var(--surface-2);color:var(--text);
+    font-size:.76rem;font-weight:700;display:flex;align-items:center;justify-content:center;
+  }
+  .card strong{color:var(--text);font-weight:650}
+  .note{margin-top:12px;color:var(--text-3);font-size:.92rem}
+
+  .btn{
+    display:inline-flex;align-items:center;justify-content:center;gap:8px;
+    font-weight:600;font-size:.95rem;padding:11px 20px;border-radius:11px;white-space:nowrap;
+    border:1px solid transparent;cursor:pointer;margin-top:16px;
+    transition:background .12s ease, box-shadow .12s ease;
+  }
+  .btn-primary{background:var(--accent);color:#fff}
+  .btn-primary:hover{background:var(--accent-light);text-decoration:none;box-shadow:0 6px 18px rgba(232,115,26,.28)}
+
+  footer.site{background:var(--navy);color:rgba(255,255,255,.7);padding:36px 0;margin-top:26px}
+  .foot-links{display:flex;flex-wrap:wrap;gap:20px}
+  .foot-links a{color:rgba(255,255,255,.78);font-size:.94rem;font-weight:500}
+  .foot-links a:hover{color:#fff}
+  .foot-legal{margin-top:20px;padding-top:18px;border-top:1px solid var(--on-navy-border);color:var(--on-navy-muted);font-size:.85rem;display:flex;flex-wrap:wrap;gap:5px 18px}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+
+<header class="site">
+  <div class="nav">
+    <a class="brand" href="/" aria-label="SiteSnap AI home">
+      <span>SiteSnap AI</span>
+    </a>
+    <a class="back" href="/">← Back to site</a>
+  </div>
+</header>
+
+<main>
+  <div class="wrap">
+
+    <div class="hero-card">
+      <p class="eyebrow">Site invitation</p>
+      <h1>You&rsquo;ve been invited to SiteSnap</h1>
+      <p class="intro">
+        Someone has invited you to help keep the site record on a job &mdash; daily
+        diaries, photos, timesheets and deliveries. To accept, you need the SiteSnap
+        app on your iPhone.
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>If you are seeing this page, the app isn&rsquo;t on this device</h2>
+      <p>
+        Invitation links open the SiteSnap app directly when it is installed. This
+        page is what you get instead &mdash; so either SiteSnap isn&rsquo;t installed
+        on this iPhone yet, or you&rsquo;re reading your email on a computer or an
+        Android phone.
+      </p>
+      <p class="note">SiteSnap is an iPhone app. There is no Android or web version yet.</p>
+    </div>
+
+    <div class="card">
+      <h2>How to accept</h2>
+      <!-- SiteSnap is not yet publicly listed on the App Store. Verified, not
+           assumed: https://apps.apple.com/app/id6813701040 returns 404 and the
+           iTunes lookup API returns resultCount 0 for both the default store and
+           country=nz. A visible "Download on the App Store" button would be a
+           dead link today, which is worse than no button, so the copy below
+           tells people the truth instead.
+
+           WHEN THE APP GOES LIVE, replace the <ol> below with:
+             <ol>
+               <li>Install <strong>SiteSnap AI</strong> from the App Store.</li>
+               <li>Open this email on your iPhone again and tap <strong>Accept Invitation</strong>.</li>
+               <li>Sign in or create an account with the email address the invitation was sent to.</li>
+             </ol>
+             <a class="btn btn-primary" href="https://apps.apple.com/nz/app/id6813701040">Get SiteSnap on the App Store</a>
+           and re-check the two URLs above first. -->
+      <ol>
+        <li>
+          SiteSnap is in <strong>limited release</strong> and isn&rsquo;t on the public
+          App Store yet. Reply to the person who invited you and ask them to send you
+          a TestFlight invitation.
+        </li>
+        <li>
+          Install the app on your iPhone, then open this email again on that iPhone
+          and tap <strong>Accept Invitation</strong>.
+        </li>
+        <li>
+          Sign in, or create an account, using <strong>the same email address the
+          invitation was sent to</strong>. An invitation can only be accepted by that
+          address.
+        </li>
+      </ol>
+      <p class="note">
+        Invitations expire <strong>7 days</strong> after they are sent. If yours has
+        expired, ask for a new one &mdash; nothing is lost.
+      </p>
+    </div>
+
+    <div class="card" id="open-app-card" hidden>
+      <h2>Already have SiteSnap on this iPhone?</h2>
+      <p>
+        Then the link should have opened the app by itself. If it didn&rsquo;t, this
+        will:
+      </p>
+      <a class="btn btn-primary" id="open-app-link" href="#">Open in SiteSnap</a>
+      <p class="note">
+        If nothing happens when you tap this, the app isn&rsquo;t installed on this
+        device &mdash; follow the steps above instead.
+      </p>
+    </div>
+
+    <div class="card" id="no-token-card" hidden>
+      <h2>This link looks incomplete</h2>
+      <p>
+        The invitation details are missing from the address, which usually means the
+        link was copied by hand or an email app shortened it. Open the original
+        invitation email and tap <strong>Accept Invitation</strong> rather than typing
+        the address in.
+      </p>
+      <p class="note">
+        Still stuck? Email <a href="mailto:support@getsitesnapai.com">support@getsitesnapai.com</a>
+        and say which site you were invited to.
+      </p>
+    </div>
+
+    <noscript>
+      <div class="card">
+        <h2>JavaScript is turned off</h2>
+        <p>
+          That&rsquo;s fine &mdash; the steps above are all you need. If SiteSnap is
+          already installed on this iPhone, open the invitation email on the phone and
+          tap <strong>Accept Invitation</strong>; the app will open directly.
+        </p>
+      </div>
+    </noscript>
+
+  </div>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <nav class="foot-links" aria-label="Footer">
+      <a href="/">Home</a>
+      <a href="/privacy/">Privacy Policy</a>
+      <a href="/terms/">Terms of Service</a>
+      <a href="mailto:support@getsitesnapai.com">support@getsitesnapai.com</a>
+    </nav>
+    <div class="foot-legal">
+      <span>© 2026 SiteSnap AI Limited</span>
+      <span>Christchurch, New Zealand</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+(function () {
+  // Read the token, then immediately stop showing it. Order matters: the href is
+  // built before the address bar is rewritten, because the rewrite is what makes
+  // the token unavailable to anything that reads location afterwards.
+  var token = null;
+  try {
+    token = new URL(window.location.href).searchParams.get("token");
+  } catch (e) {
+    token = null;
+  }
+
+  if (token) {
+    var link = document.getElementById("open-app-link");
+    // The custom scheme still works and is still handled: the app's
+    // app/+native-intent.tsx matches sitesnap://invite?token= and
+    // https://.../invite?token= with the same branch. This button is the manual
+    // fallback for the case where the Universal Link did not fire -- opened from
+    // inside an app that strips them, say.
+    link.setAttribute("href", "sitesnap://invite?token=" + encodeURIComponent(token));
+    document.getElementById("open-app-card").hidden = false;
+
+    // Drop the token from the address bar and from this history entry, so it is
+    // not sitting on screen, in the back button, or in anything the person shares
+    // from here. Deliberately not a redirect: a redirect would re-request the URL.
+    try {
+      window.history.replaceState(null, "", window.location.pathname);
+    } catch (e) {
+      // Non-fatal. Some embedded browsers refuse replaceState; the page is still
+      // correct, the token just stays visible in the address bar.
+    }
+  } else {
+    document.getElementById("no-token-card").hidden = false;
+  }
+})();
+</script>
+
+</body>
+</html>

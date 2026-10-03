@@ -158,7 +158,8 @@ undeliverable. **Verify update tooling on an unmapped branch; ship to
 ## ADR-0002 — Force the light appearance in JS on every surface iOS themes itself
 
 **Date:** 2026-10-01
-**Status:** Accepted, with an expiry condition (below)
+**Status:** Accepted, with an expiry condition (below). **(b) landed 2026-10-03 —
+see "(b) landed" below.**
 **Finding:** device pass items 1 and 4 — two symptoms, one cause
 **Scope:** every iOS-rendered control in `apps/mobile` (native stack headers, `UIDatePicker`, uncoloured `ActivityIndicator`, unpainted screen backgrounds)
 
@@ -215,6 +216,32 @@ halfway, and this ADR exists because of what halfway looks like.
 The fourth column of the table above is the real argument for doing both: (a) fixes
 the four known surfaces, (b) fixes the one nobody has found yet.
 
+### (b) landed — 2026-10-03
+
+`app.config.ts` now declares `userInterfaceStyle: "light"`.
+
+| | |
+|---|---|
+| Commit | `f98c425` on `feat/invite-universal-links` |
+| App version | `1.0.0` (from `apps/mobile/package.json`, which `app.config.ts` reads) |
+| iOS build number | **to be recorded** — `appVersionSource: "remote"` with `ios.autoIncrement: true`, so EAS assigns it at build time. `eas build:list --platform ios --limit 1` prints it once the build finishes |
+
+The build number is deliberately left blank rather than guessed. The commit is the
+durable identifier anyway: it says exactly which source produced the binary, which
+a build number does not.
+
+**It travelled with the Universal Links entitlement** (ADR-0003) rather than in a
+build of its own. Both are native-only changes that cannot ship over `eas update`,
+and the release path — a store build plus Apple review — is the expensive part. One
+build carrying two native changes is one trip through it.
+
+**(a) was not touched.** The explicit `headerStyle` / `headerTintColor` /
+`themeVariant` props are all still in place, per the decision above: *do not remove
+them as cleanup when the native flip lands.* They are also the insurance that makes
+this flip safe to make before it has been seen on a device — if `"light"` somehow
+does not take effect, the per-surface props still render the app correctly, because
+that is the state it has been shipping in since 2026-10-01.
+
 ### What would change the answer
 
 **The condition is a dark palette existing in `Colors` — a `Colors.dark` beside
@@ -263,8 +290,14 @@ another per-surface prop.
   appearance the chevron should already have worked before this change, so if it is
   visible and still dead, the cause is something else and this entry's item 4
   reasoning is void. The fix stands either way; the diagnosis does not.
-- **Not verified: the native flip.** `userInterfaceStyle: "light"` has not been
-  built, because doing so requires the build this decision defers.
+- **Not verified on a device: the native flip.** As of 2026-10-03 the declaration
+  is made and the *resolved* config was read back rather than trusted — `expo config
+  --type public --json` reports `userInterfaceStyle: "light"`, so the value survives
+  the config function and reaches prebuild. What that does **not** establish is the
+  thing that matters: nobody has yet put the resulting binary on a phone set to dark
+  appearance and looked at the four surfaces in the table above. Until someone has,
+  the diagnosis in this entry remains a hypothesis that the fix happens to be
+  compatible with, exactly as the bullet above says.
 
 ### A containment note worth keeping
 
@@ -279,3 +312,197 @@ The lesson is narrower than the appearance one: **a global declaration about
 chrome is a claim about every screen, and it is only true if every screen was
 checked against it.** Painting the headers navy is what makes that claim true
 here; it is not a styling preference.
+
+---
+
+## ADR-0003 — Claim `www.getsitesnapai.com` for invitation links, and only that host
+
+**Date:** 2026-10-03
+**Status:** Accepted, partially inert until three by-hand steps are done (below)
+**Finding:** Stage 0 invitation review — the invitation link cannot work for the
+only people who ever receive one
+**Scope:** `apps/mobile/app.config.ts` (`ios.associatedDomains`),
+`website/.well-known/apple-app-site-association`, `website/invite/index.html`, and
+the `INVITE_URL` environment variable on the API deployment
+
+### The problem
+
+`services/api/src/services/notificationService.ts:297` builds the invitation link as:
+
+```ts
+const inviteUrl = `${process.env.INVITE_URL || "sitesnap://invite"}?token=${payload.token}`;
+```
+
+`INVITE_URL` is unset, so every invitation email that has ever been sent contains a
+`sitesnap://` custom-scheme URL. **A custom scheme resolves to nothing on a device
+that does not already have the app installed** — and that describes every person an
+invitation is for. The recipient of a crew invitation is, by definition, someone who
+is not yet using SiteSnap.
+
+So the product's only onboarding path for anyone other than the account owner ends
+in a link that does nothing, and the failure is silent on the recipient's side and
+invisible on ours: the email is delivered, the send is recorded as successful, and
+the invitation simply is never accepted. There is nothing in Sentry to find,
+because nothing errors.
+
+### Options considered
+
+| | Option | Cost | Risk |
+|---|---|---|---|
+| **(a)** | Universal Links on an `https` host, plus a web page at the same URL for the not-installed case | A native rebuild (entitlement), a static file, a page, and one environment variable | The AASA mechanism fails silently when misconfigured — see below. Mitigated by making each step separately verifiable |
+| **(b)** | Keep the custom scheme and tell people in the email to install first | Zero | This is the status quo with better wording. The link is still dead, and the token still arrives by a route the recipient cannot use |
+| **(c)** | Accept the invitation in the browser instead | A real web auth flow for crew, who have no web product; a second implementation of token redemption next to `acceptSiteInvite` | Two code paths for the one security-critical operation in the invitation flow. Out of all proportion to the problem |
+| **(d)** | Claim both the apex and `www` | None extra in the app | **Cannot work** — the apex cannot serve the file. See the first measurement below |
+
+### Decision: (a), pinned to `www`, iOS only
+
+`ios.associatedDomains: ["applinks:www.getsitesnapai.com"]`, with
+`/.well-known/apple-app-site-association` on that host and a real page at `/invite`.
+
+**`www`, not the apex, and this is measured rather than preferred.**
+`getsitesnapai.com` returns a 301 on every path, `/.well-known/` included, and
+**Apple does not follow redirects when fetching the AASA file.** An
+`applinks:getsitesnapai.com` entitlement would have built, signed, installed and
+passed review, and then silently never activated — the single worst failure shape
+available here, because everything upstream of it looks correct. Option (d) is not
+a worse trade-off than (a); it is a non-fix that resembles one.
+
+**`components`, not the legacy `paths` array.** `expo-build-properties` sets
+`ios.deploymentTarget: "16.4"`, and `components` has been supported since iOS 13,
+so there is no device in the installed base that needs `paths`. `components` also
+expresses the thing `paths` cannot: `"?": { "token": "?*" }` requires a non-empty
+token, so a bare `/invite` link stays in the browser and shows the page instead of
+opening the app with nothing to redeem.
+
+**iOS only.** Android App Links would need `/.well-known/assetlinks.json`, an
+`android.intentFilters` block with `autoVerify`, and the SHA-256 fingerprint of the
+signing key. There is no Android build to verify any of it against, and an unverified
+App Link is the same silent non-activation as the apex case. Deliberately omitted
+rather than overlooked.
+
+**The custom scheme is kept, not replaced.** `app/+native-intent.tsx` matches
+`sitesnap://invite?token=` (via `hostname`) and `https://…/invite?token=` (via
+`pathname`) in the same branch, so both forms resolve to the same in-app route.
+Existing emails in people's inboxes keep working exactly as well as they did, and
+the landing page offers the `sitesnap://` form as a manual fallback for the case
+where a Universal Link does not fire — opened from inside an app that strips them,
+for instance.
+
+### This decision accepts a new exposure, deliberately
+
+Moving the link from `sitesnap://` to `https://` puts the invitation token in the
+query string of a request to a web server. **The token now appears in Render's and
+Cloudflare's access logs**, where previously it existed only in the email. That is a
+real, new place for a credential to sit, and it is the price of the feature.
+
+It is accepted because the token is weak by construction and strongly bound:
+
+- 64 hex characters from `crypto.randomBytes(32)` — 256 bits, so guessing is not the
+  threat; only disclosure is.
+- **Redeemable only by the invited address.** Both acceptance paths compare
+  `invited_email` against the authenticated caller and return `wrong_user` otherwise
+  (`projectsStore.ts`, in-memory and DB). A token read out of a log is useless to
+  anyone who cannot also authenticate as that specific email address.
+- **Single-use and expiring.** The DB path claims it with
+  `DELETE FROM site_invites WHERE token=$1 AND expires_at > NOW() RETURNING *` — one
+  statement, so concurrent attempts cannot both win — and `expires_at` is set to
+  `Date.now() + 7 days` at both creation sites. A `wrong_user` rejection rolls back,
+  so a failed attempt does not burn a legitimate invitation.
+
+The page reduces what it can and does not pretend to reduce the rest:
+`referrer: no-referrer` so the token cannot leak in a `Referer` header,
+`robots: noindex` so a token-bearing URL never enters a search index, **zero
+third-party resources** so no outside host is even told the URL was visited, and a
+`history.replaceState` that drops the token from the address bar and the history
+entry once it has been read. **None of that touches the server log**, which is why
+it is written down here instead of being treated as solved.
+
+### Three steps this decision does not complete
+
+The entitlement is **inert, not broken**, until all of these are done. Each is
+separately verifiable, which is the mitigation for (a)'s silent-failure risk:
+
+1. **The website redeploys** with `.well-known/apple-app-site-association` and
+   `invite/index.html`. Verify: `curl -sI
+   https://www.getsitesnapai.com/.well-known/apple-app-site-association` returns 200
+   with **zero redirects**.
+2. **`INVITE_URL` is set** to `https://www.getsitesnapai.com/invite` on the API
+   service. Until then `notificationService.ts` keeps using its `sitesnap://`
+   fallback and new emails still carry an unusable link — the app change alone
+   changes nothing for a single recipient.
+3. **A build carrying the entitlement is installed.** Verify against Apple rather
+   than against ourselves: `curl
+   https://app-site-association.cdn-apple.com/a/v1/www.getsitesnapai.com` returns
+   404 today and returns the parsed JSON once Apple's CDN has fetched and accepted
+   the file. That is the only check that proves Apple agrees, as opposed to proving
+   the file exists.
+
+### What would change the answer
+
+- **The app is published on the public App Store.** It is not today —
+  `https://apps.apple.com/app/id6813701040` returns 404 and the iTunes lookup API
+  returns `resultCount: 0` for both the default store and `country=nz` — so the
+  landing page tells people to ask for a TestFlight invitation instead of showing a
+  "Download on the App Store" button that would be a dead link. `website/invite/index.html`
+  carries the exact replacement markup in a comment next to the copy it replaces.
+- **An Android build exists.** Then `assetlinks.json` and `android.intentFilters`
+  with `autoVerify` become the matching work, and the signing-key fingerprint has to
+  come from the build that will actually ship.
+- **The marketing site moves, or the apex starts serving content rather than
+  redirecting.** The entitlement names one host. If that host changes, the
+  entitlement changes, and that is a native rebuild — not a config tweak.
+- **Deferred deep linking is wanted** (install the app and have the invitation apply
+  itself without returning to the email). That needs state the token does not have
+  and a service we do not run. The current design asks the person to tap the email
+  link a second time after installing, which works and costs nothing.
+
+### Verification actually performed
+
+Measurements, with what they returned:
+
+- `curl -sI https://www.getsitesnapai.com/.well-known/apple-app-site-association` →
+  **404, `content_type: text/plain`, `num_redirects: 0`**. The path is reachable and
+  unredirected on `www`; only the file is missing. This is what makes step 1 a
+  deploy rather than a host investigation.
+- The apex 301s on every path including `/.well-known/`, which is the whole argument
+  for pinning to `www` and against option (d).
+- **Content-Type is probably not a blocker, and this was checked rather than
+  assumed.** The file has no extension, so a static host's MIME lookup decides. Four
+  production AASA files: `www.airbnb.com` → `application/json`, `www.dropbox.com` →
+  `application/json; charset=utf-8`, **`www.apple.com` → `application/octet-stream`**,
+  `www.notion.so` → `application/octet-stream`. Apple's own deployment serves
+  `octet-stream` and Universal Links demonstrably work for it, so Apple's fetcher
+  tolerates it. If step 3's CDN check fails anyway, a `Content-Type:
+  application/json` header rule on the static site is the first thing to try.
+- `python3 -m json.tool` parses the AASA file; it has no BOM (`od -c` on the first
+  bytes) and is not caught by `.gitignore` (`git check-ignore`).
+- The landing page was **parsed, not eyeballed**: `html.parser` reports two intact
+  comments, all three element ids the script needs, and **zero external `href`/`src`
+  in the live DOM** — the App Store URL exists only inside a comment, which is the
+  claim that mattered. The inline script was run against a stubbed DOM in four cases
+  (token present, absent, empty, and needing percent-encoding); each asserted both
+  what should appear and what should not, so no case passes vacuously.
+- Invite tokens are `crypto.randomBytes(32).toString("hex")` — hex only, so no `+`
+  or `/` that a query-string parse would mangle on the way to the `sitesnap://`
+  fallback link.
+- **Not verified: anything involving Apple.** No build exists yet, so the
+  entitlement has never been installed, the AASA has never been fetched by Apple's
+  CDN, and no link has ever been tapped on a device. Steps 1-3 above are the
+  verification, and until they are done this entry records an intention that
+  compiles.
+
+### A containment note worth keeping
+
+Every mistake available in this feature has the same shape: **it installs cleanly
+and silently never activates.** A wrong host, a redirect in front of the file, a
+missing `INVITE_URL`, an unverified Android App Link — none of them error, none of
+them appear in Sentry, and all of them look exactly like success from the side that
+ships them. The only honest checks are the ones that ask the other party: Apple's
+CDN for whether it accepted the file, and a tapped link on a real device for whether
+the entitlement works.
+
+The apex finding generalises past this feature. A hostname's DNS and redirect
+behaviour is not infrastructure trivia sitting underneath the feature — here it
+*is* the feature's correctness, and it was decided by a 301 that nobody would have
+thought to look at. Reasoning about the layer you care about, from a measurement of
+a different layer, is how both of this week's near-misses happened.
