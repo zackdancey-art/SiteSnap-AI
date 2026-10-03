@@ -224,11 +224,18 @@ the four known surfaces, (b) fixes the one nobody has found yet.
 |---|---|
 | Commit | `f98c425` on `feat/invite-universal-links` |
 | App version | `1.0.0` (from `apps/mobile/package.json`, which `app.config.ts` reads) |
-| iOS build number | **to be recorded** — `appVersionSource: "remote"` with `ios.autoIncrement: true`, so EAS assigns it at build time. `eas build:list --platform ios --limit 1` prints it once the build finishes |
+| iOS build number | **4** — build `466a694f-b8e8-4ae2-be44-2a4dda291968`, finished 2026-10-03 17:02 NZST. Builds 2 and 3 errored; see ADR-0003's "one failure shape, three times" |
+| Verified in the artifact | `UIUserInterfaceStyle = Light` read from `Info.plist` inside the downloaded `.ipa`, not inferred from the config |
 
-The build number is deliberately left blank rather than guessed. The commit is the
-durable identifier anyway: it says exactly which source produced the binary, which
-a build number does not.
+The build number was deliberately left blank until the build existed rather than
+guessed. The commit is the durable identifier anyway: it says exactly which source
+produced the binary, which a build number does not.
+
+**The flip was confirmed in the artifact rather than in the source.** `plutil` on
+`Payload/SiteSnapAI.app/Info.plist` from the published `.ipa` returns
+`UIUserInterfaceStyle = Light`. That is the one check that distinguishes "the config
+says light" from "the binary declares light", and it is cheap enough that there is no
+reason to accept the weaker claim.
 
 **It travelled with the Universal Links entitlement** (ADR-0003) rather than in a
 build of its own. Both are native-only changes that cannot ship over `eas update`,
@@ -490,6 +497,77 @@ Measurements, with what they returned:
   CDN, and no link has ever been tapped on a device. Steps 1-3 above are the
   verification, and until they are done this entry records an intention that
   compiles.
+
+### Step 3's first half is now verified — in the artifact, not the config
+
+Build **4** (`466a694f-b8e8-4ae2-be44-2a4dda291968`, finished 2026-10-03) carries the
+entitlement, confirmed by opening the published `.ipa` rather than by trusting the
+build's exit status:
+
+| Check | Command | Result |
+|---|---|---|
+| Entitlement in the signed binary | `codesign -d --entitlements :- SiteSnapAI.app` | `com.apple.developer.associated-domains = ("applinks:www.getsitesnapai.com")` |
+| Capability granted by the profile | `security cms -D -i embedded.mobileprovision` | `com.apple.developer.associated-domains = *` |
+| Store distribution, not development | same | `get-task-allow = 0`, `aps-environment = production`, no `ProvisionedDevices` |
+
+**The remaining half of step 3 is Apple's.** `app-site-association.cdn-apple.com/a/v1/www.getsitesnapai.com`
+still 404s, and will until the website deploys and Apple's CDN fetches the file. An
+entitlement in a binary proves the app *asks* for the domain; only the CDN response
+proves Apple *granted* it.
+
+### One failure shape, three times — and the third one is new
+
+The containment note below was written before this feature had been built. Building
+it produced a third instance of the same shape, which is worth recording because it
+is the only one that an agent, rather than a person, walks into:
+
+| | What looks done | What is actually broken | How it announces itself |
+|---|---|---|---|
+| 1 | The entitlement names the apex and the AASA is published | Apple does not follow the apex's 301, so the file is never fetched | Nothing. Links silently stay in the browser |
+| 2 | The AASA file is deployed and returns 200 | A wrong `Content-Type` could make Apple reject it | Nothing. The CDN stays 404 with no reason given |
+| 3 | `eas build` exits 0 and the config declares `associatedDomains` | **The capability was never synced to the App ID, so the profile does not grant it** | **Loudly** — a hard codesign error. This is the exception |
+
+Instance 3 is the one that went right, and the reason is worth stating: **a
+provisioning profile missing a requested entitlement is a codesign failure, not a
+runtime one.** It cannot produce an installable build with dead universal links. The
+first two can.
+
+### The capability sync cannot run from a non-TTY shell
+
+Builds 2 and 3 both errored with `Provisioning profile "…" doesn't support the
+Associated Domains capability`. The cause is in eas-cli, not in this repo, and it
+is a trap for anyone — human or agent — who runs `eas build` from a wrapped shell:
+
+```js
+// eas-cli/build/commandUtils/flags.js:9
+return boolish('CI', false) || !process.stdin.isTTY;
+```
+
+`--non-interactive` **defaults to true whenever stdin is not a TTY**, flag or no
+flag. From there:
+
+- `credentials/context.js:65` — `bestEffortAppStoreAuthenticateAsync()` returns early
+  on `if (this.nonInteractive)`, *before* the `AuthenticationMode.API_KEY` branch, so
+  `ctx.appStore.authCtx` is never set.
+- `credentials/ios/actions/SetUpTargetBuildCredentials.js:17-27` — the capability sync
+  is gated on `if (ctx.appStore.authCtx)`, so `ensureBundleIdExistsAsync` is never
+  called and `syncCapabilitiesAsync` never runs.
+
+So the App ID is never updated, the profile is never re-issued, and the build fails
+at codesign. Removing `--non-interactive` does not help; the TTY check is what
+decides. **After any change to `ios.entitlements` or `associatedDomains`, the first
+build must be run from a real terminal.** Subsequent builds are fine — the capability
+persists on the App ID once synced.
+
+**`Synced capabilities` is not a server-side log line.** It is printed by eas-cli on
+the developer's machine, so it appears in the terminal and never in the EAS build
+log. Grepping the build log for it returns zero for *successful* builds too, which
+makes it useless as a check after the fact. The durable evidence is the provisioning
+profile's `CreationDate` inside the `.ipa`: for build 4 it reads 2026-10-03 16:55:45,
+thirteen seconds before the build started, while the profile's *name* still carries
+its original `2026-09-26` timestamp. **The name is fixed when the profile record is
+created; only the content is re-issued.** Reading the name as a freshness indicator
+is what made builds 2 and 3 look like they had current credentials.
 
 ### A containment note worth keeping
 
