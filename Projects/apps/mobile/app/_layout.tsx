@@ -1,6 +1,6 @@
 import * as Sentry from "@sentry/react-native";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { Stack, useRouter } from "expo-router";
+import { Stack, useNavigationContainerRef, useRouter } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import React, { useEffect } from "react";
@@ -39,6 +39,16 @@ if (sentryDsn) {
   });
 }
 
+// Dev-only navigation probe for the inert back chevron. The require sits INSIDE
+// `if (__DEV__)` on purpose: a top-level import ships the module in production
+// bundles, a gated require eliminates it entirely — see the header of
+// lib/dev-nav-probe.ts. Do not convert this to an import.
+let DevNavProbe: typeof import("@/lib/dev-nav-probe") | null = null;
+if (__DEV__) {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  DevNavProbe = require("@/lib/dev-nav-probe");
+}
+
 SplashScreen.preventAutoHideAsync();
 
 function RootLayoutNav() {
@@ -58,6 +68,33 @@ function RootLayoutNav() {
     const t = setTimeout(() => router.push("/inspections/__signature_probe__"), 1500);
     return () => clearTimeout(t);
   }, [router]);
+
+  // Dev-only: the navigation probe. EXPO_PUBLIC_NAV_PROBE names the route to
+  // open — e.g. `terms-of-service` — and any non-empty value also attaches the
+  // action/state listener that is the actual instrument. Same env-var trigger
+  // as above and for the same reason: expo-dev-launcher claims `sitesnap://` in
+  // a development build, so `simctl openurl` never reaches expo-router.
+  //
+  // Written as a literal `process.env.EXPO_PUBLIC_NAV_PROBE` member access on
+  // purpose: Expo inlines these at build time by static substitution, so a
+  // dynamic lookup would read undefined in a bundled app.
+  const navRef = useNavigationContainerRef();
+  useEffect(() => {
+    if (!__DEV__) return;
+    const probeRoute = process.env.EXPO_PUBLIC_NAV_PROBE;
+    if (!probeRoute) return;
+    const detach = DevNavProbe?.attachNavProbe(navRef, probeRoute);
+    // Push the route under test, then hand over to the person tapping. The
+    // listener is what measures; this only saves nine manual navigations.
+    const t = setTimeout(
+      () => router.push(probeRoute as Parameters<typeof router.push>[0]),
+      1500
+    );
+    return () => {
+      clearTimeout(t);
+      detach?.();
+    };
+  }, [navRef, router]);
 
   return (
     <>

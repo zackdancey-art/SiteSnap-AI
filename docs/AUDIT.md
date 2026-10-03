@@ -564,3 +564,163 @@ So: **no second instance exists today.** That claim is not vacuous — the same 
 **Disposition:** One instance fixed on `fix/signature-sheet-harness`, proved by measurement before and after. Mechanism recorded here because the next person to hit it should find this rather than rediscover it.
 
 A full-screen signature route was considered and rejected: the measurement showed the defect was a child's flexBasis, not the sheet, so a rewrite would have fixed nothing this one-line change did not. It is worth knowing, though, that the signature `<Modal>` is nested inside the inspection-detail `<Modal presentationStyle="pageSheet">`, and on iOS a `<Modal>` is a separate native window — so `router.push()` from inside it renders *underneath*. Moving signature capture to its own route is therefore blocked until the inspection detail screen stops being a modal. If that screen is ever reworked for its own reasons, the move can ride along cheaply. That is an observation about the shape of the code, not work that needs doing.
+
+### L28 — An entry captured offline reaches the server with **no photographs**, and presents as successfully synced — HIGH (data loss; the product's core promise, in the conditions the product exists for)
+
+**Read this before building anything else.** Severity is HIGH not because the mechanism is exotic — it is four lines of straightforward code — but because the failure is silent on both sides, and it fires in the normal case for a construction site rather than an edge case.
+
+**Mechanism.** The online create path in `apps/mobile/lib/data-context.tsx` uploads the photographs and then posts the entry carrying the storage keys the upload returned:
+
+```ts
+const uploadedPhotos = await uploadPhotos(entryData.photos);   // ~line 585
+await apiJson("/projects/entries", {
+  method: "POST",
+  body: JSON.stringify(stripPhotoPayloads({ ...entryData, photos: uploadedPhotos })),
+});
+```
+
+If `uploadPhotos` throws a network error — no signal, which is the case this queue exists for — the catch branch builds an optimistic local entry and enqueues it (~line 621):
+
+```ts
+await savePhotoPayloads(entryData.photos);                        // base64 kept on the device
+await enqueue({ type: "addEntry", payload: stripPhotoPayloads(optimistic) });
+```
+
+`optimistic` carries the **original, never-uploaded** photos. `stripPhotoPayloads` (`lib/photo-payload-store.ts:26`) sets `base64: undefined` on each one. So the queued payload holds photo objects with **no base64 and no storage key** — nothing the server can resolve to an image.
+
+When connectivity returns, the drain handler (lines 434-441) does exactly this and nothing else:
+
+```ts
+if (op.type === "addEntry") {
+  const data = op.payload as Omit<Entry, "id" | "timestamp" | "createdAt">;
+  await apiJson<{ entry: Entry }>("/projects/entries", {
+    method: "POST",
+    body: JSON.stringify(stripPhotoPayloads({ ...data } as Entry)),
+  });
+}
+```
+
+**There is no upload step anywhere in the drain loop.** This is not inferred from the absence of a grep hit — every upload call site in the mobile app was enumerated: `lib/data-context.tsx` lines 150, 174, 196, 224, 324, 585, 644; `app/inspections/[siteId].tsx:664`; `app/new-entry.tsx:481`. The two in `data-context.tsx` that upload entry photographs are 585 (online `addEntry`) and 644 (online `updateEntry`). Neither is reachable from `drainOfflineQueue`.
+
+**Why it is invisible, which is the actual finding.** `savePhotoPayloads` persists the base64 locally, so the phone goes on rendering the photographs from its own store. The entry's pending badge clears when the queue drains, because the POST succeeded — it did succeed; it posted an entry with empty photographs. The device therefore shows a complete, synced diary entry with its images, and the server holds the same entry with none. Nothing on either side reports a problem. The discrepancy only becomes visible from a second surface: the supervisor portal, a generated diary, or an export.
+
+**Blast radius.** Every entry captured without signal. For a product whose value proposition is photographic evidence from sites that frequently have no coverage, the failure is concentrated in exactly the population of records that matter most, and it is not detectable from the capture device. Compounded by L30 (a rejected queued op is deleted) and L31 (no crash or error telemetry from the field), the realistic discovery path is someone opening a months-old diary looking for a photograph that was never there.
+
+**Not fixed.** Outside the eight Stage 1 items, and it is not a one-line change: the queued op needs to carry something that survives an app restart, and the drain loop needs to upload before it posts and handle a partial upload. It needs its own branch and a test that queues an entry offline, drains it, and asserts the server-side record holds a managed storage key — which fails today.
+
+**Verification required when it is fixed.** Mobile has no test harness (`find Projects/apps -name '*.test.ts*'` returns nothing), so the red-on-revert proof has to come from either the first mobile test setup or an API-side test that asserts the posted payload shape. A device pass alone cannot prove it, because the device displays the photographs whether or not they uploaded — which is the whole problem.
+
+**Disposition:** Open, unfixed, recorded 3 October 2026 from `fix/stage-1-field-app-defects`. Ranked first in `docs/STAGE-1-3-REVIEW.md` Part 8, ahead of every feature on the backlog.
+
+### L29 — *(reserved)*
+
+Reserved for the finding Prompt 23 refers to as "the user's conflicting L26, renumbered L29". No second L26 exists in git: `docs/AUDIT.md` carries L24–L27 byte-identically on `main`, on `fix/stage-1-field-app-defects` and on `feat/invite-universal-links`, and its L26 is the double-tapped-Save finding above. The number is left unused rather than claimed, so that whatever it refers to can take it without a collision. See `docs/STAGE-1-3-REVIEW.md` Part 4.
+
+### L30 — A queued offline write that the server rejects is silently deleted — MEDIUM (data loss; same loop as L28, and it hides L28's eventual fix)
+
+The drain loop's error branch in `apps/mobile/lib/data-context.tsx`:
+
+```ts
+if (!isNetworkError(err)) {
+  await dequeue(op.id);
+  console.warn("[queue] Dropping unrecoverable queued op", op.type, err);
+}
+```
+
+Not retrying a request the server has rejected is correct — an op that fails deterministically would otherwise retry forever and block the queue behind it. **Discarding the person's work to achieve that is the defect.** Any non-network failure — a 400, a 403, a validation rejection, including now a timesheet refused by the L28-era `superRefine` added in `56dddf5` — removes the queued entry permanently. The only trace is a `console.warn` on a device with no crash reporting (L31), so there is no record anywhere that the entry existed.
+
+**The correct shape** is a dead-letter state rather than a delete: mark the op failed, leave it in local storage, stop retrying it, and surface it in the UI as "this entry could not be synced" with the server's reason. That keeps the queue unblocked, which is what the `dequeue` was for, without destroying the record.
+
+**Disposition:** Open, unfixed. Fix alongside L28 — the same branch, and in that order, because an L28 fix that fails partway must not be silently swallowed by this.
+
+### L31 — `EXPO_PUBLIC_SENTRY_DSN` is set in the **API's** `.env` and empty in the **mobile app's**, so there is no error telemetry from the field — MEDIUM (observability; the reason L28 and L30 would go unnoticed)
+
+The standing explanation for mobile Sentry being dead was a broken transport. It is not. The DSN exists and is in the wrong file.
+
+**Measured without printing any value**, by string length only:
+
+| file | `EXPO_PUBLIC_SENTRY_DSN` |
+|---|---|
+| `Projects/services/api/.env` | present, length 95 |
+| `Projects/apps/mobile/.env` | present, length 0 |
+
+Nothing in the API reads an `EXPO_PUBLIC_`-prefixed variable — the prefix is Expo's build-time inlining convention, so the value is inert where it sits and absent where it is needed. The API's own `SENTRY_DSN` is separate and live, which is why server-side Sentry works and gives the false impression Sentry is wired up generally.
+
+**Consequence.** From the moment the app is used on a real site there is no crash reporting, no error reporting and no console visibility from the field. That is what makes L28 and L30 undetectable in practice: both fail quietly, and the one mechanism that would surface them is switched off by a misplaced line.
+
+**Not fixed here, deliberately.** This is a live credential in a gitignored file; relocating a secret between `.env` files is the owner's action, not an unprompted one. Record, do not move.
+
+**One decision it creates rather than removes.** The Sentry init sets `attachScreenshot: true` (`apps/mobile/app/_layout.tsx:28`), so a crash report may carry a screenshot of a site photograph — which means supplying the mobile DSN sends image content to a US-hosted service and is a privacy decision, not a configuration switch. It is also the third US exposure path, alongside OpenAI and the legacy `us-east-1` bucket (see L32 and `docs/legal/README.md`). Recommended: `attachScreenshot: false` until L28 is closed.
+
+**Disposition:** Open. Owner action. Blocks nothing technically and blocks observing everything.
+
+### L32 — Camera GPS coordinates are extracted and persisted, while the published privacy text said they were not stored — MEDIUM (disclosure accuracy; the data itself is arguably wanted)
+
+The previously published privacy text stated that location is used at request time to auto-fill weather and is **not stored**. That is false, and the full path is in the code:
+
+- the image picker is called with `exif: true`
+- `extractGpsFromExif()` reads the camera's coordinates, in both `app/new-entry.tsx` and `app/inspections/[siteId].tsx`
+- `...gps` is spread onto the photo object
+- `types.ts:31` carries `latitude` / `longitude`
+- `photos_json JSONB` persists them with the entry
+
+So a photograph may carry the location where it was taken, in the database, indefinitely. **For a site diary that is plausibly a feature** — evidence of where work happened is exactly what the product is for — but it was being denied in a privacy policy, which is the finding. The canonical policy now describes it accurately.
+
+**A second, genuinely unresolved half.** The uploaded file is a re-encoded JPEG produced by `manipulateAsync`, and its output metadata block was **not inspected**. Whether EXIF survives re-encoding is therefore unknown, and the policy says **unverified** rather than claiming stripping — claiming it would be an invented assurance. What would settle it: `exiftool` on one re-encoded upload pulled from the bucket, or a test that encodes a known-EXIF fixture and inspects the output bytes.
+
+**Disposition:** Disclosure corrected in `87679c9` and the render commits. The underlying behaviour is unchanged and needs a product decision — see "photo metadata at the shutter", ranked 4th in `docs/STAGE-1-3-REVIEW.md` Part 8. The EXIF-survival question remains open.
+
+### L33 — No code path can delete a stored object, and two deletion mechanisms coexist with nothing naming which applies — MEDIUM (retention; four published promises depended on it)
+
+**Proved structurally, not by failing to find a grep hit.** `services/api/src/storage/mediaStorage.ts:21-24` defines the entire storage interface:
+
+```ts
+type MediaStorageAdapter = {
+  saveFile: (args: SaveFileArgs) => Promise<SavedFile>;
+  readFile: (storageKey: string, filename: string, storagePath?: string) => Promise<Buffer>;
+};
+```
+
+Two methods. Line 3 imports `GetObjectCommand` and `PutObjectCommand` only — `DeleteObjectCommand` is imported nowhere in the API, and `grep -rn "DeleteObject\|unlink" Projects/services/api/src` returns **zero lines** — not zero outside tests, zero. **There is no way, from any code path, to delete a photograph.** Account deletion does not; site deletion does not; entry deletion does not.
+
+`migrations/023_uploads_ownership.sql:10-16` adds to this: `uploads(id, filename, company_id, owner_email TEXT, created_at)` has **no foreign key**, so the upload records survive the account cascade too — the file and the record of the file both outlive the account that created them.
+
+**The second half of the finding.** Two deletion mechanisms exist and nothing distinguished them:
+
+| tables | mechanism |
+|---|---|
+| `incidents`, `crew_timecards`, `inspections`, `material_deliveries` | **soft** — `UPDATE … SET deleted_at = NOW()`, row retained |
+| `project_sites`, `project_entries`, `project_diaries`, `project_templates` | **hard** — `DELETE FROM` |
+
+Soft for compliance records is correct and deliberate. The problem was that no user-facing text, and no doc, said which was which — and the first draft of `settings/data-privacy.tsx` written during this round got it **wrong in the generous direction**, telling the reader their deleted records were retained when for a site or an entry they are not. Corrected in `ec457cb`.
+
+**Four published promises rested on deletion that does not exist**, all of them now rewritten rather than fixed: `DELETE /auth/account`'s "permanently deleted" response, the settings `Alert`'s "permanently delete … all your site data", "then permanently purged", and `backup-data.tsx` presented as a data export.
+
+**Disposition:** Not built — instructed not to, and the right call: the photographs it would delete are the evidence the product exists to retain, so this is a retention decision, not a delete button. Text made honest in `ec457cb`; backlog item carried in the PR body and ranked 11th in Part 8. Build it when someone exercises an IPP 6/7 request, as part of a retention policy.
+
+### L34 — Email and SMS verification codes are stored in plaintext; the scrypt cost factor is a default rather than a decision — MEDIUM (credential handling; deliberately withheld from published text)
+
+`migrations/001_initial_schema.sql:20-21`:
+
+```sql
+email_code TEXT NOT NULL,
+sms_code   TEXT NOT NULL,
+```
+
+`auth_pending_registrations` stores the verification codes themselves, in clear, in the same row as `password_hash`. Anyone with a read of that table during the pending window can complete a registration. The codes are short-lived, which bounds it, and `auth_users` is the table that matters more — but a one-way hash costs nothing here and a comparison against a hash is the same code shape.
+
+**Related, same file area.** `services/api/src/utils/password.ts:9` calls `scryptAsync(password, salt, KEY_LENGTH)` with no options object, so hashing runs at Node's defaults (N=16384, r=8, p=1). Defensible for the threat model, but it is a default that nobody chose, and nothing in the repo records that it was considered or what it should be if the table ever leaks.
+
+**Why this is not in the published privacy policy.** No IPP requires publishing the weakness of a specific safeguard, and doing so is an invitation rather than a disclosure. The policy discloses the A5 gaps it should — no access record, no breach-notification process, bearer token and raw photographs in plain `AsyncStorage` with no `SecureStore`, no data-processing agreement with any sub-processor — and leaves the two above to this file. That boundary was drawn deliberately and is worth keeping consistent.
+
+**Disposition:** Open, unfixed, out of scope for this branch. Hash the codes when the auth path is next touched; make the scrypt parameters explicit in the same commit so the value is a decision with a date on it.
+
+### L35 — A user-facing-copy defect was located at the layer no user reads — LOW (pattern; the finding is the method, not the string)
+
+The audit item named the `DELETE /auth/account` response message, which said "Account and all associated data have been permanently deleted." It was changed. Then the question of who displays it was checked: `app/(tabs)/settings.tsx` discards the response body on success and navigates straight to `/login`. **The message is dead text — no user has ever seen it.**
+
+The promise a person actually reads is the `Alert` in the confirmation dialog, which said "This will permanently delete your account and all your site data, entries, and reports." Both are corrected in `ec457cb`; the server message because it is still wrong, the `Alert` because it is the one that matters.
+
+**The generalisable part.** The item was found by grepping the API for promissory language, so it landed on the API's string. A copy defect found by searching the server is located at the wrong layer **by default** — mobile clients routinely discard response bodies. Fixing only what the grep found would have closed the item as done while changing nothing anybody reads, and the audit would have been wrong in a way that looked complete. When a finding is about what a person is told, the fix has to be traced to the surface that tells them.
+
+**Disposition:** No standing code issue. Recorded as a method note, in the manner of L25: check who renders a string before accepting that changing it fixed anything.

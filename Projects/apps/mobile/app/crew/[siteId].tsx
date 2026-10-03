@@ -34,6 +34,57 @@ function calcHours(start: string, end: string, breakMin: number) {
   return { regular: parseFloat(regular.toFixed(2)), overtime: parseFloat(overtime.toFixed(2)) };
 }
 
+const CLOCK_TIME_PATTERN = /^\d{1,2}:\d{2}$/;
+
+/** Minutes since midnight, or null if the value is not a usable clock time. */
+function parseClockMinutes(value: string): number | null {
+  if (!CLOCK_TIME_PATTERN.test(value)) return null;
+  const [h, m] = value.split(":").map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+  if (h > 23 || m > 59) return null;
+  return h * 60 + m;
+}
+
+// The client half of the span validation. The API's TimecardSchema.superRefine
+// (services/api/src/routes/crew.ts) is authoritative and rejects all of this
+// with a 400; this mirrors it so the person entering the card sees the problem
+// on the field instead of a generic failure Alert after a round trip.
+//
+// Keep the two in step. If they drift, the server wins and the symptom is a
+// save that looks fine here and fails there.
+function timecardSpanProblem(start: string, finish: string, breakMin: number): string | null {
+  const s = start.trim();
+  const f = finish.trim();
+  if (!s && !f) return null;
+  if (!s) return "Add a start time, or clear the finish time.";
+  if (!f) return "Add a finish time, or clear the start time.";
+
+  const sMin = parseClockMinutes(s);
+  const fMin = parseClockMinutes(f);
+  if (sMin === null) return "Start time must be a time of day in HH:MM form, e.g. 07:00.";
+  if (fMin === null) return "Finish time must be a time of day in HH:MM form, e.g. 15:30.";
+
+  if (fMin <= sMin) {
+    return `Finish time ${formatTime(f)} is not after the start time ${formatTime(s)}. Overnight shifts are not supported.`;
+  }
+  if (fMin - sMin - (breakMin || 0) <= 0) {
+    return `A ${breakMin} minute break leaves no worked time between ${formatTime(s)} and ${formatTime(f)}.`;
+  }
+  return null;
+}
+
+// The default pair is 07:00 -> 15:30, so a finish derived from a start keeps
+// that 8h30 shape. Used when a chosen start overtakes the finish: shifting the
+// finish is what the person meant, and it beats leaving an invalid pair on
+// screen for them to notice.
+const DEFAULT_SHIFT_MINUTES = 8 * 60 + 30;
+function deriveFinishFrom(start: string): string {
+  const sMin = parseClockMinutes(start);
+  if (sMin === null) return "15:30";
+  const fMin = Math.min(sMin + DEFAULT_SHIFT_MINUTES, 23 * 60 + 59);
+  return `${String(Math.floor(fMin / 60)).padStart(2, "0")}:${String(fMin % 60).padStart(2, "0")}`;
+}
+
 function formatTime(t: string) {
   if (!t) return "—";
   const [h, m] = t.split(":").map(Number);
@@ -162,6 +213,11 @@ export default function CrewTimecards() {
     return { regular: 0, overtime: 0 };
   }, [startTime, endTime, breakMinutes]);
 
+  const spanProblem = useMemo(
+    () => timecardSpanProblem(startTime, endTime, Number(breakMinutes) || 0),
+    [startTime, endTime, breakMinutes]
+  );
+
   const weeks = useMemo(() => groupByWeek(timecards), [timecards]);
 
   const totals = useMemo(() => ({
@@ -195,15 +251,41 @@ export default function CrewTimecards() {
     // crews work similar hours, so remembering beats a fixed guess.
     const last = [...timecards].sort((a, b) => (a.date < b.date ? 1 : -1))[0];
     if (last) {
-      if (last.startTime) setStartTime(last.startTime);
-      if (last.endTime) setEndTime(last.endTime);
-      if (typeof last.breakMinutes === "number") setBreakMinutes(String(last.breakMinutes));
+      // Decline a prefill that would not save. Rows predating the span
+      // validation can hold a finish before its start (that is the defect this
+      // item is about), and copying one forward would open the form already
+      // invalid, blaming the new card for the old one's data.
+      const lastBreak = typeof last.breakMinutes === "number" ? last.breakMinutes : 0;
+      const prefillable =
+        last.startTime &&
+        last.endTime &&
+        timecardSpanProblem(last.startTime, last.endTime, lastBreak) === null;
+      if (prefillable) {
+        setStartTime(last.startTime!);
+        setEndTime(last.endTime!);
+        setBreakMinutes(String(lastBreak));
+      }
     }
     setShowForm(true);
   };
 
+  // Choosing a start that overtakes the finish derives a new finish rather than
+  // leaving the pair invalid. An explicit finish the user has already set past
+  // the new start is left exactly as they set it.
+  const applyStartTime = (next: string) => {
+    setStartTime(next);
+    const nextMin = parseClockMinutes(next);
+    const endMin = parseClockMinutes(endTime);
+    if (nextMin !== null && (endMin === null || endMin <= nextMin)) {
+      setEndTime(deriveFinishFrom(next));
+    }
+  };
+
   const handleAdd = async () => {
     if (!workerName.trim()) { Alert.alert("Required", "Worker name is required."); return; }
+    // The message is already on the Finish field; the Alert is for the case
+    // where Save is pressed without the field in view.
+    if (spanProblem) { Alert.alert("Check the hours", spanProblem); return; }
     setSaving(true);
     try {
       await apiJson(`/api/crew/timecards`, {
@@ -447,9 +529,12 @@ export default function CrewTimecards() {
                 <View style={styles.timeSep}><Text style={{ color: Colors.textTertiary, fontSize: 20 }}>→</Text></View>
                 <Pressable style={styles.timeBox} onPress={() => setPicker("end")}>
                   <Text style={styles.inputLabel}>Finish</Text>
-                  <Text style={styles.timeValue}>{formatTime(endTime)}</Text>
+                  <Text style={[styles.timeValue, spanProblem ? styles.timeValueProblem : null]}>{formatTime(endTime)}</Text>
                 </Pressable>
               </View>
+              {spanProblem && (
+                <Text style={styles.spanProblemTxt}>{spanProblem}</Text>
+              )}
               <View style={[styles.breakBlock, { borderTopWidth: 1, borderTopColor: Colors.borderLight }]}>
                 <Text style={styles.inputLabel}>Break</Text>
                 <View style={styles.breakChips}>
@@ -462,7 +547,17 @@ export default function CrewTimecards() {
               </View>
 
               {/* Computed result */}
-              {(computed.regular > 0 || computed.overtime > 0) && (
+              {/* The chip reports hours when the span is usable and says so when
+                  it is not. It used to show "0.00h regular" for a reversed pair,
+                  which reads as a computed answer rather than as a refusal. */}
+              {spanProblem ? (
+                <View style={styles.computedRow}>
+                  <View style={[styles.computedChip, styles.computedChipProblem]}>
+                    <Ionicons name="alert-circle" size={14} color={Colors.errorText} />
+                    <Text style={[styles.computedTxt, { color: Colors.errorText }]}>Hours cannot be worked out</Text>
+                  </View>
+                </View>
+              ) : (computed.regular > 0 || computed.overtime > 0) && (
                 <View style={styles.computedRow}>
                   <View style={styles.computedChip}>
                     <Ionicons name="checkmark-circle" size={14} color={Colors.success} />
@@ -525,7 +620,7 @@ export default function CrewTimecards() {
                   onChange={(_e: DateTimePickerEvent, d?: Date) => {
                     if (!d) return;
                     if (picker === "date") setDate(dateToYMD(d));
-                    else if (picker === "start") setStartTime(dateToHHMM(d));
+                    else if (picker === "start") applyStartTime(dateToHHMM(d));
                     else setEndTime(dateToHHMM(d));
                   }}
                 />
@@ -539,7 +634,7 @@ export default function CrewTimecards() {
                   setPicker(null);
                   if (e.type === "set" && d) {
                     if (picker === "date") setDate(dateToYMD(d));
-                    else if (picker === "start") setStartTime(dateToHHMM(d));
+                    else if (picker === "start") applyStartTime(dateToHHMM(d));
                     else setEndTime(dateToHHMM(d));
                   }
                 }}
@@ -628,6 +723,9 @@ const styles = StyleSheet.create({
   input: { borderWidth: 1, borderColor: Colors.border, borderRadius: 12, padding: 12, fontSize: 15, color: Colors.text, backgroundColor: Colors.surface },
   timeRow: { flexDirection: "row", alignItems: "flex-start", gap: 8, paddingVertical: 14 },
   timeSep: { alignItems: "center", paddingTop: 24 },
+  timeValueProblem: { color: Colors.errorText },
+  spanProblemTxt: { fontSize: 12, fontFamily: "Inter_500Medium", color: Colors.errorText, paddingHorizontal: 12, paddingBottom: 10 },
+  computedChipProblem: { backgroundColor: Colors.errorBg },
   computedRow: { flexDirection: "row", gap: 8, paddingBottom: 12, paddingTop: 4 },
   computedChip: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: Colors.success + "18", borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 },
   computedTxt: { fontSize: 13, fontFamily: "Inter_600SemiBold", color: Colors.success },

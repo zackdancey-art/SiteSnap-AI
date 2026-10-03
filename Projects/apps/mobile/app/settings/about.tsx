@@ -46,6 +46,17 @@ export default function AboutSettingsScreen() {
               is a construction site-records app for builders and site managers. Capture daily site diaries, photos, incidents, deliveries, inspections and timesheets from the field, then generate clean, shareable PDF and Word reports. Built for how NZ and AU sites run.
             </SettingsBody>
             <SettingsDividerFull />
+            <SettingsBody>
+              <SettingsBodyStrong>Who makes it. </SettingsBodyStrong>
+              SiteSnap AI Limited, NZBN 9429053872258, Christchurch, New Zealand.
+              support@getsitesnapai.com
+            </SettingsBody>
+            <SettingsDividerFull />
+            <SettingsBody>
+              <SettingsBodyStrong>Still in testing. </SettingsBodyStrong>
+              This build is distributed through TestFlight and has not been submitted to the App Store. Keep your own copies of anything you cannot afford to lose — the records screens will export to PDF or Word.
+            </SettingsBody>
+            <SettingsDividerFull />
             <SettingsRow icon="information-circle-outline" label="Version" value={versionLabel} />
           </SettingsCard>
         </SettingsSection>

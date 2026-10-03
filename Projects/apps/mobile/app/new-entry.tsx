@@ -198,7 +198,19 @@ export default function NewEntryScreen() {
     notesMode !== initialSnapshotRef.current.notesMode ||
     snapshotHourlyNotes(hourlyNotes) !== initialSnapshotRef.current.hourlyNotesJson ||
     snapshotPhotos(photos) !== initialSnapshotRef.current.photosJson;
-  const markSaved = useUnsavedChangesGuard(isDirty);
+  // Hoisted above the guard below, which needs `saving`. The doc comment for
+  // why this state exists at all is with handleSave.
+  const [saveProgress, setSaveProgress] = useState<SaveProgress | null>(null);
+  const saving = saveProgress !== null;
+
+  // `saving ||`, not `isDirty` alone. The guard disables the iOS sheet's
+  // swipe-dismiss while dirty, which covers a save started from a changed form
+  // — the fields are not cleared until after it completes, so the form is still
+  // dirty throughout. It does NOT cover re-saving an entry that was opened and
+  // not edited: isDirty is false there, the gesture is live, and a swipe lands
+  // mid-upload. The uploads retry with backoff, so that window is seconds long,
+  // not milliseconds.
+  const markSaved = useUnsavedChangesGuard(isDirty || saving);
 
   // Keep hourlyNotes in sync with the [hourStart, hourEnd] window, preserving
   // any notes already entered for hours that remain in range.
@@ -460,8 +472,6 @@ export default function NewEntryScreen() {
    * so a save in progress was indistinguishable from a tap the app had ignored.
    * The natural response to that is to tap Save again.
    */
-  const [saveProgress, setSaveProgress] = useState<SaveProgress | null>(null);
-  const saving = saveProgress !== null;
   // Synchronous companion to `saving`. See handleSave for why state cannot do
   // this. `saving` still drives everything the user sees; this only gates entry.
   const savingRef = useRef(false);

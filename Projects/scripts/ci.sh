@@ -98,6 +98,79 @@ step "Structural: ci.yml defines no gate of its own"
 step "Structural: mobile Babel preset matches the SDK"
 node ./scripts/assert-babel-preset-expo.mjs
 
+# The Privacy Policy and the Terms each exist in three copies: the canonical
+# markdown in docs/legal/, a data module the mobile app renders, and a page on
+# the marketing site. AUDIT A6 is what happens without this check — the copies
+# had already drifted into different section orders, different retention claims
+# and two different answers to whether the company was incorporated, and
+# nothing anywhere reported the disagreement because each copy was internally
+# consistent. Three copies is the cost of having the text in an app binary, in
+# a static site, and in version control; silent drift between them is not.
+#
+# The comparison is a normalised word stream, so wrapping, indentation,
+# punctuation, markup and TypeScript syntax are all invisible to it and only a
+# change in the words themselves fails the build. The "Last updated" date is a
+# word stream like any other, which is how one date stays one date.
+legal_words() {
+  # $1 file, $2 begin marker, $3 end marker. The markers must be matched as
+  # whole lines: the phrase "BEGIN LEGAL TEXT" also appears in the canonical
+  # files' own header prose, and a substring match starts the range there and
+  # drags the header table into the comparison.
+  sed -n "\|$2|,\|$3|p" "$1" \
+    | sed -e '1d' -e '$d' \
+    | sed -e 's/<[^>]*>/ /g' -e 's/&#\{0,1\}[a-z0-9]*;/ /g' -e 's/\\n/ /g' \
+    | tr 'A-Z' 'a-z' \
+    | tr -cs 'a-z0-9_' '\n' \
+    | grep -vxE 'export|const|legaldocument|privacy_policy|terms_of_service|title|lastupdated|intro|sections|paragraphs' \
+    | sed -e '/^$/d'
+}
+
+MD_BEGIN='^<!-- BEGIN LEGAL TEXT -->$'
+MD_END='^<!-- END LEGAL TEXT -->$'
+TS_BEGIN='^// BEGIN LEGAL TEXT$'
+TS_END='^// END LEGAL TEXT$'
+
+assert_legal_copies() {
+  canon="../docs/legal/$1.md"
+  mobile="apps/mobile/constants/legal/$1-content.ts"
+  site="../website/$2/index.html"
+  tmp="$(mktemp -d)"
+
+  legal_words "$canon" "$MD_BEGIN" "$MD_END" > "$tmp/canon"
+
+  # A renamed or deleted marker makes an extraction empty, and two empty word
+  # streams compare equal — the check would pass having read nothing. Refuse a
+  # canonical body that is implausibly short before trusting any comparison
+  # against it.
+  words="$(wc -l < "$tmp/canon" | tr -d ' ')"
+  if [ "$words" -lt 400 ]; then
+    echo "ci.sh: extracted only $words words from $canon (expected >400)." >&2
+    echo "  Either the document was gutted or the BEGIN/END LEGAL TEXT markers" >&2
+    echo "  moved. Not comparing anything against it." >&2
+    rm -rf "$tmp"; exit 1
+  fi
+
+  legal_words "$mobile" "$TS_BEGIN" "$TS_END" > "$tmp/mobile"
+  legal_words "$site" "$MD_BEGIN" "$MD_END" > "$tmp/site"
+
+  failed=0
+  for target in mobile site; do
+    if ! diff -u "$tmp/canon" "$tmp/$target" > "$tmp/$target.diff"; then
+      eval "path=\$$target"
+      echo "ci.sh: $path has drifted from $canon." >&2
+      sed -n '3,40p' "$tmp/$target.diff" >&2
+      failed=1
+    fi
+  done
+  rm -rf "$tmp"
+  [ "$failed" = "0" ] || exit 1
+  echo "  $1: $words words, both copies match."
+}
+
+step "Structural: the legal documents have not drifted from their source"
+assert_legal_copies privacy-policy privacy
+assert_legal_copies terms-of-service terms
+
 step "Build shared types"
 # @sitesnap/shared emits .d.ts only; TypeScript project references in the API
 # and both apps fail to resolve until this has run.
