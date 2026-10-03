@@ -1,7 +1,9 @@
 # L28, L30, L31 — Photographs Captured Offline Reach the Server
 
-**Branch:** `fix/offline-photo-sync` — 7 commits off `main` (`4f6b327`)
-**Written:** 4 October 2026, against commit `ece490c`
+**Branch:** `fix/offline-photo-sync`, off `main` (`4f6b327`)
+**Commit count:** in the PR body rather than here — a count committed into the document it counts
+is wrong the moment it is corrected
+**Written:** 4 October 2026
 **Source of truth for the diagnosis:** `docs/AUDIT.md` L28, L30, L31 and `docs/STAGE-1-3-REVIEW.md` Part 2
 **Scope:** the capture path that silently dropped its inputs, the queue that deleted work the
 server refused, the telemetry that would have reported both, and the privacy correction the
@@ -451,4 +453,4 @@ new consumer is the temporary cache file `photo-bytes.ts` writes, which is relea
 ---
 
 **What this branch does not change:** nothing on the server, nothing in the database, no
-migration, no native module, no dependency. Seven commits, each revertible alone.
+migration, no native module, no dependency. Each commit is revertible alone.
