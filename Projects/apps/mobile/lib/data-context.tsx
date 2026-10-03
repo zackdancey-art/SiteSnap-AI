@@ -23,7 +23,13 @@ import {
 } from "@/lib/offline-queue";
 import { drainQueue } from "@/lib/offline-drain";
 import { materializeQueuedPhoto } from "@/lib/photo-bytes";
-import { isManagedMediaUri, toCanonicalPath, toStorablePhotoUri } from "@/lib/photo-uri";
+import {
+  canonicalUploadPathFromResponse,
+  isManagedMediaUri,
+  toCanonicalPath,
+  toStorablePhotoUri,
+  UploadAddressMissingError,
+} from "@/lib/photo-uri";
 import { reportMediaFailure } from "@/lib/media-telemetry";
 import { reportSyncFailure } from "@/lib/sync-telemetry";
 
@@ -206,7 +212,25 @@ async function uploadPhotoOnce(photo: Entry["photos"][number]) {
   }
 
   const payload = (await res.json()) as { url?: string; storagePath?: string; storageKey?: string };
-  const canonicalPath = payload.url?.startsWith("/") ? payload.url : (payload.url || "");
+
+  // A 200 carrying no address is not a success — see
+  // `canonicalUploadPathFromResponse`. Reported from here rather than left to
+  // the drain because this is where the cause is known: the server took the
+  // bytes and did not name them. That is a different defect from an upload that
+  // never arrived, and it is the only one that can leave behind a record
+  // asserting it holds a photograph with no address for one.
+  let canonicalPath: string;
+  try {
+    canonicalPath = canonicalUploadPathFromResponse(payload.url, photo.id);
+  } catch (err) {
+    reportSyncFailure({
+      kind: "photo-upload-address-missing",
+      photoId: photo.id,
+      stage: "upload",
+      cause: err,
+    });
+    throw err;
+  }
 
   return {
     ...photo,
@@ -224,6 +248,10 @@ async function uploadPhoto(photo: Entry["photos"][number]): Promise<Entry["photo
       return await uploadPhotoOnce(photo);
     } catch (err) {
       lastErr = err;
+      // Not transient, and retrying it costs more than it could win: every
+      // attempt re-POSTs the same bytes and leaves another orphaned object in
+      // the bucket. Fail now and let the op dead-letter.
+      if (err instanceof UploadAddressMissingError) break;
       if (attempt < backoff.length) {
         await new Promise((r) => setTimeout(r, backoff[attempt]));
       }

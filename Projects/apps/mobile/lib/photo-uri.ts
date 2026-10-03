@@ -132,3 +132,62 @@ export const UNAVAILABLE_SHORT_LABEL = "Image unavailable";
 export function toStorablePhotoUri(uri: string | undefined | null): string {
   return toCanonicalPath(uri) ?? uri ?? "";
 }
+
+/**
+ * Thrown when the server took a photograph's bytes but did not say where it
+ * put them.
+ *
+ * A distinct type rather than a plain Error because the retry wrapper must be
+ * able to recognise it. Every other upload failure is worth retrying; this one
+ * is not, and retrying it is actively harmful — each attempt re-POSTs the same
+ * bytes and leaves another orphaned object in the bucket, which is the same
+ * duplicate-write defect `uploadPhotoOnce`'s own header describes.
+ */
+export class UploadAddressMissingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UploadAddressMissingError";
+  }
+}
+
+/**
+ * The canonical path from an upload response, or a throw.
+ *
+ * WHY THIS IS NOT AN INLINE EXPRESSION ANY MORE
+ *
+ * It used to be one, at the `POST /api/uploads` call site:
+ *
+ *     const canonicalPath = payload.url?.startsWith("/") ? payload.url : (payload.url || "");
+ *
+ * Read the fallbacks. A response with no `url` — a 200 whose body is `{}`, a
+ * shape change, a proxy that rewrote the body — produced the empty string, and
+ * the empty string was then written to the photograph's `uri` as though the
+ * upload had succeeded. The queue dequeued the op, the local bytes were
+ * released, and nothing threw, logged or reported. What remained was a record
+ * asserting it held a photograph, with no address for one and no copy left on
+ * the device.
+ *
+ * That is the failure this whole area exists to prevent, arrived at from the
+ * opposite direction: not a photograph the server never received, but one it
+ * received and could not name. So the absence of an address is now an error.
+ * The op dead-letters, the person is told, and the bytes stay on the device —
+ * the same handling as any other upload that did not complete.
+ *
+ * Note what is NOT in the thrown message: the offending value. A uri never goes
+ * into an error that reaches telemetry (see `sync-telemetry-redaction.ts` — the
+ * report has no field for one, deliberately, because a displayable media uri
+ * carries an HMAC granting two hours of read access). The photograph's id says
+ * which one it was; that is enough to investigate with.
+ */
+export function canonicalUploadPathFromResponse(
+  url: unknown,
+  photoId: string | undefined
+): string {
+  const canonical = typeof url === "string" ? toCanonicalPath(url.trim()) : null;
+  if (!canonical) {
+    throw new UploadAddressMissingError(
+      `Photograph ${photoId || "(no id)"} was accepted by the server, but the response carried no usable upload address.`
+    );
+  }
+  return canonical;
+}

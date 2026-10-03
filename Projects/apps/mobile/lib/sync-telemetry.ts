@@ -68,7 +68,11 @@ export function reportSyncFailure(report: SyncFailureReport): void {
 
     Sentry.withScope((scope) => {
       scope.setTag("sync_failure", report.kind);
-      scope.setLevel(report.kind === "queued-photo-bytes-missing" ? "error" : "warning");
+      // Error, not warning, for the two kinds that can leave a record asserting
+      // it holds evidence it does not hold. Everything else is recoverable work.
+      const assertsMissingEvidence =
+        report.kind === "queued-photo-bytes-missing" || report.kind === "photo-upload-address-missing";
+      scope.setLevel(assertsMissingEvidence ? "error" : "warning");
       scope.setContext("sync", transmittablePayload(report));
       // Grouped by kind and op type, not by the server's wording, so one issue
       // per failure mode rather than one per message variant.

@@ -29,7 +29,15 @@ export type SyncFailureKind =
    * This should be impossible — `savePhotoPayloads` runs at capture — which is
    * exactly why it must be reported rather than assumed away.
    */
-  | "queued-photo-bytes-missing";
+  | "queued-photo-bytes-missing"
+  /**
+   * The server accepted a photograph's bytes and returned no address for them.
+   * Not prefixed `queued-` because it is not queue-specific: `uploadPhotoOnce`
+   * is shared, so this fires on an ordinary online save too. Before it was an
+   * error it was an empty string written to the photograph's uri, which read as
+   * a successful upload at every layer above. AUDIT L41.
+   */
+  | "photo-upload-address-missing";
 
 export interface SyncFailureReport {
   kind: SyncFailureKind;
@@ -64,6 +72,8 @@ export function describeSyncFailure(report: SyncFailureReport): string {
       return `Queued photograph would not upload${report.status ? ` (${report.status})` : ""}`;
     case "queued-photo-bytes-missing":
       return "Queued photograph has no local bytes left to upload";
+    case "photo-upload-address-missing":
+      return "Server accepted a photograph but returned no address for it";
   }
 }
 

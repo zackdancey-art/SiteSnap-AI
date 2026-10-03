@@ -32,6 +32,7 @@
     "lib/test-setup.ts",
     "lib/types.ts",
     "lib/photo-uri.ts",
+    "lib/photo-uri.test.ts",
     "lib/offline-queue.ts",
     "lib/photo-payload-store.ts",
     "lib/sync-telemetry-redaction.ts",

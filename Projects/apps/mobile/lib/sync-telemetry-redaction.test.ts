@@ -143,6 +143,7 @@ test("every kind produces a readable, app-authored title", () => {
     "queued-op-dead-lettered",
     "queued-photo-upload-failed",
     "queued-photo-bytes-missing",
+    "photo-upload-address-missing",
   ];
   for (const kind of kinds) {
     const title = describeSyncFailure({ kind, opType: "addEntry" });
