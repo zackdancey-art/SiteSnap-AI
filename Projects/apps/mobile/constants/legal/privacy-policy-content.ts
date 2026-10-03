@@ -25,7 +25,7 @@ export type LegalDocument = {
 // BEGIN LEGAL TEXT
 export const PRIVACY_POLICY: LegalDocument = {
   title: "Privacy Policy",
-  lastUpdated: "Last updated: 3 October 2026",
+  lastUpdated: "Last updated: 4 October 2026",
   intro: [
     "SiteSnap AI Limited, NZBN 9429053872258, is a New Zealand company. This policy "
       + "explains what the SiteSnap app and supervisor portal collect, where it goes, who can "
@@ -143,11 +143,20 @@ export const PRIVACY_POLICY: LegalDocument = {
         "Australia, for photographs. Amazon S3 in Sydney holds and stores files for us, in "
           + "the same agent position as Render. Australia's Privacy Act 1988 is the closest "
           + "comparable regime to New Zealand's of any country our information reaches.",
-        "The United States, for five things. Photographs and notes go to OpenAI when you "
-          + "generate an AI diary, described in section 6. Email addresses and invitation links "
-          + "go to Resend to send email. Phone numbers and verification codes go to Twilio to "
-          + "send SMS. Crash reports from the server go to Sentry. The older photograph bucket "
-          + "named in section 4 is also in the United States.",
+        "The United States, for five things. Photographs and notes go to "
+          + "OpenAI when you generate an AI diary, described in section 6. Email "
+          + "addresses and invitation links go to Resend to send email. Phone "
+          + "numbers and verification codes go to Twilio to send SMS. Crash "
+          + "reports go to Sentry, from the server and from the app. The app also "
+          + "tells Sentry when a photograph or an entry you captured with no "
+          + "coverage fails to reach us, because otherwise nobody would find out "
+          + "that it had not arrived. Those reports carry identifiers, counts and "
+          + "error codes, together with the device model, operating system and "
+          + "app version that Sentry records automatically. They do not carry "
+          + "photographs, note text, site addresses or email addresses, and the "
+          + "app does not attach a screenshot of what was on screen when "
+          + "something went wrong. The older photograph bucket named in section 4 "
+          + "is also in the United States.",
         "OpenAI is a genuine disclosure rather than an agent arrangement, because OpenAI "
           + "retains what we send it for its own abuse-monitoring purposes. The basis for that "
           + "disclosure is OpenAI's standard API terms. We hold no data processing agreement "
@@ -240,11 +249,13 @@ export const PRIVACY_POLICY: LegalDocument = {
           + "holds the hosting, database and storage credentials. There is no separation "
           + "between running the service and reading what is in it, and no log of who read "
           + "what.",
-        "There is no breach detection. The Privacy Act 2020 requires us to notify the "
-          + "Privacy Commissioner and the people affected about a notifiable privacy breach. We "
-          + "would do that. But we have no monitoring that would reliably tell us a breach had "
-          + "happened, and no written process for handling one. Crash reporting from the app "
-          + "itself is not switched on.",
+        "There is no breach detection. The Privacy Act 2020 requires us to "
+          + "notify the Privacy Commissioner and the people affected about a "
+          + "notifiable privacy breach. We would do that. But we have no "
+          + "monitoring that would reliably tell us a breach had happened, and no "
+          + "written process for handling one. The crash and sync reporting "
+          + "described in section 5 is not breach detection: it tells us when our "
+          + "own software has broken, not when someone has got in.",
         "Device storage is not encrypted by us. See section 4.",
         "We have no data processing agreement with any of our providers. See section 5.",
         "We have not verified what camera metadata survives upload. See section 3.",
