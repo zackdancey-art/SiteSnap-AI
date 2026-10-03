@@ -93,7 +93,12 @@ dismiss during a save. Same one-word change, two files I was told not to touch.
 an upload needs a phone and a slow connection.
 
 ### Item 5 — Dashboard rebuild, and the conditional hook in the same file
-**`0fadf2d`** · `apps/supervisor-web` dashboard · JS-only
+**`0fadf2d`** · `apps/mobile/app/supervisor-dashboard.tsx` · JS-only
+
+Note for anyone reading the commit subject: this is the **mobile** screen named
+"supervisor dashboard", not the `apps/supervisor-web` Next.js package. I had it as the
+latter in the first draft of this review and corrected it from the commit's file list — it
+matters because it changes the deploy target from a website deploy to an `eas update`.
 
 Rebuilt, and the hook that sat below an early return moved above it, so the hook order is
 stable across renders rather than depending on whether data had loaded.
