@@ -1361,3 +1361,93 @@ remainder and the most certainly broken.
 hypothesis. The remaining 16 call sites in the table above are open, as one follow-up change to the
 portal's handling of browser-only values — a `useSavedUser()` hook or a session provider, applied
 across the pages at once, with the `useRole` behaviour change called out for review.
+
+---
+
+### L50 — The portal's Live Map settings were all three dead: written to localStorage, re-displayed, and read by nothing — LOW (feature failure; silent, and the map behaved correctly by coincidence)
+
+The settings page offered a manager three controls over the Live Locations map — refresh interval,
+"show inactive workers", and the stale cutoff — persisted them to `localStorage` under
+`sitesnap.mapPrefs`, and read them back on its own next visit so the chosen values were still
+shown. Nothing else in the portal ever read the key. Measured on `main` (4 October 2026):
+
+```
+$ git grep -n "sitesnap.mapPrefs" -- Projects
+Projects/apps/supervisor-web/app/settings/page.tsx:214:    const sm = localStorage.getItem("sitesnap.mapPrefs");
+Projects/apps/supervisor-web/app/settings/page.tsx:264:    localStorage.setItem("sitesnap.mapPrefs", JSON.stringify(next));
+```
+
+One writer, one reader, the same file. `locations/page.tsx` on `main`:
+
+- `:72` — `setInterval(() => void fetchLocations(), 30_000)`, the interval hardcoded.
+- `:39` — `if (m < 60) return "#F59E0B"`, the amber/grey boundary hardcoded to 60 minutes.
+- `:101-102` — the legend written out as "Recent (< 1 hour)" / "Stale (> 1 hour)" in prose.
+- no filter anywhere on staleness, so "show inactive workers" governed nothing at all.
+
+**What made this worse than an unwired control.** The two hardcoded numbers happened to equal the
+two defaults — 30 seconds and 60 minutes — so a manager who never changed the settings saw a map
+that agreed with them exactly, and a manager who did change them saw a map that still agreed with
+the *defaults* while the settings page confirmed their new choice. The control was not visibly
+broken; it was quietly ignored, which is the state in which a user stops trusting the page rather
+than reporting a bug. The third control is the one with teeth: a manager on a 300-worker account
+who hides inactive workers to find the four people actually on site was shown all 300 regardless.
+
+**Also wrong in the same place, found while fixing it.** The empty state read "No workers have
+shared their location in the last 4 hours" (`:134`). Four hours is not a window this page, the API
+endpoint, or any setting uses — it was invented in the copy. `GET /api/location/workers` returns
+what it returns; the portal does not pass a window. A manager reading that sentence would conclude
+a worker had not pinged in four hours when the truth is simply that the endpoint returned nothing.
+
+**Fixed.** `lib/mapPrefs.ts` is now the single definition of the key, the shape, the defaults, the
+offered option sets, the validating reader, the writer, and the two formatters. Both pages import
+it, so neither owns a literal the other can disagree with — the split ownership was itself the
+cause: two files, two copies of the key string, two copies of the defaults, and no compiler
+relationship between them.
+
+The reader validates each field against the option sets rather than trusting the parsed JSON,
+because `localStorage` is user-writable and the old reader took `JSON.parse` output wholesale. A
+hand-edited `{"refreshInterval":0}` became `setInterval(…, 0)` against the live API on a page a
+site office leaves open all day; `readMapPrefs` now returns the default for any field that is not
+one of the offered values.
+
+The polling effect is split from the mount effect and keyed on `[mapPrefs.refreshInterval]`, so
+changing the interval restarts the timer instead of needing a reload, and the cleanup cannot leave
+two timers running. `visibleLocations` is derived once and fed to the map, the header count, the
+table and the empty state together, so those four cannot disagree about who is on screen. Every
+number in the legend, the refresh note and the empty state is now formatted from the setting it
+describes. The ten-minute green "active" boundary stays hardcoded deliberately — no control offers
+it, and inventing one here would be this same defect in the other direction.
+
+**What this does NOT fix, and it is the same defect class.** The Live Map section was not the only
+dead one on that page. Measured the same day:
+
+| Setting | Persisted to | Read by anything that acts on it |
+|---|---|---|
+| Display → `dateFormat` | server, `updateAccountSettings` | **No** — no page formats a date through it |
+| Display → `defaultPeriod` | server, `updateAccountSettings` | **No** — `reports/page.tsx` has its own default |
+| Display → `compactTables` | server, `updateAccountSettings` | **No** — no table reads it |
+| Display → `timezone` | `localStorage`, `sitesnap.displayPrefs` | **No** — every `toLocale*` call hardcodes `en-AU` |
+| Advanced → API URL | `localStorage`, `sitesnap.apiUrl` | **Partly** — only the health-check button on the same page |
+
+```
+$ grep -rn "getAccountSettings\|compactTables\|dateFormat\|defaultPeriod" \
+    Projects/apps/supervisor-web --include="*.tsx" --include="*.ts" | grep -v settings/page
+Projects/apps/supervisor-web/lib/api.ts:130:  display?: Partial<{ dateFormat: …; defaultPeriod: …; compactTables: boolean }>;
+Projects/apps/supervisor-web/lib/api.ts:134:export async function getAccountSettings(): Promise<AccountSettings> {
+```
+
+The type and the transport exist; no consumer does. The API URL field is the one worth naming
+separately, because it is misleading rather than merely inert: the portal's real API base is
+`process.env.NEXT_PUBLIC_API_URL`, baked at build time and compiled into the CSP (L48), so a
+manager who types a different origin there gets a successful health check against it and every
+other request still going to the build-time origin. Changing that field cannot work by design, and
+the page implies it can.
+
+Four more dead controls and one actively misleading one were left alone deliberately: the task
+named the map polling preference, the Display prefs need a decision about where account settings
+are consumed rather than a few lines of wiring, and the API URL field probably wants removing — a
+judgement about what the Advanced section is for, not a bug fix.
+
+**Disposition:** Fixed for the Live Map. The three controls now govern the page they describe, the
+invented four-hour claim is gone, and the key/shape/defaults have one owner. The Display section
+and the API URL field are open as the same finding in a different section of the same page.

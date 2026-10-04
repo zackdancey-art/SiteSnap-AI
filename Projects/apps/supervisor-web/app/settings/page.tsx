@@ -6,6 +6,12 @@ import Sidebar from "@/components/Sidebar";
 import Topbar from "@/components/Topbar";
 import { getSavedUser, isAuthenticated, logout, changePassword, revokeAllSessions, fetchCompanyProfile, updateCompanyProfile, getAccountSettings, updateAccountSettings, type AccountSettings } from "@/lib/api";
 import { useRole } from "@/lib/useRole";
+import {
+  MAP_PREFS_DEFAULTS, readMapPrefs, writeMapPrefs,
+  REFRESH_INTERVAL_OPTIONS, STALE_CUTOFF_OPTIONS,
+  describeInterval, describeCutoff,
+  type MapPrefs,
+} from "@/lib/mapPrefs";
 
 // ── Dev-tools gate ───────────────────────────────────────────────────────────
 // The API Connection panel is only shown when NEXT_PUBLIC_SHOW_DEV_TOOLS=true.
@@ -36,11 +42,6 @@ type ExportPrefs = {
   includeSignature: boolean;
 };
 
-type MapPrefs = {
-  refreshInterval: number;
-  showInactiveWorkers: boolean;
-  staleCutoffMinutes: number;
-};
 
 type SettingsSection =
   | "account" | "organisation" | "notifications"
@@ -185,9 +186,7 @@ export default function SettingsPage() {
     includeSafetyChecklist: true, includeSignature: true,
   });
 
-  const [mapPrefs, setMapPrefs] = useState<MapPrefs>({
-    refreshInterval: 30, showInactiveWorkers: true, staleCutoffMinutes: 60,
-  });
+  const [mapPrefs, setMapPrefs] = useState<MapPrefs>(MAP_PREFS_DEFAULTS);
 
   const [orgName, setOrgName]   = useState("");
   const [orgSaved, setOrgSaved] = useState(false);
@@ -211,8 +210,10 @@ export default function SettingsPage() {
     // local-only until they get a company home — read just those from localStorage.
     const sd = localStorage.getItem("sitesnap.displayPrefs");
     if (sd) { try { const p = JSON.parse(sd) as Partial<DisplayPrefs>; if (p.timezone) setDisplay((d) => ({ ...d, timezone: p.timezone as string })); } catch { /* */ } }
-    const sm = localStorage.getItem("sitesnap.mapPrefs");
-    if (sm) { try { setMapPrefs(JSON.parse(sm) as MapPrefs); } catch { /* */ } }
+    // Through the shared reader, which validates each field against the option
+    // sets below. A hand-edited value in localStorage used to be trusted
+    // wholesale and is now rejected per field (see lib/mapPrefs.ts).
+    setMapPrefs(readMapPrefs());
     // Personal settings (notifs, export, display minus timezone) come from the
     // account via the API, so they persist across devices — not localStorage.
     getAccountSettings().then((s) => {
@@ -261,7 +262,7 @@ export default function SettingsPage() {
   const updateMap = <K extends keyof MapPrefs>(key: K, val: MapPrefs[K]) => {
     const next = { ...mapPrefs, [key]: val };
     setMapPrefs(next);
-    localStorage.setItem("sitesnap.mapPrefs", JSON.stringify(next));
+    writeMapPrefs(next);
   };
 
   const saveOrg = async () => {
@@ -515,20 +516,14 @@ export default function SettingsPage() {
             {/* Live Map */}
             {activeSection === "tracking" && (
               <Panel title="Live Map" description="Configure how the worker location map behaves in the dashboard.">
-                <Row label="Show inactive workers" sub="Display workers whose last ping was more than 1 hour ago (shown in grey)">
+                <Row label="Show inactive workers" sub={`Display workers whose last ping was more than ${describeCutoff(mapPrefs.staleCutoffMinutes)} ago (shown in grey)`}>
                   <Toggle checked={mapPrefs.showInactiveWorkers} onChange={(v) => updateMap("showInactiveWorkers", v)} />
                 </Row>
                 <Row label="Map auto-refresh interval" sub="How often the supervisor map polls for updated worker positions">
                   <Select<string>
                     value={String(mapPrefs.refreshInterval)}
                     onChange={(v) => updateMap("refreshInterval", Number(v))}
-                    options={[
-                      { value: "15", label: "15 seconds" },
-                      { value: "30", label: "30 seconds" },
-                      { value: "60", label: "1 minute" },
-                      { value: "120", label: "2 minutes" },
-                      { value: "300", label: "5 minutes" },
-                    ]}
+                    options={REFRESH_INTERVAL_OPTIONS.map((s) => ({ value: String(s), label: describeInterval(s) }))}
                     width={160}
                   />
                 </Row>
@@ -536,12 +531,7 @@ export default function SettingsPage() {
                   <Select<string>
                     value={String(mapPrefs.staleCutoffMinutes)}
                     onChange={(v) => updateMap("staleCutoffMinutes", Number(v))}
-                    options={[
-                      { value: "30", label: "30 minutes" },
-                      { value: "60", label: "1 hour" },
-                      { value: "120", label: "2 hours" },
-                      { value: "240", label: "4 hours" },
-                    ]}
+                    options={STALE_CUTOFF_OPTIONS.map((m) => ({ value: String(m), label: describeCutoff(m) }))}
                     width={160}
                   />
                 </Row>
