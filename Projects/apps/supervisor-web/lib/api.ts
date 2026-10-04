@@ -189,8 +189,21 @@ export async function generateDiary(payload: { siteId: string; period: string; e
   return { ...data.diary, generation: data.generation ?? null };
 }
 
-export async function signUploadPaths(paths: string[]): Promise<{ path: string; url: string | null }[]> {
-  const data = await request<{ signed: { path: string; url: string | null }[] }>("POST", "/api/uploads/sign", { paths });
+/**
+ * One path's result from `/api/uploads/sign`.
+ *
+ * `error` is the field this type used to drop. The server distinguishes two
+ * refusals per path — `"Invalid upload path."` for something that is not a
+ * managed `/api/uploads/<id>/<name>` address, and `"Not found."` for one whose
+ * upload row does not belong to the caller's company (deliberately the same
+ * answer for a missing file and another tenant's, so existence is not
+ * confirmed). Discarding it left the portal unable to say anything beyond a
+ * grey square that reads "Loading…" forever (AUDIT L43).
+ */
+export type SignedUploadPath = { path: string; url: string | null; error?: string };
+
+export async function signUploadPaths(paths: string[]): Promise<SignedUploadPath[]> {
+  const data = await request<{ signed: SignedUploadPath[] }>("POST", "/api/uploads/sign", { paths });
   return data.signed;
 }
 

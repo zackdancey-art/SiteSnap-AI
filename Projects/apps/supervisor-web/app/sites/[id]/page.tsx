@@ -41,13 +41,17 @@ function formatTime(t?: string) {
 }
 
 function PhotosTab({
-  photos, signedUrls, signing,
+  photos, signedUrls, errors, requestError, signing, onRetry,
 }: {
   photos: { uri: string; caption?: string }[];
   signedUrls: Map<string, string>;
+  errors: Map<string, string>;
+  requestError: string | null;
   signing: boolean;
+  onRetry: () => void;
 }) {
   const [lightbox, setLightbox] = useState<{ url: string; caption?: string } | null>(null);
+  const failedCount = photos.filter((p) => errors.has(p.uri)).length;
 
   return (
     <>
@@ -59,12 +63,36 @@ function PhotosTab({
           {signing && <span style={{ marginLeft: 8, fontSize: 12, color: "var(--text-secondary)" }}>Loading…</span>}
         </div>
 
+        {/* A manager looking at grey squares is told what went wrong and can ask
+            again. Shown whether the failure was per-path or whole-request. */}
+        {!signing && (requestError || failedCount > 0) && (
+          <div style={{
+            margin: "16px 20px 0", padding: "10px 14px",
+            display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+            borderRadius: 10,
+            border: "1px solid var(--error)",
+            background: "var(--surface-secondary)",
+            fontSize: 13, color: "var(--text-secondary)",
+          }}>
+            <span style={{ color: "var(--error)" }}>⚠</span>
+            <span style={{ flex: 1, minWidth: 160 }}>
+              {requestError
+                ? `Photos could not be loaded: ${requestError}`
+                : `${failedCount} of ${photos.length} photo${photos.length === 1 ? "" : "s"} could not be loaded.`}
+            </span>
+            <button className="btn-ghost" onClick={onRetry} style={{ fontSize: 12, padding: "5px 12px" }}>
+              Try again
+            </button>
+          </div>
+        )}
+
         {photos.length === 0 ? (
           <div className="empty-state"><p>No photos uploaded yet.</p></div>
         ) : (
           <div style={{ padding: 20, display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 14 }}>
             {photos.map((p, i) => {
               const signedUrl = signedUrls.get(p.uri);
+              const failure = signedUrl ? undefined : errors.get(p.uri);
               return (
                 <div
                   key={i}
@@ -89,9 +117,20 @@ function PhotosTab({
                       style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
                     />
                   ) : (
-                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
-                      <span style={{ fontSize: 32, opacity: 0.4 }}>📷</span>
-                      <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>Loading…</span>
+                    // "Loading…" under a load that has finished and failed is the
+                    // defect, not the styling: it tells a manager to wait for
+                    // something that is never coming.
+                    <div
+                      style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, padding: 10, textAlign: "center" }}
+                      title={failure ?? undefined}
+                    >
+                      <span style={{ fontSize: 32, opacity: 0.4 }}>{failure ? "⚠" : "📷"}</span>
+                      <span style={{ fontSize: 11, color: failure ? "var(--error)" : "var(--text-tertiary)" }}>
+                        {failure ? "Unavailable" : "Loading…"}
+                      </span>
+                      {failure && (
+                        <span style={{ fontSize: 10, color: "var(--text-tertiary)", lineHeight: 1.3 }}>{failure}</span>
+                      )}
                     </div>
                   )}
                   {p.caption && signedUrl && (
@@ -160,6 +199,10 @@ export default function SiteDetailPage() {
   const [approving, setApproving]       = useState<string | null>(null);
   const [signedPhotoUrls, setSignedPhotoUrls] = useState<Map<string, string>>(new Map());
   const [signingPhotos, setSigningPhotos]     = useState(false);
+  // Per-path refusals, and the whole-request failure, kept separately: one grey
+  // tile among forty is a different message from forty grey tiles.
+  const [photoErrors, setPhotoErrors]         = useState<Map<string, string>>(new Map());
+  const [photoRequestError, setPhotoRequestError] = useState<string | null>(null);
 
   const site    = bootstrap?.sites.find((s) => s.id === siteId);
   const entries = bootstrap?.entries.filter((e) => e.siteId === siteId) ?? [];
@@ -186,23 +229,55 @@ export default function SiteDetailPage() {
     return entries.flatMap((e) => (e.photos ?? []));
   }, [entries]);
 
-  // Sign photo URLs when the Photos tab is opened
+  // Sign photo URLs when the Photos tab is opened.
+  //
+  // A path that has been attempted is excluded whether it succeeded or failed,
+  // which is a correctness requirement and not an optimisation: `photos` is a
+  // fresh array on every render, so this effect runs on every render, and the
+  // only thing that stops it re-requesting is a path being accounted for. When
+  // failures were discarded they were never accounted for, so a single path the
+  // server refuses put the portal into an unbounded loop of sign requests —
+  // invisible until the CSP fix above made any of this reachable at all.
   useEffect(() => {
     if (tab !== "photos" || photos.length === 0 || signingPhotos) return;
-    const unsigned = photos.map((p) => p.uri).filter((u) => u && !signedPhotoUrls.has(u));
-    if (unsigned.length === 0) return;
+    const unattempted = photos
+      .map((p) => p.uri)
+      .filter((u) => u && !signedPhotoUrls.has(u) && !photoErrors.has(u));
+    if (unattempted.length === 0) return;
     setSigningPhotos(true);
-    signUploadPaths(unsigned)
+    setPhotoRequestError(null);
+    signUploadPaths(unattempted)
       .then((results) => {
-        setSignedPhotoUrls((prev) => {
-          const next = new Map(prev);
-          results.forEach(({ path, url }) => { if (url) next.set(path, url); });
-          return next;
+        const signed = new Map<string, string>();
+        const refused = new Map<string, string>();
+        results.forEach(({ path, url, error }) => {
+          if (url) signed.set(path, url);
+          else refused.set(path, error ?? "The server returned no address for this photo.");
         });
+        // A path asked for and absent from the response is neither signed nor
+        // refused; record it so it is not asked for again on the next render.
+        const answered = new Set(results.map((r) => r.path));
+        unattempted.forEach((path) => {
+          if (!answered.has(path)) refused.set(path, "The server did not answer for this photo.");
+        });
+        if (signed.size > 0) setSignedPhotoUrls((prev) => new Map([...prev, ...signed]));
+        if (refused.size > 0) setPhotoErrors((prev) => new Map([...prev, ...refused]));
       })
-      .catch(console.error)
+      .catch((err: unknown) => {
+        // The whole request failed, so nothing is attributable to a path. Left
+        // out of `photoErrors` on purpose: the retry below has to be able to ask
+        // for all of them again.
+        setPhotoRequestError(err instanceof Error ? err.message : "Could not load photos.");
+      })
       .finally(() => setSigningPhotos(false));
   }, [tab, photos]);
+
+  // Retry clears the record of what was attempted, which is what lets the effect
+  // above ask again.
+  const retryPhotos = () => {
+    setPhotoErrors(new Map());
+    setPhotoRequestError(null);
+  };
 
   const totalHours = useMemo(() => ({
     regular: timecards.reduce((s, t) => s + t.hoursRegular, 0),
@@ -496,7 +571,10 @@ export default function SiteDetailPage() {
             <PhotosTab
               photos={photos}
               signedUrls={signedPhotoUrls}
+              errors={photoErrors}
+              requestError={photoRequestError}
               signing={signingPhotos}
+              onRetry={retryPhotos}
             />
           )}
 
