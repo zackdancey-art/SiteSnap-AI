@@ -770,7 +770,38 @@ The retention-period and HSWA wording is the same uncited seven-year claim alrea
 
 **What the fix is, when it is taken.** Port the reviewed canonical text into both portal pages as data rendered through their existing `Section` component (the shape `apps/mobile/constants/legal/*-content.ts` already proves), add the `BEGIN/END LEGAL TEXT` markers, and extend `assert_legal_copies` to compare three render targets per document instead of two — so that the check's green result finally means what it appears to mean. `docs/legal/README.md` records a deliberate decision against a permanent generator; a one-off transcription respects that.
 
-**Disposition:** Open, recorded 4 October 2026 from `fix/offline-photo-sync`. **Highest-priority disclosure item**, ahead of L32 and L33, because unlike those it is not a question of wording accuracy about a real feature — it is text the owner has already reviewed and replaced, still being served.
+**Fixed by removal, not transcription (4 October 2026)**
+
+The paragraph above — "port the reviewed canonical text into both portal pages … extend `assert_legal_copies` to compare three render targets per document" — was overruled by the owner, and correctly. Both routes are now 307 redirects to the marketing site's pages, declared in `apps/supervisor-web/next.config.mjs`; the two page files are deleted. The marketing site already renders the canonical text, is already the public home of both documents, and both URLs answer 200 (verified 4 October 2026; the apex 301s to `www`, so `www` is the destination).
+
+**Why removal is the better fix, and not merely the cheaper one.** Transcription would have left four copies per document where the drift check enumerates three, and would have made the portal a *render target* for legal text — a third layout, with its own `Section` component, its own typography and its own opportunity to drop a clause in a merge. The check would then have proved that four copies agreed, which is a stronger claim than before and still not the claim anyone wants. A redirect removes the copy instead of policing it. The reader gets the same words as the reader on the phone by construction.
+
+What it costs: a manager tapping "Privacy Policy" in the portal leaves the portal. That is a real downgrade in polish and the right trade for a compliance-evidence product, where the document being *correct* outranks the document being *in-app*. The redirect is `permanent: false` (307) deliberately, so that an in-product page rendered FROM `docs/legal/` remains an easy future change rather than a cached 308 in every manager's browser.
+
+**Extending the check — what was built, and what it cannot do**
+
+A second structural step in `Projects/scripts/ci.sh`, a copy *census*: `git grep` for three distinctive section headings per document, and assert the set of files containing them is exactly the enumerated set of three. A seventh copy appearing fails the build on the commit that adds it. Proven red-on-revert: a scratch file containing one heading made the step exit 1 and name the file; removing it returned exit 0.
+
+**And now the part this finding demands be said plainly: the census would not have caught the two pages it was written because of.** They were not copies of the canonical text, they were independent rewrites — different section titles, different structure, claims (the Information Privacy Principles, the Australian Privacy Principles, an "Acceptable Use" section, a "Limitation of Liability" section) that appear in no other copy. Not one of the six marker phrases appears in either deleted file, checked against the blobs rather than assumed:
+
+```
+$ for ph in <the three privacy headings>; do
+    git show HEAD:Projects/apps/supervisor-web/app/privacy/page.tsx | grep -qF "$ph" && echo YES || echo no
+  done
+no
+no
+no        # and the same three "no" for terms-of-service
+```
+
+So the census catches the ordinary way a seventh copy appears — somebody pastes the canonical text or an existing copy into a new file — and does not catch somebody writing their own privacy policy from scratch, which is how these two got there.
+
+**A check that would catch a rewrite was designed, measured and rejected.** It has to key on something weaker than the words: the document's display title, or a `/privacy` route. Measured: 14 tracked files contain the string "Privacy Policy" and 9 contain "Terms of Service", and nearly all are links, navigation labels, route registrations and screen wrappers rather than copies. A 14-entry allowlist is appended to reflexively by whoever turns CI green, which is this finding's own failure mode with extra ceremony. A noisy gate that gets rubber-stamped is worse than an honest narrow one.
+
+**So the thing that actually prevents a seventh rewrite is not a check.** It is that there is no longer a legal page in the portal to copy the pattern from, and that both routes are now two lines of config next to each other. The removal is the structural fix; the census is a tripwire on the easy case, and its comment in `ci.sh` says so in those words so that nobody reads a green build as more than it is.
+
+**Also fixed in this pass, as the entry above asked:** `docs/deploy-supervisor-web.md` no longer opens by asserting the dashboard "has never been deployed". It is live, and its CSP hazard section now names all three directives built from `NEXT_PUBLIC_API_URL` rather than `connect-src` alone.
+
+**Disposition:** Fixed, 4 October 2026, on `feat/manager-dashboard`. The portal no longer publishes a legal document. **Not closed as a disclosure item:** the superseded text has been served publicly for some time and that history is not undone by a redirect; and the canonical documents themselves remain a draft awaiting the owner's legal review, which is `docs/legal/README.md`'s business and not this branch's.
 
 ### L37 — Nothing in the app rendered the sync state at all, so the badge the fix was to be verified against did not exist — MEDIUM (observability; the fix for L28 was unobservable by the same mechanism as L28)
 

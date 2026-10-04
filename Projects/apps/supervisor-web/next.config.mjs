@@ -84,10 +84,49 @@ const cspDirectives = [
   `report-uri ${CSP_REPORT_PATH}`,
 ].join("; ");
 
+/**
+ * Where the legal documents actually live.
+ *
+ * The portal used to carry its own transcription of the Privacy Policy and the
+ * Terms at `/privacy` and `/terms` — a FOURTH copy of each, on top of the
+ * canonical markdown in `docs/legal/`, the mobile app's data module and the
+ * marketing site's pages. The drift check in `Projects/scripts/ci.sh` compared
+ * three copies and had no idea these two existed, which is AUDIT L36's whole
+ * lesson: a check proves only what it enumerates. They had already drifted —
+ * the portal's privacy page claimed compliance with the Information Privacy
+ * Principles and the Australian Privacy Principles, a sentence that appears in
+ * no other copy, and its Terms carried "Acceptable Use" and "Limitation of
+ * Liability" sections the canonical document does not have.
+ *
+ * So these are redirects, not pages. The marketing site already renders the
+ * canonical text and is already the public home of both documents; a reader
+ * sent there gets the same words as a reader on the phone, by construction
+ * rather than by a check.
+ *
+ * `permanent: false` (307) deliberately. A 308 is cached hard by browsers, and
+ * if the portal ever grows a real in-product legal page — rendered FROM
+ * `docs/legal/` rather than retyped — a permanent redirect sitting in every
+ * manager's browser would be a cache to fight rather than a route to change.
+ *
+ * `www` is the canonical host: the apex 301s to it (verified 4 October 2026,
+ * `curl -I https://getsitesnapai.com/privacy/` → 301 to the www URL).
+ */
+const LEGAL_REDIRECTS = [
+  { source: "/privacy", destination: "https://www.getsitesnapai.com/privacy/" },
+  { source: "/terms", destination: "https://www.getsitesnapai.com/terms/" },
+];
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   env: {
     NEXT_PUBLIC_API_URL: API_URL,
+  },
+  async redirects() {
+    return LEGAL_REDIRECTS.map(({ source, destination }) => ({
+      source,
+      destination,
+      permanent: false,
+    }));
   },
   async headers() {
     return [

@@ -167,9 +167,133 @@ assert_legal_copies() {
   echo "  $1: $words words, both copies match."
 }
 
+# ── The census: how many copies there are, not just whether the known ones agree
+#
+# `assert_legal_copies` above compares THREE copies per document, because three
+# is what somebody enumerated. The portal was carrying a fourth of each at
+# `app/privacy/page.tsx` and `app/terms/page.tsx` the entire time this check was
+# green, and they had drifted: the portal's privacy page claimed compliance with
+# the Information Privacy Principles and the Australian Privacy Principles — a
+# sentence in no other copy — and its Terms had "Acceptable Use" and
+# "Limitation of Liability" sections the canonical document does not contain.
+# The check reported nothing, correctly, because it was never told they existed.
+# That is AUDIT L36: a check proves only what it enumerates.
+#
+# Those two are now 307 redirects to the marketing site (see the supervisor-web
+# `next.config.mjs`), so there are six copies. This step asserts that there are
+# six and names them — so a seventh appearing fails the build on the commit
+# that adds it, instead of waiting for someone to notice. Adding a legitimate
+# new copy means adding its path here AND to `assert_legal_copies`, which is
+# the intended friction.
+#
+# WHAT THIS DOES NOT PROVE — and the first item is the uncomfortable one, said
+# plainly here because the finding this closes is about checks that overstate
+# themselves:
+#
+#   - IT WOULD NOT HAVE CAUGHT THE TWO PAGES THAT MOTIVATED IT. The portal's
+#     privacy and terms pages were not copies of the canonical text, they were
+#     independent rewrites: not one of the six marker phrases below appears in
+#     either of them (checked against the deleted blobs, 4 October 2026 —
+#     `git show HEAD:...app/privacy/page.tsx | grep -F <phrase>`, no match for
+#     any of the three, same for terms). So this catches the ordinary way a
+#     seventh copy appears — somebody pastes the canonical text, or one of the
+#     existing copies, into a new file — and does not catch somebody writing
+#     their own privacy policy from scratch.
+#   - A check that WOULD catch a rewrite has to key on something weaker than
+#     the words: the document's title, or a /privacy route. That was measured
+#     and rejected. Fourteen tracked files contain the string "Privacy Policy"
+#     and nine contain "Terms of Service"; nearly all are links, navigation
+#     labels, route registrations and screen wrappers rather than copies. A
+#     fourteen-entry allowlist gets appended to reflexively, which is L36's
+#     failure mode with extra ceremony.
+#   - So what actually prevents a seventh rewrite is not a check at all: it is
+#     that there is no longer a page to copy the pattern from, and that both
+#     routes are now 307s declared next to each other in one config block. The
+#     removal is the structural fix; this step is a tripwire on the easy case.
+#   - A paraphrase, a translation, a summary, a screenshot, a PDF, or text
+#     fetched from a URL at runtime is invisible to it. Three phrases per
+#     document rather than one, so a PARTIAL copy — somebody lifting the
+#     retention section alone — is still caught.
+#   - It sees tracked files only (`git grep`). A generated or gitignored copy is
+#     out of scope, as is anything a build step emits.
+#   - It proves the file count, not that each copy is correct. The word-stream
+#     diff above proves that, and it runs only on enumerated copies — so the
+#     two checks are each other's blind spot and both are needed.
+
+PRIVACY_COPIES="docs/legal/privacy-policy.md
+Projects/apps/mobile/constants/legal/privacy-policy-content.ts
+website/privacy/index.html"
+
+TERMS_COPIES="docs/legal/terms-of-service.md
+Projects/apps/mobile/constants/legal/terms-of-service-content.ts
+website/terms/index.html"
+
+# Section headings from the canonical documents, chosen because they are
+# unmistakable prose rather than legal boilerplate: a verbatim copy cannot omit
+# all three, and no unrelated file has reason to contain any.
+PRIVACY_PHRASES="Three kinds of people appear in SiteSnap
+How long we keep things, and what deleting really does
+Security, as it actually stands"
+
+TERMS_PHRASES="The AI drafts, and what they are not
+Your content is yours
+What we do not promise"
+
+assert_legal_copy_census() {
+  label="$1"; expected_list="$2"; phrases="$3"
+
+  # The census is a `git grep`, so a checkout without a git directory would
+  # find nothing and compare it against the expected list. That fails rather
+  # than passes, but say why.
+  if ! git -C .. rev-parse --git-dir >/dev/null 2>&1; then
+    echo "ci.sh: not a git checkout, so the $label copy census cannot run." >&2
+    echo "  Refusing to report a pass on a check that read nothing." >&2
+    exit 1
+  fi
+
+  tmp="$(mktemp -d)"
+  printf '%s\n' "$expected_list" | sed '/^$/d' | sort > "$tmp/expected"
+  : > "$tmp/found"
+  # This script is excluded because it CONTAINS the marker phrases, by
+  # necessity. Nothing else is excluded: a legal paragraph pasted into a doc, a
+  # README or a component is a copy, and the point is to hear about it.
+  printf '%s\n' "$phrases" | sed '/^$/d' | while IFS= read -r phrase; do
+    git -C .. grep -l -F -e "$phrase" -- . ':(exclude)Projects/scripts/ci.sh' \
+      >> "$tmp/found" 2>/dev/null || true
+  done
+  sort -u "$tmp/found" -o "$tmp/found"
+
+  # Positive control. If every phrase had been reworded in the canonical
+  # document, nothing would match and `found` would be empty; an empty found
+  # against a non-empty expected does fail, but the message below would blame
+  # the wrong thing. Name the real cause.
+  if [ ! -s "$tmp/found" ]; then
+    echo "ci.sh: none of the $label marker phrases matched any file." >&2
+    echo "  The canonical document was almost certainly reworded. Update the" >&2
+    echo "  phrases in this script in the same commit." >&2
+    rm -rf "$tmp"; exit 1
+  fi
+
+  if ! diff -u "$tmp/expected" "$tmp/found" > "$tmp/diff"; then
+    echo "ci.sh: the set of files carrying the $label text is not the set this" >&2
+    echo "  script enumerates. A '+' line is a copy nobody told the drift check" >&2
+    echo "  about; a '-' line is an enumerated copy that no longer holds the" >&2
+    echo "  text." >&2
+    sed -n '3,40p' "$tmp/diff" >&2
+    rm -rf "$tmp"; exit 1
+  fi
+  count="$(wc -l < "$tmp/found" | tr -d ' ')"
+  rm -rf "$tmp"
+  echo "  $label: $count copies, exactly the ones enumerated."
+}
+
 step "Structural: the legal documents have not drifted from their source"
 assert_legal_copies privacy-policy privacy
 assert_legal_copies terms-of-service terms
+
+step "Structural: no unenumerated copy of a legal document has appeared"
+assert_legal_copy_census privacy-policy "$PRIVACY_COPIES" "$PRIVACY_PHRASES"
+assert_legal_copy_census terms-of-service "$TERMS_COPIES" "$TERMS_PHRASES"
 
 step "Build shared types"
 # @sitesnap/shared emits .d.ts only; TypeScript project references in the API
