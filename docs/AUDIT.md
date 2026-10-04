@@ -1028,7 +1028,55 @@ hang off. Any fix for this entry that renders "failed" instead of "loading" must
 five, and the fifth is reachable only by listening for the document's `securitypolicyviolation`
 event.
 
-**Disposition:** Open, recorded 4 October 2026. Fix is small: surface `error` through the wrapper, render a failed tile as failed rather than as loading, and retry once. Web-dashboard branch.
+**And there is a sixth, found 5 October 2026 immediately after the fifth was fixed.** The CSP fix
+deployed and worked — the live header now carries the API origin in `img-src`, confirmed in a
+browser — and every photograph was still a grey tile. The sixth state sits one layer further
+downstream again: the GET **is** issued, the API **answers 200**, the full image body arrives, and
+the browser then **discards it after it has arrived**, because the response carries
+`Cross-Origin-Resource-Policy: same-origin` (Helmet's default, applied globally in `server.ts`) and
+`app.getsitesnapai.com` is not the same origin as `api.getsitesnapai.com`. Measured on production
+the same day, with no session of any kind: the signed URL returns `HTTP/2 200`, `content-type:
+image/jpeg`, `content-length: 1629558`. One and a half megabytes of photograph are transferred and
+thrown away. Chromium reports `net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin`; Safari shows a Network
+row with no status and no headers, which is why it reads as "the request never happened".
+
+**The general lesson, which is bigger than this entry.** A browser can refuse a resource at several
+independent layers, and *clearing one layer does not mean the resource will load* — it means the
+next layer gets its turn, silently, with the same visible symptom. Five of these six states produce
+an identical grey rectangle. Two of them (CSP, CORP) are invisible to the application entirely:
+there is no rejected promise, no error event on the element that distinguishes them, and nothing
+the component can branch on. So "I fixed the cause" is not a claim the symptom's disappearance can
+support, and the only way to close one of these is to watch the pixel. Both times here, the layer
+underneath was found only because somebody opened a browser and looked.
+
+**Security-header audit of the uploads response** (production, 5 October 2026, signed GET, headers
+verbatim). Audited because the CORP fix touches this response and the rest deserved a look while
+the cookie jar was open; **nothing below was changed** — this is a record, not a fix.
+
+| Header | Value | Assessment |
+|---|---|---|
+| `cross-origin-resource-policy` | `same-origin` | **The defect.** Fixed to `same-site`, scoped to this route. |
+| `cross-origin-opener-policy` | `same-origin` | Inert here. COOP governs browsing-context groups for top-level **documents**; it means nothing on an image subresource. Harmless, no action. |
+| `x-frame-options` | `SAMEORIGIN` | Inert here, same reason — XFO governs documents that are framed. It does **not** contradict the portal's own `DENY`: different host, different resource. No action. |
+| `referrer-policy` | `no-referrer` | Correct, and load-bearing by accident: the signed URL carries `?sig=`/`?exp=` in the query, and a referrer-leaking policy would hand that pair to any third party the page later reaches. Keep. |
+| `x-content-type-options` | `nosniff` | Correct and wanted. This route serves user-uploaded bytes; without it a crafted upload could be sniffed into an executable type. Keep. |
+| `strict-transport-security` | `max-age=31536000; includeSubDomains; preload` | Correct. |
+| `cache-control` | `private, max-age=3600` | Fine, and wrong in the safe direction: the cache lifetime (1h) is **shorter** than `SIGNED_URL_TTL_SECONDS` (2h), so a cached copy cannot outlive the signature that authorised it. Worth not inverting later. |
+
+**Correction to a premise carried into this work.** The task stated these URLs "require a valid
+signature **and** an authenticated session", and that any future test of the endpoint needs a
+cookie. That is not what the code does: `uploads.ts:119` accepts `Authorization: Bearer <jwt>`
+**OR** `?sig=&exp=`, and a cookie is read on neither path. Verified on production with both
+controls — the signed URL with no cookie and no bearer returns **200**; the same URL with the
+signature stripped returns **401**. So `curl` can test this endpoint, and the 401 seen earlier was
+an expired or truncated signature (the TTL is two hours), not a missing session.
+
+**`/api/csp-report` exists and works.** Checked because the CSP names it twice (`report-to` and
+`report-uri`) and directives pointing at nothing would be worse than no directives. The route is at
+`apps/supervisor-web/app/api/csp-report/route.ts` and answers **204** on production. Nothing to
+build, nothing to remove.
+
+**Disposition:** Open, recorded 4 October 2026. Fix is small: surface `error` through the wrapper, render a failed tile as failed rather than as loading, and retry once. Web-dashboard branch. The sixth state is **fixed** on `fix/portal-photos-reports-settings` (`e9449e6`); it needs an **API** deploy, not a portal deploy.
 
 ### L44 — The signing effect can wedge: its re-entrancy guard is read but not in its dependency array — LOW (concurrency; a third way a correctly uploaded photograph renders grey)
 
@@ -1528,3 +1576,157 @@ auth pages were not audited: they are a centred 420px card and were out of the b
 
 **Disposition:** Fixed for the nine layout defects above. Tap-target sizing is open as a separate,
 visible change. Verification is code-and-build; a rendered check at 375px and 768px is still owed.
+
+---
+
+### L52 — The Reports page's site `<select>` displays a site it has not selected, so Generate Report has never worked from the portal — HIGH (feature failure; total, since the portal's first commit, and self-contradicting on screen)
+
+The SITE dropdown showed **"Isel park bridge"**. Pressing Generate Report printed **"Please select
+a site."** in red immediately beneath it. Both statements were true at once, which is what makes
+this worth an entry rather than a one-line fix.
+
+`genSiteId` initialises to `searchParams?.get("siteId") ?? ""`, so on a normal visit it is `""`.
+The `<select>` is bound to that value but had **no option whose `value` is `""`** — its options
+were the sites alone. A `<select>` whose `value` matches no option falls back to displaying its
+**first** option, so the control rendered the first site while its state held the empty string. The
+submit guard `if (!genSiteId)` then correctly refused.
+
+The trap is that it was **unescapable**, not merely confusing. The only way to move the state off
+`""` is to choose a *different* option; with one site in the account there is no different option
+to choose, and re-choosing the one already displayed fires no `change` event. A manager with a
+single site could never generate a report, and a manager with several could, by picking the second
+site — which is presumably why this survived: it is intermittent in exactly the way that looks like
+user error.
+
+**It predates Part 1.** `git log -p` on `apps/supervisor-web/app/reports/page.tsx` shows the
+`<select>` byte-identical in **e080ed5 (27 June 2026)**, the commit that first brought the portal
+into the repo. It has never worked.
+
+**The second-order cost is the real finding.** This is the control through which Part 1's item 3 —
+the diary being blind to photographs (**L45**) — was supposed to be verified. Because the control
+could not be operated, that fix, and the site-metadata fix alongside it, were closed on **reasoning
+alone**. A defect in a *verification path* silently converts every fix downstream of it into an
+unverified claim, and nothing reports that it has done so.
+
+The adjacent `<select>` on the same page has always been correct: it carries `<option
+value="all">All Sites</option>` against an `"all"` default. The fix is the same shape — give the
+`""` state an option of its own.
+
+**Disposition:** **Fixed** on `fix/portal-photos-reports-settings` (`2bf33bb`). Needs a **portal**
+deploy. Verified by generating a real monthly report for Isel Park Bridge through the fixed
+control; the output is in the PR body. It names the site, client and address and describes twelve
+photographs by content, so **L45 and the site-metadata fix are now confirmed working** rather than
+assumed.
+
+---
+
+### L53 — The Settings page paints its nav over its own content panel on every phone-width tab — HIGH (feature failure; the page is unusable below 901px, and every tab does it)
+
+Tapping any item in the settings list opened that panel **underneath the list, which stayed painted
+on top of it**. Not a z-index accident — a grid track-sizing failure, measured at 390×844 rather
+than reasoned about:
+
+- `.settings-layout` is the **same element** as `.page-body`, which is `flex: 1 1` inside
+  `.app-shell { height: 100dvh; overflow: hidden }`. So the grid container has a **definite**
+  height — content box 688px — and distributes it across its two auto rows rather than growing.
+- The rows resolved to **248.625px / 423.375px**. The content panel held at its 423.375px
+  min-content floor. The nav did not, because its inline `overflow: hidden` gives a grid item an
+  **automatic minimum size of zero** — so it absorbed the entire remainder, `672 − 423.375 =
+  248.625` exactly.
+- The nav's real height is **392px**. It overflowed its 248.625px row by 143px, and the inline
+  `position: sticky` made it a **stacking context**, which painted it above its static sibling.
+
+At two columns the rows never bind, which is why this was invisible on every desktop check.
+
+Fixed by dropping to a flex column below 901px — no tracks, nothing to size wrongly — and moving
+`position: sticky` out of the inline style, **where no media query could reach it**, onto a
+`.settings-nav` class scoped to ≥901px.
+
+**Two further defects were hidden underneath the first, and the measurement did not find them.**
+With `display: flex` alone the measured overlap was **0** — the number said fixed — while the nav
+was still half-width and still clipping six of its ten items, Sign Out among them. Both were
+visible instantly in a screenshot:
+
+- `align-items: start` on the base rule means "do not stretch down the row" in **grid**, where the
+  cross axis is vertical, and "do not stretch across" in a flex **column**, where it is horizontal.
+  The same declaration, re-read on an axis swung 90°, with the opposite effect. Needed
+  `align-items: stretch`.
+- A flex item shrinks below its content by default, and the nav's `overflow: hidden` then **clips**
+  the remainder instead of scrolling it. Needed `flex-shrink: 0` — which is exactly what
+  `.page-body > .card` already carries, for this reason, on every other page.
+
+**The clipped nav strip and tab bar are deliberate, not a bug**, and were measured before being
+touched: sidebar `clientWidth 390 / scrollWidth 830`, tab bar `390 / 733`, both already
+`overflow-x: auto`. So the correct change is an **affordance**, not a layout change — a right-edge
+`mask-image` fade — and L51's below-640px navigation is left intact rather than undone.
+
+**Disposition:** **Fixed** on `fix/portal-photos-reports-settings` (`290fac8`). Needs a **portal**
+deploy. Verified in real Chrome at 390×844; before/after screenshots and the measurements are in
+`docs/evidence/part1b/`.
+
+---
+
+### L54 — The API answers a disallowed `Origin` with **500 Internal Server Error**, and reports every one to Sentry as an exception — MEDIUM (error handling and alert hygiene; found incidentally, nobody asked)
+
+`server.ts:160` configures `cors({ origin: (origin, cb) => … })` and signals refusal with
+`cb(new Error("CORS origin blocked"))`. The `cors` middleware forwards that Error to `next()`, and
+Express turns an Error into a **500**. A browser from a disallowed origin therefore sees a server
+fault rather than a CORS refusal, which points debugging at the server instead of at the
+configuration — the symptom that cost time in this very session.
+
+Worse, `Sentry.setupExpressErrorHandler(app)` sits at `:177`, **before** the custom error handler at
+`:178`. So every request from an unapproved origin — every scanner, every stale bookmark, every
+developer running a local portal against the production API — is captured as an application
+exception. That is an alerting channel filling with configuration events.
+
+Observed, not inferred: a direct request to `POST /api/auth/login` with `origin:
+http://localhost:3002` returned **500**; the identical request with the `Origin` header removed
+returned **200**.
+
+**Disposition:** Open, recorded 5 October 2026. **Not fixed** — out of scope for this task, and it
+is a behaviour change on a security boundary that deserves its own commit and its own review. The
+fix is to respond `403` from the callback path rather than passing an `Error`, and to confirm the
+Sentry handler's ordering.
+
+---
+
+### L55 — Two consecutive rounds of fixes were verified by reading artefacts rather than by looking at the product, and a route-interception harness silently disables the very header under test — HIGH (verification method; it is what let L48, L52 and L53 ship or persist)
+
+Three distinct instances, all the same shape: **the check could not fail for the reason it was
+supposed to catch.**
+
+1. **Part 1's responsive work was verified by grepping the emitted minified stylesheet.** That
+   proves a rule was emitted. It cannot prove a page renders. L53 — the settings nav painting over
+   its own content on every phone-width tab — is precisely the defect that method is structurally
+   incapable of catching, and it was present throughout.
+2. **Part 1's L45 fix was closed on reasoning**, because the control needed to exercise it was
+   itself broken (**L52**) and nobody tried to operate it. A defect in a verification path converts
+   every fix behind it into an unverified claim, silently.
+3. **A Playwright route shim neutralises CORP.** Production CORS correctly refuses a local portal,
+   so the natural workaround is `page.route(…)` + `route.fulfill`. But `fulfill` serves the body
+   **from the browser process**, downstream of the network-service check that enforces CORP — so
+   the header under test is not enforced. Tested rather than assumed: the run was repeated with the
+   shim rewriting CORP to `same-site` and without it, and the render count was **identical (7 of
+   16)** while the shim logged `UPSTREAM 200 corp=same-origin` on all eight responses. **Any CORP
+   test run through an interception harness is a false pass.** The sound alternative is a
+   controlled same-server A/B with no interception: one document, two cross-origin images from one
+   server, differing only in the header (`docs/evidence/part1b/corp-ab-control.png`).
+
+**What a real browser in the loop would have caught**, concretely, across these two rounds: L53 in
+full; the two defects hidden underneath it that even the correct measurement missed (half-width
+nav, six clipped nav items); L52 within seconds of loading the Reports page; and L48 and the CORP
+state months earlier. Four of the five items in Parts 1 and 1b.
+
+**Cost, honestly.** Playwright plus real Chrome, driven headless at a fixed viewport, against a
+seeded account: roughly 60–90 seconds per run, a one-off harness, and no new production
+dependency. The genuine cost is not runtime but **auth and origin plumbing** — a local portal
+cannot talk to the production API without a shim, and as instance 3 shows, the shim is exactly
+where a verification method goes quietly wrong. So the rule has to be stated carefully:
+
+> **Screenshot-and-measure for layout; a controlled same-server A/B for anything a browser enforces
+> at the network layer. Never verify a security header through a request-interception harness.**
+
+**Disposition:** Open as a standing method change, recorded 5 October 2026. Partly discharged here:
+`docs/evidence/part1b/` carries before/after screenshots at 390×844, the CORP A/B control, and the
+measurements. Not yet automated, and deliberately not proposed as a CI gate until it has been run
+by hand a few more times.

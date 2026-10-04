@@ -156,6 +156,44 @@ uploadsRouter.get("/uploads/:id/:filename", async (req, res) => {
     res.setHeader("Content-Type", contentType);
     // Signed URLs are short-lived, so a slightly longer client cache is fine
     res.setHeader("Cache-Control", "private, max-age=3600");
+    /**
+     * Cross-Origin-Resource-Policy, relaxed from Helmet's global `same-origin`
+     * to `same-site` — FOR THIS ROUTE ONLY.
+     *
+     * Helmet's default sets `Cross-Origin-Resource-Policy: same-origin` on
+     * every response (`server.ts`, the `app.use(helmet(...))` block). For a
+     * JSON API that is exactly right. For the one route that serves images
+     * meant to be embedded by a document on another origin, it is fatal: the
+     * supervisor portal is served from `app.getsitesnapai.com` and this API
+     * from `api.getsitesnapai.com`, so every `<img>` in the portal is a
+     * cross-origin subresource, and `same-origin` tells the browser to fetch
+     * the bytes, read this header, and then throw the response away without
+     * handing it to the page. Chromium reports it as
+     * `net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin`; Safari shows a Network row
+     * with no status and no headers at all, which is why it read as a network
+     * failure rather than a policy refusal.
+     *
+     * This has been blocking every photograph in the portal since Helmet was
+     * added, sitting one layer behind the CSP `img-src` defect (AUDIT L48).
+     * Fixing the CSP did not reveal a new bug; it revealed the next one in a
+     * stack of two. See the state table in L43.
+     *
+     * `same-site`, not `cross-origin`. `app.` and `api.` share the registrable
+     * domain `getsitesnapai.com`, so `same-site` permits exactly the embed the
+     * product needs and nothing more — an unrelated origin still cannot embed
+     * a photograph even if it somehow obtained a signed URL. `cross-origin`
+     * would hand that away for no benefit.
+     *
+     * Scoped here rather than in the global Helmet configuration deliberately:
+     * every other endpoint keeps `same-origin`.
+     *
+     * CORP does not apply to top-level navigation, which is why pasting a
+     * signed URL straight into a browser tab has always displayed the
+     * photograph correctly, and why the defect could not be reproduced that
+     * way. It also does not apply to React Native's image loader, which is not
+     * a browser document context — the mobile app was never affected.
+     */
+    res.setHeader("Cross-Origin-Resource-Policy", "same-site");
     return res.send(buffer);
   } catch (error) {
     if (typeof error === "object" && error !== null && "code" in error && String((error as { code?: string }).code) === "ENOENT") {

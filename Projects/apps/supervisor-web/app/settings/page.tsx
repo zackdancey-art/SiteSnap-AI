@@ -327,10 +327,13 @@ export default function SettingsPage() {
         <div className="page-body settings-layout">
 
           {/* ── Left nav ── */}
-          <nav style={{
+          {/* `position: sticky; top: 24` used to live here, inline, where no
+              media query could reach it — and it is only correct while this is
+              a column BESIDE the content. It now lives on `.settings-nav` in
+              globals.css, scoped to >=901px. See AUDIT L53. */}
+          <nav className="settings-nav" style={{
             background: "var(--surface)", borderRadius: "var(--radius)",
             border: "1px solid var(--border)", overflow: "hidden",
-            position: "sticky", top: 24,
           }}>
             {SECTIONS.map((s, i) => (
               <button

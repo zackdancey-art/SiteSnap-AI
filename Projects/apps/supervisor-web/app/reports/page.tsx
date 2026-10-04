@@ -487,6 +487,30 @@ function ReportsPageInner() {
                     onChange={(e) => setGenSiteId(e.target.value)}
                     style={{ height: 38, fontSize: 13, borderRadius: 8, border: "1.5px solid var(--border)", padding: "0 10px", background: "var(--surface)", color: "var(--text)" }}
                   >
+                    {/*
+                      The placeholder option is load-bearing, not decoration.
+
+                      `genSiteId` starts as "" (no site chosen, and no `siteId`
+                      in the query string). Without an option whose value is ""
+                      there is nothing for that state to select, so the browser
+                      falls back to displaying the FIRST option — a real site
+                      name — while `genSiteId` is still "". The control then
+                      reads "Isel park bridge" and `handleGenerate` rejects the
+                      click with "Please select a site.", which is the exact
+                      contradiction a user sees on screen.
+
+                      That made Generate Report unpressable for every manager
+                      who arrived at this page without a `?siteId=` — which is
+                      everyone who clicked Reports in the sidebar. It has been
+                      this way since the portal entered the repo (e080ed5,
+                      27 June 2026); Part 1 did not introduce it. AUDIT L52.
+
+                      The rule this is an instance of: a controlled `<select>`
+                      must offer an option for every value its state can hold,
+                      including the empty one. Otherwise what is rendered and
+                      what is validated are two different things.
+                    */}
+                    <option value="">Select a site…</option>
                     {data?.sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                   </select>
                 </div>
