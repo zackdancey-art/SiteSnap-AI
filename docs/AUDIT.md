@@ -770,7 +770,38 @@ The retention-period and HSWA wording is the same uncited seven-year claim alrea
 
 **What the fix is, when it is taken.** Port the reviewed canonical text into both portal pages as data rendered through their existing `Section` component (the shape `apps/mobile/constants/legal/*-content.ts` already proves), add the `BEGIN/END LEGAL TEXT` markers, and extend `assert_legal_copies` to compare three render targets per document instead of two — so that the check's green result finally means what it appears to mean. `docs/legal/README.md` records a deliberate decision against a permanent generator; a one-off transcription respects that.
 
-**Disposition:** Open, recorded 4 October 2026 from `fix/offline-photo-sync`. **Highest-priority disclosure item**, ahead of L32 and L33, because unlike those it is not a question of wording accuracy about a real feature — it is text the owner has already reviewed and replaced, still being served.
+**Fixed by removal, not transcription (4 October 2026)**
+
+The paragraph above — "port the reviewed canonical text into both portal pages … extend `assert_legal_copies` to compare three render targets per document" — was overruled by the owner, and correctly. Both routes are now 307 redirects to the marketing site's pages, declared in `apps/supervisor-web/next.config.mjs`; the two page files are deleted. The marketing site already renders the canonical text, is already the public home of both documents, and both URLs answer 200 (verified 4 October 2026; the apex 301s to `www`, so `www` is the destination).
+
+**Why removal is the better fix, and not merely the cheaper one.** Transcription would have left four copies per document where the drift check enumerates three, and would have made the portal a *render target* for legal text — a third layout, with its own `Section` component, its own typography and its own opportunity to drop a clause in a merge. The check would then have proved that four copies agreed, which is a stronger claim than before and still not the claim anyone wants. A redirect removes the copy instead of policing it. The reader gets the same words as the reader on the phone by construction.
+
+What it costs: a manager tapping "Privacy Policy" in the portal leaves the portal. That is a real downgrade in polish and the right trade for a compliance-evidence product, where the document being *correct* outranks the document being *in-app*. The redirect is `permanent: false` (307) deliberately, so that an in-product page rendered FROM `docs/legal/` remains an easy future change rather than a cached 308 in every manager's browser.
+
+**Extending the check — what was built, and what it cannot do**
+
+A second structural step in `Projects/scripts/ci.sh`, a copy *census*: `git grep` for three distinctive section headings per document, and assert the set of files containing them is exactly the enumerated set of three. A seventh copy appearing fails the build on the commit that adds it. Proven red-on-revert: a scratch file containing one heading made the step exit 1 and name the file; removing it returned exit 0.
+
+**And now the part this finding demands be said plainly: the census would not have caught the two pages it was written because of.** They were not copies of the canonical text, they were independent rewrites — different section titles, different structure, claims (the Information Privacy Principles, the Australian Privacy Principles, an "Acceptable Use" section, a "Limitation of Liability" section) that appear in no other copy. Not one of the six marker phrases appears in either deleted file, checked against the blobs rather than assumed:
+
+```
+$ for ph in <the three privacy headings>; do
+    git show HEAD:Projects/apps/supervisor-web/app/privacy/page.tsx | grep -qF "$ph" && echo YES || echo no
+  done
+no
+no
+no        # and the same three "no" for terms-of-service
+```
+
+So the census catches the ordinary way a seventh copy appears — somebody pastes the canonical text or an existing copy into a new file — and does not catch somebody writing their own privacy policy from scratch, which is how these two got there.
+
+**A check that would catch a rewrite was designed, measured and rejected.** It has to key on something weaker than the words: the document's display title, or a `/privacy` route. Measured: 14 tracked files contain the string "Privacy Policy" and 9 contain "Terms of Service", and nearly all are links, navigation labels, route registrations and screen wrappers rather than copies. A 14-entry allowlist is appended to reflexively by whoever turns CI green, which is this finding's own failure mode with extra ceremony. A noisy gate that gets rubber-stamped is worse than an honest narrow one.
+
+**So the thing that actually prevents a seventh rewrite is not a check.** It is that there is no longer a legal page in the portal to copy the pattern from, and that both routes are now two lines of config next to each other. The removal is the structural fix; the census is a tripwire on the easy case, and its comment in `ci.sh` says so in those words so that nobody reads a green build as more than it is.
+
+**Also fixed in this pass, as the entry above asked:** `docs/deploy-supervisor-web.md` no longer opens by asserting the dashboard "has never been deployed". It is live, and its CSP hazard section now names all three directives built from `NEXT_PUBLIC_API_URL` rather than `connect-src` alone.
+
+**Disposition:** Fixed, 4 October 2026, on `feat/manager-dashboard`. The portal no longer publishes a legal document. **Not closed as a disclosure item:** the superseded text has been served publicly for some time and that history is not undone by a redirect; and the canonical documents themselves remain a draft awaiting the owner's legal review, which is `docs/legal/README.md`'s business and not this branch's.
 
 ### L37 — Nothing in the app rendered the sync state at all, so the badge the fix was to be verified against did not exist — MEDIUM (observability; the fix for L28 was unobservable by the same mechanism as L28)
 
@@ -1034,7 +1065,32 @@ This compounds C1's open half. A saved diary records no generator, model or prom
 
 Found while scoping the Entries tab, not while looking for it.
 
-**Disposition:** Open, recorded 4 October 2026. Check whether `/api/generate-diary` wants canonical paths or signed URLs before changing it — if signed, this is coupled to L42's chunking, because a diary over a fortnight long will exceed 50 paths. Web-dashboard branch.
+**Answered: neither, and no signing is involved (4 October 2026)**
+
+The endpoint wants no photograph data from the client at all. `routes/ai.ts` → `resolveDiaryRequest` resolves entries one of two ways, and the choice is made by the request:
+
+```ts
+if (Array.isArray(body.entries) && body.entries.length > 0) {
+  return { site: body.site || {}, period, entries: filterEntriesByPeriod(body.entries, period) };
+}
+// … otherwise: listSites(actor) + listEntries(actor, siteId), mapped with
+//    storageKey carried through, and no 50-entry cap.
+```
+
+So the hand-built `entries` array was not merely incomplete — **it was displacing the server's own load**, which is the branch that supplies the photographs. The server reads each image out of its own media store via `normalizeBase64Image` → `extractUploadId` → `uploadBelongsToActorCompany` → `mediaStorage.readFile`, and the H7 comment there records that a client-supplied `storagePath` is deliberately **not** trusted for this. Signed URLs are a browser-display mechanism and have no part in it, so this is **not** coupled to L42's batching. The fortnight/50-path concern was unfounded.
+
+The mobile client's primary call sends `{ siteId, period }` and nothing else, and takes the second branch. The portal now does the same.
+
+**Two further defects fall out of the same line, both unlooked-for**
+
+1. **The generated reports were unidentified.** On the client-entries branch the site is `body.site || {}`, and this portal never sent a `site` object. `tryGenerateWithOpenAI` puts it in the prompt's `reportContext` and `buildFullReport` puts it in the report header — so every diary generated from the office had no site name, client or address, in the document *and* in what the model was told it was describing.
+2. **A silent fifty-entry truncation.** `entries` on the request schema is `z.array(DiaryEntrySchema).max(50)`. The server's own load has no cap — `filterEntriesByPeriod` does not impose one. A monthly report on a site logging daily was therefore cut off by a limit the portal never knew about. (The cap still applies to mobile's *fallback* call, which does send entries. That is a mobile-side limit and is left where it is.)
+
+**Fix:** the portal sends `{ siteId, period }`. The entry list stays in `reports/page.tsx` only as a local "this site has nothing to report on" pre-check, so an obviously empty site does not cost a round trip — a guard, not a payload. Three defects closed by deleting code.
+
+**Still open, and this makes it sharper:** C1's provenance half. A saved diary records no generator, model or prompt version, and now that the photographs genuinely do reach the generator, the record still cannot say whether a given diary was written with them — only that it could have been.
+
+**Disposition:** Fixed, 4 October 2026. What cannot be checked from here: that the model's output is visibly better. That needs a live generation against a site with photographs, compared with a diary generated before this commit.
 
 ### L46 — Invite emails are stored **as typed** while registration lowercases, so a mixed-case invitation can never be accepted — MEDIUM (feature failure; permanent for the affected invite, and the error message names the wrong cause)
 
@@ -1115,7 +1171,17 @@ rows stay broken. For those: **re-issue in lower case.**
 
 Not a defect so much as an unfinished screen, recorded because the count makes it look finished.
 
-**Disposition:** Open, recorded 4 October 2026. This is the scoped Entries tab, and it is the reason the web-dashboard branch exists; L42–L45 are the defects it will sit on top of.
+**Built — the list, deliberately not the detail route (4 October 2026)**
+
+An `EntriesTab` on the same page: a tab entry, a render branch, and a list component. Newest first by work date, with the logging timestamp breaking ties inside a day. Per entry: the date, who logged it, the notes, and the photographs with their captions, plus weather, crew count and location where the entry carries them. Read-only throughout — nothing on this screen writes.
+
+No endpoint was added and no route was added. The data was already in the client: `bootstrap.entries`, filtered to the site by the page, is the same array the photograph grid and the diary payload are derived from. `getScopedBootstrap` returns whole `EntryRecord`s with no field stripping, so `ownerEmail`, `timestamp` and `locationAddress` were already arriving and the portal's `Entry` type was simply narrower than the payload — widening it added three optional fields and changed no server behaviour.
+
+**Why a list and not `sites/[id]/entries/[entryId]`.** A deep-linkable detail route needs its own endpoint and establishes a detail-route pattern the portal has nowhere else — every other tab is a panel on this page. Introducing that pattern behind a photograph fix means the first screen to use it is also the one nobody reviewed it for. It belongs with dashboard parity, as its own decision.
+
+**It rests on L42–L44, and shares their one signing pass.** The photographs here are signed by the same effect, through the same batching, with the same per-path error reporting and the same retry — the effect's tab guard admits `"entries"` alongside `"photos"`. The three tile states (signed, refused with the server's reason, not yet attempted) were extracted into a shared `PhotoTile` rather than copied, because two copies of them would drift and one tab would keep saying "Loading…" over a finished failure after the other had stopped. The practical consequence: without L48's CSP fix this tab would have shipped as a list of grey rectangles, which is why it was built after it rather than before.
+
+**Disposition:** Closed as scoped. The entry count on the overview is now reachable. Recorded 4 October 2026.
 
 ### L48 — The portal's Content-Security-Policy omits the API origin from `img-src`, so **every photograph on the portal is refused by the browser** — HIGH (feature failure; total, silent, and affects every site on every load)
 
@@ -1249,6 +1315,216 @@ locale/timezone (server and browser differ), anything reading `localStorage`, `d
 portal authenticates by httpOnly cookie, so a component that renders one way before the session is
 known and another way after is also a candidate.
 
-**Disposition:** Open, recorded 4 October 2026, for the web-dashboard branch. Secondary to L42–L48:
-it degrades the page rather than breaking it. First step is `pnpm -C Projects --filter
-sitesnap-supervisor-web run dev` and reading the full message, not a code change.
+**Located by reading, 4 October 2026 — both suspects were present, and the first two on the list.**
+The development build was not needed in the end: the site detail page contained two independent
+mismatches, each of a kind the list above predicted, and each provable from the source.
+
+1. **`getSavedUser()` called during render.** `lib/api.ts:34` returns `null` when `typeof window
+   === "undefined"` and the real user otherwise. `app/sites/[id]/page.tsx` called it in the
+   component body and passed the result to `<Sidebar userName={user?.name ?? user?.email ??
+   "Manager"} />`. The server therefore rendered the literal text "Manager" and the browser
+   rendered the account's name from the same component — a rendered **text** disagreement, which is
+   `#425` precisely, and `#418`'s report of it.
+
+2. **`toLocaleDateString` on a server that is not in the viewer's time zone.** Three call sites on
+   the same page, one of them (`diary.generatedAt`) formatting an hour and minute. The portal's
+   server runs in UTC; a manager's browser does not. That one does not disagree occasionally — it
+   disagrees on every load, by the offset.
+
+Either is sufficient to explain the trio, and `#423` — React discarding the server HTML and
+re-rendering the whole root — is the expected consequence of a mismatch React cannot patch locally.
+
+**Fixed on the site detail page** (the commit this paragraph lands in): both values are resolved
+after mount, so the server render and the first client render agree and the browser-only facts
+arrive in an effect. The pattern was not invented for this — `components/ProfileDropdown.tsx:19-23`
+already did it correctly, which is why the profile dropdown was not among the symptoms. The dates
+deliberately wait for the browser rather than being pinned to a fixed zone: the viewer's local time
+is the right thing to show on a compliance record and is genuinely unknowable on the server.
+
+**The cause is portal-wide, and the rest is NOT fixed.** Measured on the same day:
+
+| Where | What | Count |
+|---|---|---|
+| `app/{settings,activity,dashboard,sites,team,locations,reports}/page.tsx` | `getSavedUser()` in the component body | 7 pages |
+| `lib/useRole.ts:8` | `getSavedUser()` in the component body, inside a hook | 1 hook, imported by `settings` and `team` |
+| `app/{activity,dashboard,sites,locations,reports}/page.tsx` | `toLocale*` formatting during render | 8 call sites |
+| `app/dashboard/page.tsx:20` | `new Date()` during render — the current time, formatted | 1, and certain to differ |
+
+Deliberately left for its own change rather than swept in behind a photograph fix. `useRole` is the
+reason: it decides which controls a company role may see, so making it resolve after mount means
+role-gated UI renders as "viewer" for one frame and then changes. That is a visible behaviour change
+across two pages, it wants someone to look at it, and it is not what a reviewer reading a CSP and
+photograph-display branch is reviewing for. `app/dashboard/page.tsx:20` is the cheapest of the
+remainder and the most certainly broken.
+
+**Disposition:** Half closed. The site detail page is fixed and the mechanism is no longer a
+hypothesis. The remaining 16 call sites in the table above are open, as one follow-up change to the
+portal's handling of browser-only values — a `useSavedUser()` hook or a session provider, applied
+across the pages at once, with the `useRole` behaviour change called out for review.
+
+---
+
+### L50 — The portal's Live Map settings were all three dead: written to localStorage, re-displayed, and read by nothing — LOW (feature failure; silent, and the map behaved correctly by coincidence)
+
+The settings page offered a manager three controls over the Live Locations map — refresh interval,
+"show inactive workers", and the stale cutoff — persisted them to `localStorage` under
+`sitesnap.mapPrefs`, and read them back on its own next visit so the chosen values were still
+shown. Nothing else in the portal ever read the key. Measured on `main` (4 October 2026):
+
+```
+$ git grep -n "sitesnap.mapPrefs" -- Projects
+Projects/apps/supervisor-web/app/settings/page.tsx:214:    const sm = localStorage.getItem("sitesnap.mapPrefs");
+Projects/apps/supervisor-web/app/settings/page.tsx:264:    localStorage.setItem("sitesnap.mapPrefs", JSON.stringify(next));
+```
+
+One writer, one reader, the same file. `locations/page.tsx` on `main`:
+
+- `:72` — `setInterval(() => void fetchLocations(), 30_000)`, the interval hardcoded.
+- `:39` — `if (m < 60) return "#F59E0B"`, the amber/grey boundary hardcoded to 60 minutes.
+- `:101-102` — the legend written out as "Recent (< 1 hour)" / "Stale (> 1 hour)" in prose.
+- no filter anywhere on staleness, so "show inactive workers" governed nothing at all.
+
+**What made this worse than an unwired control.** The two hardcoded numbers happened to equal the
+two defaults — 30 seconds and 60 minutes — so a manager who never changed the settings saw a map
+that agreed with them exactly, and a manager who did change them saw a map that still agreed with
+the *defaults* while the settings page confirmed their new choice. The control was not visibly
+broken; it was quietly ignored, which is the state in which a user stops trusting the page rather
+than reporting a bug. The third control is the one with teeth: a manager on a 300-worker account
+who hides inactive workers to find the four people actually on site was shown all 300 regardless.
+
+**Also wrong in the same place, found while fixing it.** The empty state read "No workers have
+shared their location in the last 4 hours" (`:134`). Four hours is not a window this page, the API
+endpoint, or any setting uses — it was invented in the copy. `GET /api/location/workers` returns
+what it returns; the portal does not pass a window. A manager reading that sentence would conclude
+a worker had not pinged in four hours when the truth is simply that the endpoint returned nothing.
+
+**Fixed.** `lib/mapPrefs.ts` is now the single definition of the key, the shape, the defaults, the
+offered option sets, the validating reader, the writer, and the two formatters. Both pages import
+it, so neither owns a literal the other can disagree with — the split ownership was itself the
+cause: two files, two copies of the key string, two copies of the defaults, and no compiler
+relationship between them.
+
+The reader validates each field against the option sets rather than trusting the parsed JSON,
+because `localStorage` is user-writable and the old reader took `JSON.parse` output wholesale. A
+hand-edited `{"refreshInterval":0}` became `setInterval(…, 0)` against the live API on a page a
+site office leaves open all day; `readMapPrefs` now returns the default for any field that is not
+one of the offered values.
+
+The polling effect is split from the mount effect and keyed on `[mapPrefs.refreshInterval]`, so
+changing the interval restarts the timer instead of needing a reload, and the cleanup cannot leave
+two timers running. `visibleLocations` is derived once and fed to the map, the header count, the
+table and the empty state together, so those four cannot disagree about who is on screen. Every
+number in the legend, the refresh note and the empty state is now formatted from the setting it
+describes. The ten-minute green "active" boundary stays hardcoded deliberately — no control offers
+it, and inventing one here would be this same defect in the other direction.
+
+**What this does NOT fix, and it is the same defect class.** The Live Map section was not the only
+dead one on that page. Measured the same day:
+
+| Setting | Persisted to | Read by anything that acts on it |
+|---|---|---|
+| Display → `dateFormat` | server, `updateAccountSettings` | **No** — no page formats a date through it |
+| Display → `defaultPeriod` | server, `updateAccountSettings` | **No** — `reports/page.tsx` has its own default |
+| Display → `compactTables` | server, `updateAccountSettings` | **No** — no table reads it |
+| Display → `timezone` | `localStorage`, `sitesnap.displayPrefs` | **No** — every `toLocale*` call hardcodes `en-AU` |
+| Advanced → API URL | `localStorage`, `sitesnap.apiUrl` | **Partly** — only the health-check button on the same page |
+
+```
+$ grep -rn "getAccountSettings\|compactTables\|dateFormat\|defaultPeriod" \
+    Projects/apps/supervisor-web --include="*.tsx" --include="*.ts" | grep -v settings/page
+Projects/apps/supervisor-web/lib/api.ts:130:  display?: Partial<{ dateFormat: …; defaultPeriod: …; compactTables: boolean }>;
+Projects/apps/supervisor-web/lib/api.ts:134:export async function getAccountSettings(): Promise<AccountSettings> {
+```
+
+The type and the transport exist; no consumer does. The API URL field is the one worth naming
+separately, because it is misleading rather than merely inert: the portal's real API base is
+`process.env.NEXT_PUBLIC_API_URL`, baked at build time and compiled into the CSP (L48), so a
+manager who types a different origin there gets a successful health check against it and every
+other request still going to the build-time origin. Changing that field cannot work by design, and
+the page implies it can.
+
+Four more dead controls and one actively misleading one were left alone deliberately: the task
+named the map polling preference, the Display prefs need a decision about where account settings
+are consumed rather than a few lines of wiring, and the API URL field probably wants removing — a
+judgement about what the Advanced section is for, not a bug fix.
+
+**Disposition:** Fixed for the Live Map. The three controls now govern the page they describe, the
+invented four-hour claim is gone, and the key/shape/defaults have one owner. The Display section
+and the API URL field are open as the same finding in a different section of the same page.
+
+---
+
+### L51 — Below 640px the portal has no navigation at all: the sidebar is `display: none` with nothing in its place — MEDIUM (feature failure on phones and small tablets; seven pages, none reachable from any other)
+
+The portal's entire responsive strategy was eleven lines at the bottom of
+`app/globals.css`, and the operative one was:
+
+```css
+@media (max-width: 640px) {
+  .sidebar { display: none; }      /* ← and nothing replaces it */
+  .metrics-grid { grid-template-columns: 1fr; }
+}
+```
+
+`Sidebar.tsx` is the only navigation in the product — Dashboard, Sites, Live Map, Reports,
+Activity, Team, Settings. There is no hamburger, no drawer, no bottom bar, and `Topbar.tsx` carries
+only a title, a per-page `right` slot and the profile menu. So a manager who opened the portal on a
+phone landed on `/dashboard` and could not reach any other page without typing a URL. The profile
+menu's "Settings" link was the single exception, and only because it is a `router.push`.
+
+This matters more for this product than the width would suggest: the person being asked to look at
+a site diary is often the one being rung about it, away from the desk the portal was designed for.
+
+**Also found, same audit, same file.** Each confirmed by reading the computed rule against the
+measured content rather than inferred from the width alone:
+
+| Where | Defect | Why it breaks |
+|---|---|---|
+| `.app-shell` | `height: 100vh` | On mobile Safari/Chrome `100vh` is the viewport with the URL bar retracted, so the shell is taller than the visible area. `.page-body` is the scroll container and `.app-shell` is `overflow: hidden`, so the bottom of every page sat behind the browser chrome with nothing able to scroll to it. |
+| `.card` + `.data-table` | `overflow: hidden` on the card, `width: 100%` on the table | The 5-to-7-column tables — Live Map coordinates, team emails, incident rows, report rows — were **clipped, not scrollable**. The right-hand columns were unreachable, with no scrollbar and no sign anything had been cut. |
+| `.topbar` | `height: 64px`, `flex-wrap` unset | On the Live Map the bar holds a title, a timestamp, a Refresh button and the avatar. At 375px that overflowed and took the whole document into horizontal scroll. |
+| `.settings-row` | `space-between`, control `flex-shrink: 0`, inputs to 320px | Label and control could not fit side by side, so the control was pushed past the right edge of the card. |
+| `settings/page.tsx:326` | inline `gridTemplateColumns: "210px 1fr"` on `.page-body` | An inline style no media query can reach. At 375px the fixed 210px nav column plus the 24px gap plus 48px of page padding left the content column about 90px wide. |
+| `sites/[id]/page.tsx:693` | inline `repeat(4,1fr)` | Four metric tiles at every width; at 375px each held a 28px-font number in about 75px. |
+| `reports/page.tsx:435` | inline `repeat(3, 1fr)` | The same, three across. |
+| `.card-header` | `flex-wrap` unset | Several headers put a search box after the title with `margin-left: auto`; unwrapped, the header pushed past the card edge. |
+| `globals.css:428` | `.tab-bar::-webkit-scrollbar { display: none }` | **A rule for a class nothing carried.** The site page's tab bar sets `scrollbarWidth`/`msOverflowStyle` inline — which cannot express a `::-webkit-scrollbar` pseudo-element — so the scrollbar it meant to hide was hidden in Firefox and visible in Safari and Chrome. |
+
+**Fixed, as layout repairs only.** The brief was breaks, not a mobile redesign, and the portal is
+still a desk tool at these widths — no control was resized, no information architecture changed, no
+new component added, no new colour.
+
+The sidebar keeps its markup exactly and lays out as a horizontally scrolling strip across the top
+at ≤640px: `.app-shell` becomes a column, `.sidebar` a row, `.sidebar-nav` a row of `nowrap` items.
+The footer block is hidden because the profile menu already carries "Signed in as" and Sign Out,
+and the wordmark is hidden because it is not navigation and was taking 150 of the 375 pixels the
+strip has to scroll within. This is the same pattern the site detail page's tab bar already uses,
+so it is the product's own idiom rather than a new one.
+
+`height: 100dvh` is declared *after* `height: 100vh` so a browser that does not know the unit keeps
+the old value. The two inline grids become `repeat(auto-fit, minmax(150px, 1fr))` and
+`minmax(170px, 1fr)` — four and three across at desk widths exactly as before, collapsing on their
+own below that, and the same idiom as the three `auto-fill` grids already in those files. The
+settings two-column layout becomes a `.settings-layout` class so a media query can collapse it. The
+table fix is scoped to ≤900px: `.card:has(.data-table) { overflow-x: auto }` plus a 560px
+`min-width` on the table, so cells stop being crushed into two-character wraps and the card scrolls
+sideways to reach the columns. At desk widths those tables fit and nothing changes. The tab bar
+gains `className="tab-bar"`, which is the whole fix for the dead rule.
+
+**How this was verified, and the limit on it.** By reading each computed rule against the markup it
+applies to, and by building the portal for production and grepping the emitted stylesheet to prove
+every rule survived minification — `height:100vh;height:100dvh` both present in order, the `:has()`
+selector intact, both media blocks emitted, `.tab-bar::-webkit-scrollbar` now reachable. **No
+browser was opened at any width.** There is no test runner and no visual regression harness in
+`apps/supervisor-web`, so this is a code-and-build audit, not a rendered one. The PR body asks for
+the four widths to be checked by eye, and `:has()` in particular wants confirming in Safari.
+
+**Not changed, deliberately.** Tap-target sizes: several controls are under the 44px guideline
+(`.btn-ghost` computes to about 29px tall, the Live Map Refresh button to about 29px), which the
+brief lists as in scope, but raising them is a change to how every button in the product looks at
+every width — a design decision, not a break, and it wants to be seen rather than slipped in behind
+a layout fix. The `WorkerMap` popups' `min-width: 180px` is Leaflet's own overlay and fits. The
+auth pages were not audited: they are a centred 420px card and were out of the brief's path.
+
+**Disposition:** Fixed for the nine layout defects above. Tap-target sizing is open as a separate,
+visible change. Verification is code-and-build; a rendered check at 375px and 768px is still owed.

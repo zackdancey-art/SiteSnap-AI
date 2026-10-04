@@ -62,6 +62,14 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .app-shell {
   display: flex;
   height: 100vh;
+  /* `100dvh` second, so a browser that doesn't know it keeps the `100vh` above.
+     On mobile Safari and Chrome `100vh` is the viewport with the URL bar
+     RETRACTED, so the shell is taller than the visible area: `.page-body` is
+     the scroll container, its bottom sits behind the browser chrome, and
+     because `.app-shell` is `overflow: hidden` there is nothing to scroll to
+     reach it. The last row of any table and the bottom of the settings pane
+     were unreachable on a phone. */
+  height: 100dvh;
   overflow: hidden;
 }
 
@@ -157,6 +165,18 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
    fit and lets .page-body scroll. flex-shrink is main-axis (vertical) only, so no
    horizontal effect; non-card children (e.g. the locations map) are untouched. */
 .page-body > .card { flex-shrink: 0; }
+
+/* The settings page's left-nav + content pair. This lived as an inline
+   `gridTemplateColumns: "210px 1fr"` on that page's `.page-body`, where no
+   media query could reach it: at 375px the fixed 210px nav column plus the
+   24px gap plus the page's 48px of padding left the content column about 90px
+   wide, and every field, select and toggle row inside it overflowed. */
+.settings-layout {
+  display: grid;
+  grid-template-columns: 210px 1fr;
+  gap: 24px;
+  align-items: start;
+}
 
 /* ── Cards ── */
 .card {
@@ -415,13 +435,90 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   display: flex; flex-direction: column; gap: 10px;
 }
 
-/* ── Responsive ── */
+/* ── Responsive ──
+   Audited at 375px (phone) and 768px (tablet) on 4 October 2026. What follows
+   fixes layout BREAKS only — content off-screen, content unreachable, rows
+   overflowing their container. It is not a mobile redesign, and the portal is
+   still a desk tool at these widths. */
+
 @media (max-width: 900px) {
   .metrics-grid { grid-template-columns: repeat(2, 1fr); }
+
+  /* The settings left-nav stops being a column and becomes a strip above the
+     content it switches between. */
+  .settings-layout { grid-template-columns: 1fr; }
+
+  /* Wide tables were CLIPPED, not scrollable. `.card` is `overflow: hidden`,
+     so the right-hand columns of the 5-to-7-column tables (Live Map
+     coordinates, team emails, report rows) were simply not reachable — no
+     scrollbar, no indication anything had been cut. `min-width` stops
+     `width: 100%` crushing the cells into two-character wraps instead, and the
+     card scrolls sideways to reach them. Narrow screens only: at desktop
+     widths these tables fit and this changes nothing. */
+  .card:has(.data-table) { overflow-x: auto; }
+  .data-table { min-width: 560px; }
+
+  /* Several card headers put a search box or a control after the title with
+     `margin-left: auto`. Unwrapped, the header pushed past the card edge. */
+  .card-header { flex-wrap: wrap; }
 }
+
 @media (max-width: 640px) {
-  .sidebar { display: none; }
+  /* The sidebar used to be `display: none` here, with nothing in its place:
+     below 640px the portal had NO navigation at all — seven pages, and a
+     manager on a phone could reach none of them from any other. The markup is
+     unchanged; it lays out as a scrolling strip across the top instead of a
+     column down the side. The footer block is hidden because the profile menu
+     in the top bar already carries "Signed in as" and Sign Out. */
+  .app-shell { flex-direction: column; }
+  .sidebar {
+    width: 100%;
+    flex-direction: row;
+    align-items: center;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+  }
+  .sidebar-logo {
+    padding: 12px 16px;
+    border-bottom: none;
+    border-right: 1px solid rgba(255,255,255,0.1);
+    flex-shrink: 0;
+  }
+  /* The wordmark is not navigation, and at 375px it was taking 150px of the
+     375 the nav strip has to scroll within. The 36px mark stays. */
+  .sidebar-logo-text, .sidebar-logo-sub { display: none; }
+  .sidebar-nav { flex-direction: row; padding: 8px 10px; gap: 4px; flex: 0 0 auto; }
+  .nav-item { white-space: nowrap; flex-shrink: 0; }
+  .sidebar-footer { display: none; }
+
   .metrics-grid { grid-template-columns: 1fr; }
+
+  /* The top bar is a fixed-height, no-wrap flex row holding a title, whatever
+     the page puts in `right`, and the profile menu. On the Live Map that is a
+     title, a timestamp, a refresh button and an avatar, which overflowed at
+     phone width and took the whole page into horizontal scroll with it. */
+  .topbar {
+    height: auto;
+    min-height: 64px;
+    flex-wrap: wrap;
+    padding: 10px 16px;
+    gap: 10px;
+  }
+
+  .page-body { padding: 16px; gap: 16px; }
+
+  /* A settings row is a label and a control held apart by `space-between`,
+     with the control `flex-shrink: 0` and inputs up to 320px wide. At 375px
+     the pair could not fit side by side and the control was pushed off the
+     right edge, so they stack. */
+  .settings-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .settings-control { width: 100%; }
+  .settings-row input { max-width: none; }
 }
 
 /* Hide scrollbar on tab bars */

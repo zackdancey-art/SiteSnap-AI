@@ -6,6 +6,10 @@ import dynamic from "next/dynamic";
 import Sidebar from "@/components/Sidebar";
 import Topbar from "@/components/Topbar";
 import { getSavedUser, isAuthenticated } from "@/lib/api";
+import {
+  MAP_PREFS_DEFAULTS, readMapPrefs, describeInterval, describeCutoff,
+  type MapPrefs,
+} from "@/lib/mapPrefs";
 
 const WorkerMap = dynamic(() => import("@/components/WorkerMap"), { ssr: false });
 
@@ -33,10 +37,18 @@ function freshLabel(ts: string) {
   return `${Math.floor(m / 60)}h ago`;
 }
 
-function statusColor(ts: string) {
+/**
+ * Green while a ping is fresh, amber until the stale cutoff, grey after it.
+ *
+ * The middle boundary used to be a hardcoded 60 minutes, which happened to
+ * equal the default cutoff and so looked correct while ignoring the setting
+ * entirely. The ten-minute "active" boundary stays fixed: no control offers it,
+ * and inventing one here would be the same defect in the other direction.
+ */
+function statusColor(ts: string, staleCutoffMinutes: number) {
   const m = minutesAgo(ts);
   if (m < 10) return "#22C55E";
-  if (m < 60) return "#F59E0B";
+  if (m < staleCutoffMinutes) return "#F59E0B";
   return "#9EAFC2";
 }
 
@@ -47,6 +59,17 @@ export default function LocationsPage() {
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState(new Date());
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  /**
+   * The Live Map settings, which this page used to ignore completely: it polled
+   * on a hardcoded 30 seconds and coloured workers against a hardcoded hour,
+   * while the settings page offered three controls over exactly those numbers
+   * and wrote them to localStorage (AUDIT L50).
+   *
+   * Starts at the shared defaults so the first render matches the server's, and
+   * is replaced from localStorage on mount — the pattern L49 is about.
+   */
+  const [mapPrefs, setMapPrefs] = useState<MapPrefs>(MAP_PREFS_DEFAULTS);
 
   const fetchLocations = async () => {
     try {
@@ -68,11 +91,31 @@ export default function LocationsPage() {
 
   useEffect(() => {
     if (!isAuthenticated()) { router.replace("/"); return; }
-    void fetchLocations();
-    intervalRef.current = setInterval(() => void fetchLocations(), 30_000);
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
-  }, []);
+    setMapPrefs(readMapPrefs());
+  }, [router]);
 
+  // Separate from the mount effect so that changing the interval restarts the
+  // timer rather than needing a reload, and so the cleanup cannot leave two
+  // timers running. Re-reading on mount is the one fetch everyone gets; the
+  // interval is whatever the manager chose.
+  useEffect(() => {
+    if (!isAuthenticated()) return;
+    void fetchLocations();
+    intervalRef.current = setInterval(() => void fetchLocations(), mapPrefs.refreshInterval * 1000);
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+  }, [mapPrefs.refreshInterval]);
+
+
+  /**
+   * What the map and the list show. "Show inactive workers" was the third dead
+   * control: it persisted, it re-displayed, and nothing anywhere filtered on
+   * it. Derived once so the map, the header count and the table cannot
+   * disagree about who is on screen.
+   */
+  const visibleLocations = mapPrefs.showInactiveWorkers
+    ? locations
+    : locations.filter((l) => minutesAgo(l.timestamp) < mapPrefs.staleCutoffMinutes);
+  const hiddenCount = locations.length - visibleLocations.length;
 
   return (
     <div className="app-shell">
@@ -94,12 +137,16 @@ export default function LocationsPage() {
         } />
 
         <div className="page-body">
-          {/* Legend */}
+          {/* Legend. Every number in it comes from the settings, including the
+              two that used to be written out as "1 hour" beside a threshold a
+              manager could set to four. */}
           <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
             {[
               { color: "#22C55E", label: "Active (< 10 min)" },
-              { color: "#F59E0B", label: "Recent (< 1 hour)" },
-              { color: "#9EAFC2", label: "Stale (> 1 hour)" },
+              { color: "#F59E0B", label: `Recent (< ${describeCutoff(mapPrefs.staleCutoffMinutes)})` },
+              ...(mapPrefs.showInactiveWorkers
+                ? [{ color: "#9EAFC2", label: `Stale (> ${describeCutoff(mapPrefs.staleCutoffMinutes)})` }]
+                : []),
             ].map(({ color, label }) => (
               <div key={label} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--text-secondary)" }}>
                 <div style={{ width: 12, height: 12, borderRadius: "50%", background: color }} />
@@ -107,7 +154,8 @@ export default function LocationsPage() {
               </div>
             ))}
             <div style={{ marginLeft: "auto", fontSize: 13, color: "var(--text-tertiary)" }}>
-              Auto-refreshes every 30 seconds
+              Auto-refreshes every {describeInterval(mapPrefs.refreshInterval)}
+              {!mapPrefs.showInactiveWorkers && " · inactive workers hidden"}
             </div>
           </div>
 
@@ -118,7 +166,7 @@ export default function LocationsPage() {
                 Loading map…
               </div>
             ) : (
-              <WorkerMap locations={locations} height={480} />
+              <WorkerMap locations={visibleLocations} height={480} />
             )}
           </div>
 
@@ -127,11 +175,20 @@ export default function LocationsPage() {
             <div className="card-header">
               <span style={{ fontSize: 16 }}>👷</span>
               <span className="card-title">Field Workers</span>
-              <span className="card-count">{locations.length}</span>
+              <span className="card-count">{visibleLocations.length}</span>
+              {hiddenCount > 0 && (
+                <span style={{ marginLeft: 8, fontSize: 12, color: "var(--text-tertiary)" }}>
+                  {hiddenCount} inactive hidden — change this under Settings → Live Map
+                </span>
+              )}
             </div>
-            {locations.length === 0 ? (
+            {visibleLocations.length === 0 ? (
               <div className="empty-state">
-                <p>No workers have shared their location in the last 4 hours.</p>
+                <p>
+                  {hiddenCount > 0
+                    ? `No active workers. ${hiddenCount} worker${hiddenCount === 1 ? " has" : "s have"} not pinged in ${describeCutoff(mapPrefs.staleCutoffMinutes)} and are hidden by your Live Map settings.`
+                    : "No workers have shared their location recently."}
+                </p>
                 <p style={{ fontSize: 12, marginTop: 8 }}>Workers enable tracking in the mobile app under Settings → Location Tracking.</p>
               </div>
             ) : (
@@ -146,10 +203,10 @@ export default function LocationsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {locations
+                  {[...visibleLocations]
                     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
                     .map((loc) => {
-                      const color = statusColor(loc.timestamp);
+                      const color = statusColor(loc.timestamp, mapPrefs.staleCutoffMinutes);
                       const initials = (loc.userName ?? loc.userEmail).split(" ").map((w) => w[0]).join("").slice(0, 2).toUpperCase();
                       return (
                         <tr key={loc.id}>

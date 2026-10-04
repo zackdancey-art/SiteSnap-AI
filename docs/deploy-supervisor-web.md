@@ -1,8 +1,19 @@
 # Deploying the supervisor dashboard (`app.getsitesnapai.com`)
 
-The Next.js supervisor dashboard (`Projects/apps/supervisor-web`) has never been
-deployed. This is the exact, ordered runbook to deploy it on Render and attach the
-custom domains. **Follow it top to bottom — the ordering is load-bearing.**
+**This runbook's opening sentence used to read "has never been deployed". That
+was false, and had been for some time.** The dashboard is live at
+`https://app.getsitesnapai.com` (verified 4 October 2026: `curl -I` returns 200
+and the response carries a `Content-Security-Policy` built from a correctly set
+`NEXT_PUBLIC_API_URL`, so it is a real deploy of this app rather than a
+placeholder). A runbook that describes a first deployment is the wrong document
+to hand someone diagnosing a live one, and AUDIT L36 is about exactly this: a
+document asserting a state of the world that nobody re-checks.
+
+This is the exact, ordered runbook for deploying the Next.js supervisor
+dashboard (`Projects/apps/supervisor-web`) on Render and attaching the custom
+domains. It is kept for a rebuild from scratch, for a second environment, and
+because the hazards below apply to every deploy and not only the first.
+**Follow it top to bottom — the ordering is load-bearing.**
 
 Package manager is **pnpm** (not Yarn). The app is self-contained (no workspace
 `@sitesnap/*` deps), but the lockfile and `.nvmrc` live at `Projects/`, so Render's
@@ -12,13 +23,34 @@ Package manager is **pnpm** (not Yarn). The app is self-contained (no workspace
 
 ## ⚠️ Read this first — the two ways this fails silently
 
-1. **CSP `connect-src` is built from `NEXT_PUBLIC_API_URL` at BUILD time.** If the
-   dashboard is built without `NEXT_PUBLIC_API_URL=https://api.getsitesnapai.com`,
-   the Content-Security-Policy `connect-src` falls back to `'self'` and the browser
-   **blocks every call to the API with no visible UI error** — the app just looks
-   broken. This value is *baked into the bundle*; fixing it later means a **rebuild**,
-   not a restart. **Verification step 2 below checks the browser console for CSP
-   violations before you conclude anything else is wrong.**
+1. **THREE CSP directives are built from `NEXT_PUBLIC_API_URL` at BUILD time —
+   `connect-src`, `img-src` and `media-src`.** If the dashboard is built without
+   `NEXT_PUBLIC_API_URL=https://api.getsitesnapai.com`, all three fall back to
+   `'self'` and the browser **blocks every call to the API, every photograph and
+   every video with no visible UI error** — the app just looks broken. This value
+   is *baked into the bundle*; fixing it later means a **rebuild**, not a restart.
+   **Verification step 2 below checks the browser console for CSP violations
+   before you conclude anything else is wrong.**
+
+   This paragraph used to name `connect-src` alone, and that was accurate at the
+   time: `img-src` was a hardcoded literal that omitted the API origin entirely,
+   so every photograph on the portal was refused by the browser regardless of
+   how the variable was set (AUDIT L48 — confirmed against the live deploy on
+   4 October 2026, whose served `img-src` reads
+   `'self' data: blob: https://*.tile.openstreetmap.org` with no API origin).
+   All three now interpolate one `API_ORIGIN` constant, so they cannot disagree
+   about where the API lives.
+
+   **The build now warns when the variable is absent** rather than silently
+   baking `'self'`. If a build log carries
+   `[next.config] NEXT_PUBLIC_API_URL is not set at build time`, stop and set it
+   before attaching anything.
+
+   **Refusals are now reported.** The policy carries `report-to`/`report-uri`
+   pointing at `/api/csp-report`, which logs each refusal (URLs reduced to
+   origin + path, so no signed-media `?sig=`/`?exp=` pair reaches the log).
+   After a deploy, a burst of lines there naming a blocked directive is the
+   fastest confirmation that this hazard has bitten.
 
 2. **The session cookie `sitesnap.session` is host-only, `SameSite=Lax`.** It is set
    by whatever host the API answers from (`api.getsitesnapai.com`) and sent back
