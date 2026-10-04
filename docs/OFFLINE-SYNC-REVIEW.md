@@ -453,6 +453,15 @@ an earlier number if it is not. An OTA update cannot change that label, which is
 right check. If it does not read `(4)`, item 4 of the Stage 2 chain will fail no matter how many
 updates are published, and the install is the fix.
 
+**0. Confirm the binary under test.** Open **Settings → About** and read the build number.
+It must match the build you believe you are testing. This costs five seconds and it is step zero
+because results from a stale binary are not results: the first device pass on this branch was run
+on build 1, which carries `userInterfaceStyle: "automatic"` where build 4 carries `"light"`, and
+two of the findings it produced were artefacts of that difference rather than defects. Because
+`CFBundleVersion` is read out of the installed binary, an OTA cannot forge this label — which is
+what makes it the one check that distinguishes the JavaScript half of a change from the native
+half. **This step belongs in every future PR body's device checklist, first.**
+
 **1. The core case — the one that matters.**
 Airplane mode on. New entry, four or five photographs, save. The entry appears with its
 photographs and the banner says something is waiting. Airplane mode off. Wait for the banner to

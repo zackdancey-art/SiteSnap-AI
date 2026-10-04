@@ -909,3 +909,135 @@ must set it explicitly.
 **Disposition:** OPEN. No code change on `fix/offline-photo-sync`; recorded so the device pass does
 not publish an update that silently repoints the production app. Belongs with the next piece of
 release-path work, alongside fixing `docs/deploy-supervisor-web.md`'s stale opening claim (L36).
+
+### L41 — An upload response carrying no `url` wrote the **empty string** as the photograph's address and marked it uploaded — HIGH (data loss; a record asserting it holds evidence it does not hold)
+
+`uploadPhotoOnce` mapped the server's response to a stored address with one expression:
+
+```ts
+const canonicalPath = payload.url?.startsWith("/") ? payload.url : (payload.url || "");
+```
+
+Read the second fallback. A 200 response with no `url` — or a `null` one, or a `url` that is not a managed path — yields `""`. That empty string was then written as the photograph's `uri` and `storageKey`, the photograph was marked `uploaded: true`, the local bytes were released, and **nothing was emitted**: no throw, no dead-letter, no telemetry. Every layer above read a successfully uploaded photograph.
+
+That is the exact failure the `fix/offline-photo-sync` branch exists to eliminate, arrived at from the other end. L28 lost photographs because they were never sent; this loses them after they were sent, by forgetting where they went. It is worse in one respect — L28 left the bytes on the phone, where the queue could still find them, whereas this released them.
+
+Found while answering whether the branch's 11 drain tests covered the acceptance criterion. They do not: they inject a fake uploader, so the real response-mapping chain never executes in any test. The branch's whole claim — "a photograph is only ever marked uploaded when the server really holds it" — lived entirely on the untested side of that dependency seam.
+
+**Disposition:** FIXED on `fix/offline-photo-sync`, commit `23addf6`, its own commit. The mapping is now `canonicalUploadPathFromResponse` in `lib/photo-uri.ts`, which **throws** `UploadAddressMissingError` rather than returning a path it does not have; the caller reports `photo-upload-address-missing` telemetry and rethrows, so the photograph dead-letters like any other failed upload. The retry wrapper breaks on that error type specifically — a 200 with no address is not transient, and each retry would re-POST the bytes and orphan another object in the bucket. Eight tests, proven red on revert (7 of 8 failed with the old expression restored).
+
+### L42 — The supervisor portal signs photographs in **one** request capped at 50 paths, so a site with more than fifty photographs shows **zero** photographs — MEDIUM (feature failure; arrives on its own with time, on every site)
+
+`app/sites/[id]/page.tsx:185-187` pools photographs across the whole site's history:
+
+```ts
+const photos = useMemo(() => entries.flatMap((e) => (e.photos ?? [])), [entries]);
+```
+
+Not the visible date range, not a page — every entry the portal loaded. The signing effect then passes that entire array to `signUploadPaths` in a single call, and `POST /api/uploads/sign` refuses more than 50 paths with a **400 for the whole request** (`routes/uploads.ts:84-86`), not a partial result:
+
+```ts
+if (paths.length > 50) {
+  return res.status(400).json({ error: "Maximum 50 paths per sign request." });
+}
+```
+
+So the failure is all-or-nothing and it is not graceful: at 50 photographs the grid works, at 51 it is empty. On a site diary, where photographs accumulate daily and are never pruned, that threshold is crossed by roughly the end of the second week and then never uncrossed. The API's cap is correct — it bounds the HMAC work per request. The client's job is to chunk, and it does not.
+
+**Disposition:** Open, recorded 4 October 2026. Deliberately NOT fixed on `fix/offline-photo-sync`, which is a mobile-sync branch awaiting a merge decision; mixing a portal fix into it would make a single revert impossible. Belongs in the web-dashboard branch with L43, L44, L45 and L46 — they are all the same screen and the same afternoon.
+
+### L43 — The portal's signing failure is swallowed by `.catch(console.error)`, with no retry and no error state, and the per-path reason is discarded before it reaches the component — MEDIUM (observability; it is what makes L42 and L44 indistinguishable from an upload that never happened)
+
+Two separate discards, in two files.
+
+**The wholesale failure.** The signing effect ends `.catch(console.error).finally(() => setSigningPhotos(false))`. A 400 — L42's cap, say — therefore produces a browser console line and nothing else: no retry, no state, and a render that falls back to a grey tile with `📷 Loading…` (`page.tsx:93-94`). "Loading…" is not merely unhelpful, it is **wrong**: the load has finished and failed, and the word says it is still coming.
+
+**The per-path failure.** `POST /uploads/sign` already answers *why* each path failed — `error: "Invalid upload path."` when the path is not a managed uri, `error: "Not found."` when the upload record is not the caller's company's. The portal's client wrapper throws the field away at the type level:
+
+```ts
+export async function signUploadPaths(paths: string[]): Promise<{ path: string; url: string | null }[]> {
+  const data = await request<{ signed: { path: string; url: string | null }[] }>(…);
+  return data.signed;
+}
+```
+
+No `error` in either the declared type or the returned object, so the component cannot distinguish "this photograph was never uploaded" from "this photograph belongs to someone else" from "the request failed entirely" — three different diagnoses that render identically.
+
+This cost real time. Five grey tiles on a site page during the L28 device pass were consistent with four distinct causes, and the server had already sent the string that would have separated them.
+
+**Disposition:** Open, recorded 4 October 2026. Fix is small: surface `error` through the wrapper, render a failed tile as failed rather than as loading, and retry once. Web-dashboard branch.
+
+### L44 — The signing effect can wedge: its re-entrancy guard is read but not in its dependency array — LOW (concurrency; a third way a correctly uploaded photograph renders grey)
+
+```ts
+useEffect(() => {
+  if (tab !== "photos" || photos.length === 0 || signingPhotos) return;
+  …
+}, [tab, photos]);
+```
+
+`signingPhotos` is the guard against a second concurrent sign while one is in flight. It is read in the body and **absent from the deps**, so the effect does not re-run when it clears. The sequence that bites: the effect starts while `photos` is still partly loaded, `photos` then changes as the rest arrives, the re-run is turned away by the guard that is still `true`, and the guard's clearing schedules no further run. The later photographs are never signed, and nothing in the UI distinguishes that from L42 or L43.
+
+It needs `photos` to settle in two steps to happen at all, which is why it is LOW rather than MEDIUM — but the portal loads several collections in one `Promise.all` and a slow link is exactly where it would show.
+
+Noted rather than fixed: `eslint-plugin-react-hooks` would have flagged this, and installing it was deliberately declined because a repo-wide rule lights up files no current branch touches (see `docs/DECISIONS.md`). The decision stands; the consequence is that this class of defect is found by reading. Recorded so it is found once.
+
+**Disposition:** Open, recorded 4 October 2026. Web-dashboard branch, with L42 and L43 — all three are the same effect.
+
+### L45 — A diary generated from the portal is sent **no photographs at all**, so the AI has nothing visual to work from — MEDIUM (feature degradation; silent, and the product's headline feature)
+
+`lib/api.ts:180-189`:
+
+```ts
+entries: payload.entries.map((e) => ({
+  date: e.date, notes: e.notes, weather: e.weather, crewCount: e.crewCount, photos: [],
+})),
+```
+
+`photos: []` is a literal. Not a filter, not a fallback for a missing field — every entry is sent with an empty photograph array regardless of what it holds. The generator therefore sees notes, weather and crew counts only, for every diary generated from the portal, and the output is weaker in a way no one can see: it returns 200, it reads plausibly, and nothing records that the visual evidence was withheld.
+
+The mobile client does not do this, so the same site generates a materially different diary depending on which client asked — and the portal is the client a supervisor would use to produce the document that gets filed.
+
+This compounds C1's open half. A saved diary records no generator, model or prompt version; now it also does not record whether the generator was given the photographs. Two diaries on one site can differ for reasons the record cannot express.
+
+Found while scoping the Entries tab, not while looking for it.
+
+**Disposition:** Open, recorded 4 October 2026. Check whether `/api/generate-diary` wants canonical paths or signed URLs before changing it — if signed, this is coupled to L42's chunking, because a diary over a fortnight long will exceed 50 paths. Web-dashboard branch.
+
+### L46 — Invite emails are stored **as typed** while registration lowercases, so a mixed-case invitation can never be accepted — MEDIUM (feature failure; permanent for the affected invite, and the error message names the wrong cause)
+
+Neither invite schema normalises case:
+
+```ts
+// routes/projects.ts:292-295   and   routes/company.ts:76-79
+emails: z.array(z.string().email()).min(1).max(50),
+```
+
+Registration and login both do (`routes/auth.ts:114`: `.trim().toLowerCase()`). Acceptance compares the two with an exact string equality, in both the memory and the Postgres path:
+
+```ts
+if (invite.invitedEmail !== actorEmail) return "wrong_user";          // projectsStore.ts:1440
+if (invite.invited_email !== actorEmail) { … return "wrong_user"; }   // projectsStore.ts:1528
+```
+
+So an owner who types `Sam.Taylor@Example.com` into the invite box creates an invite bound to that exact string. The invited person signs up, becomes `sam.taylor@example.com`, and is refused `wrong_user` — a message meaning "this invitation is for somebody else". It is not: it is for them. The invite cannot be rescued by retrying, only by the owner re-issuing it in lower case, and nothing tells either party that is the fix. Email local-parts are case-sensitive per RFC 5321 and case-insensitive at every provider anyone uses, so storing what was typed is defensible in the abstract and wrong here, because the other half of the comparison has already normalised.
+
+The invite is not burned — the Postgres path deletes the row before checking and rolls back — so the token survives for the right person. There is no right person.
+
+Found while establishing whether a second test account could accept an invitation (the `TEST_PHONE_NUMBERS` work), by reading the acceptance path rather than by hitting it.
+
+**Disposition:** Open, recorded 4 October 2026. Fix is one `.toLowerCase()` in each schema plus a lowercasing backfill of `site_invites.invited_email` for rows not yet accepted — and because that is a migration, it is the orchestrator's to number and must not be bundled into a feature branch casually. Until then: **type invited addresses in lower case.**
+
+### L47 — The portal counts entries on the overview and offers no way to see them — LOW (completeness; the count is the only evidence they exist)
+
+`TABS` (`page.tsx:19-27`) has seven tabs — Overview, Timesheets, Incidents, Inspections, Dockets, Photos, Reports. There is no Entries tab. The overview nevertheless leads with an Entries metric card (`page.tsx:300`):
+
+```ts
+{ label: "Entries", value: entries.length, icon: "📄", color: "var(--primary)" },
+```
+
+`entries` is loaded, filtered and used to derive the photograph grid and the diary payload, so the data is present in the client the whole time. A supervisor can therefore see that a site has 43 entries and cannot open one — on a product whose unit of record *is* the entry. Every other metric on that row has a tab behind it.
+
+Not a defect so much as an unfinished screen, recorded because the count makes it look finished.
+
+**Disposition:** Open, recorded 4 October 2026. This is the scoped Entries tab, and it is the reason the web-dashboard branch exists; L42–L45 are the defects it will sit on top of.
