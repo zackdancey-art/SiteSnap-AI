@@ -324,7 +324,7 @@ export default function SettingsPage() {
         <Topbar title="Settings" right={<span style={{ fontSize: 13, color: "var(--text-secondary)" }}>{user?.email}</span>} />
 
         {/* Two-column layout */}
-        <div className="page-body" style={{ display: "grid", gridTemplateColumns: "210px 1fr", gap: 24, alignItems: "start" }}>
+        <div className="page-body settings-layout">
 
           {/* ── Left nav ── */}
           <nav style={{

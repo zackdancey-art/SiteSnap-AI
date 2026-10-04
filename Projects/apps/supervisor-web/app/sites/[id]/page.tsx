@@ -638,7 +638,7 @@ export default function SiteDetailPage() {
         </div>
 
         {/* Tab bar */}
-        <div style={{
+        <div className="tab-bar" style={{
           background: "var(--surface)",
           borderBottom: "2px solid var(--border)",
           display: "flex",
@@ -690,7 +690,7 @@ export default function SiteDetailPage() {
           {/* ── Overview ── */}
           {!loadingMain && tab === "overview" && site && (
             <>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 14 }}>
                 {[
                   { label: "Entries", value: entries.length, icon: "📄", color: "var(--primary)" },
                   { label: "Timecards", value: timecards.length, icon: "⏱️", color: "#0ea5e9" },

@@ -1451,3 +1451,80 @@ judgement about what the Advanced section is for, not a bug fix.
 **Disposition:** Fixed for the Live Map. The three controls now govern the page they describe, the
 invented four-hour claim is gone, and the key/shape/defaults have one owner. The Display section
 and the API URL field are open as the same finding in a different section of the same page.
+
+---
+
+### L51 — Below 640px the portal has no navigation at all: the sidebar is `display: none` with nothing in its place — MEDIUM (feature failure on phones and small tablets; seven pages, none reachable from any other)
+
+The portal's entire responsive strategy was eleven lines at the bottom of
+`app/globals.css`, and the operative one was:
+
+```css
+@media (max-width: 640px) {
+  .sidebar { display: none; }      /* ← and nothing replaces it */
+  .metrics-grid { grid-template-columns: 1fr; }
+}
+```
+
+`Sidebar.tsx` is the only navigation in the product — Dashboard, Sites, Live Map, Reports,
+Activity, Team, Settings. There is no hamburger, no drawer, no bottom bar, and `Topbar.tsx` carries
+only a title, a per-page `right` slot and the profile menu. So a manager who opened the portal on a
+phone landed on `/dashboard` and could not reach any other page without typing a URL. The profile
+menu's "Settings" link was the single exception, and only because it is a `router.push`.
+
+This matters more for this product than the width would suggest: the person being asked to look at
+a site diary is often the one being rung about it, away from the desk the portal was designed for.
+
+**Also found, same audit, same file.** Each confirmed by reading the computed rule against the
+measured content rather than inferred from the width alone:
+
+| Where | Defect | Why it breaks |
+|---|---|---|
+| `.app-shell` | `height: 100vh` | On mobile Safari/Chrome `100vh` is the viewport with the URL bar retracted, so the shell is taller than the visible area. `.page-body` is the scroll container and `.app-shell` is `overflow: hidden`, so the bottom of every page sat behind the browser chrome with nothing able to scroll to it. |
+| `.card` + `.data-table` | `overflow: hidden` on the card, `width: 100%` on the table | The 5-to-7-column tables — Live Map coordinates, team emails, incident rows, report rows — were **clipped, not scrollable**. The right-hand columns were unreachable, with no scrollbar and no sign anything had been cut. |
+| `.topbar` | `height: 64px`, `flex-wrap` unset | On the Live Map the bar holds a title, a timestamp, a Refresh button and the avatar. At 375px that overflowed and took the whole document into horizontal scroll. |
+| `.settings-row` | `space-between`, control `flex-shrink: 0`, inputs to 320px | Label and control could not fit side by side, so the control was pushed past the right edge of the card. |
+| `settings/page.tsx:326` | inline `gridTemplateColumns: "210px 1fr"` on `.page-body` | An inline style no media query can reach. At 375px the fixed 210px nav column plus the 24px gap plus 48px of page padding left the content column about 90px wide. |
+| `sites/[id]/page.tsx:693` | inline `repeat(4,1fr)` | Four metric tiles at every width; at 375px each held a 28px-font number in about 75px. |
+| `reports/page.tsx:435` | inline `repeat(3, 1fr)` | The same, three across. |
+| `.card-header` | `flex-wrap` unset | Several headers put a search box after the title with `margin-left: auto`; unwrapped, the header pushed past the card edge. |
+| `globals.css:428` | `.tab-bar::-webkit-scrollbar { display: none }` | **A rule for a class nothing carried.** The site page's tab bar sets `scrollbarWidth`/`msOverflowStyle` inline — which cannot express a `::-webkit-scrollbar` pseudo-element — so the scrollbar it meant to hide was hidden in Firefox and visible in Safari and Chrome. |
+
+**Fixed, as layout repairs only.** The brief was breaks, not a mobile redesign, and the portal is
+still a desk tool at these widths — no control was resized, no information architecture changed, no
+new component added, no new colour.
+
+The sidebar keeps its markup exactly and lays out as a horizontally scrolling strip across the top
+at ≤640px: `.app-shell` becomes a column, `.sidebar` a row, `.sidebar-nav` a row of `nowrap` items.
+The footer block is hidden because the profile menu already carries "Signed in as" and Sign Out,
+and the wordmark is hidden because it is not navigation and was taking 150 of the 375 pixels the
+strip has to scroll within. This is the same pattern the site detail page's tab bar already uses,
+so it is the product's own idiom rather than a new one.
+
+`height: 100dvh` is declared *after* `height: 100vh` so a browser that does not know the unit keeps
+the old value. The two inline grids become `repeat(auto-fit, minmax(150px, 1fr))` and
+`minmax(170px, 1fr)` — four and three across at desk widths exactly as before, collapsing on their
+own below that, and the same idiom as the three `auto-fill` grids already in those files. The
+settings two-column layout becomes a `.settings-layout` class so a media query can collapse it. The
+table fix is scoped to ≤900px: `.card:has(.data-table) { overflow-x: auto }` plus a 560px
+`min-width` on the table, so cells stop being crushed into two-character wraps and the card scrolls
+sideways to reach the columns. At desk widths those tables fit and nothing changes. The tab bar
+gains `className="tab-bar"`, which is the whole fix for the dead rule.
+
+**How this was verified, and the limit on it.** By reading each computed rule against the markup it
+applies to, and by building the portal for production and grepping the emitted stylesheet to prove
+every rule survived minification — `height:100vh;height:100dvh` both present in order, the `:has()`
+selector intact, both media blocks emitted, `.tab-bar::-webkit-scrollbar` now reachable. **No
+browser was opened at any width.** There is no test runner and no visual regression harness in
+`apps/supervisor-web`, so this is a code-and-build audit, not a rendered one. The PR body asks for
+the four widths to be checked by eye, and `:has()` in particular wants confirming in Safari.
+
+**Not changed, deliberately.** Tap-target sizes: several controls are under the 44px guideline
+(`.btn-ghost` computes to about 29px tall, the Live Map Refresh button to about 29px), which the
+brief lists as in scope, but raising them is a change to how every button in the product looks at
+every width — a design decision, not a break, and it wants to be seen rather than slipped in behind
+a layout fix. The `WorkerMap` popups' `min-width: 180px` is Leaflet's own overlay and fits. The
+auth pages were not audited: they are a centred 420px card and were out of the brief's path.
+
+**Disposition:** Fixed for the nine layout defects above. Tap-target sizing is open as a separate,
+visible change. Verification is code-and-build; a rendered check at 375px and 768px is still owed.
