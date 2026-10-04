@@ -1191,14 +1191,32 @@ needed. Worth stating because the privacy page lists Sentry as a processor, whic
 API and not of this client; if a browser SDK is ever added, `connect-src` needs its ingest origin
 or every error report is silently refused by this same policy.
 
-**Disposition:** Open, recorded 4 October 2026. **The first item of the web-dashboard branch**, and
-deliberately not fixed on `fix/offline-photo-sync` — that branch is a mobile-sync branch being
-merged, and a portal CSP change in it could not be reverted alone. Three commits, in this order:
-(1) add the API origin to `img-src` and delete the stale comment — one line, fixes the photographs;
-(2) add `report-to` plus an explicit `media-src` and `frame-src` so the next omission announces
-itself; (3) the `script-src` nonce migration into `middleware.ts`, on its own, because it changes
-how every page is served. L48 blocks L42–L44: until the photographs can load at all, no fix to the
-signing path can be verified end to end.
+**Disposition:** Open, recorded 4 October 2026. Deliberately not fixed on
+`fix/offline-photo-sync` — that branch is a mobile-sync branch being merged, and a portal CSP
+change in it could not be reverted alone. L48 blocks L42–L44: until the photographs can load at
+all, no fix to the signing path can be verified end to end.
+
+**Split across two branches, by owner decision, 4 October 2026.**
+
+*Web-dashboard branch — its first item, two commits:*
+
+1. Add `${apiOrigin(process.env.NEXT_PUBLIC_API_URL)}` to `img-src` and delete the stale comment
+   on the line above `connect-src`. One line; the photographs load.
+2. Add a `report-to`/`report-uri` endpoint **together with** explicit `media-src` and `frame-src`
+   directives. These belong in one commit and that is deliberate: the reporting endpoint is what
+   makes a future omission announce itself, and `media-src` is the omission already known about.
+   The first time this product serves **video** evidence it fails exactly as the photographs did
+   and exactly as silently, because `media-src` has no directive and inherits `default-src 'self'`.
+   That is not to be left for the day it bites — the whole lesson of this finding is that an
+   inherited restrictive default is invisible until a user hits it.
+
+*Its own branch, with its own review — NOT riding in behind a photograph fix:*
+
+3. The `script-src` nonce migration. It requires a `middleware.ts` computing a per-request nonce,
+   because `headers()` is evaluated once at build and cannot produce one. That makes it a security
+   change to how **every page** of a portal holding other companies' site evidence is served, and
+   it gets reviewed as one rather than as a line in a CSS-and-images commit. Recorded here with the
+   rest of L48 so the policy is described in one place; scheduled separately.
 
 ### L49 — The portal hydrates with server/client HTML mismatches — React `#418`, `#423`, `#425` — LOW (correctness and performance; recorded from console evidence, cause not yet located)
 
