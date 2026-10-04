@@ -13,6 +13,7 @@ import { initProjectSchema } from "./storage/projectsStore";
 import { runMigrations } from "./storage/migrate";
 import { readIntEnv } from "./utils/env";
 import { logRateLimiterBackendAtBoot } from "./middleware/rateLimit";
+import { logTestPhoneNumbersAtBoot } from "./utils/phoneNumbers";
 
 dotenv.config();
 
@@ -198,6 +199,9 @@ export async function bootstrap() {
   // "we turned Redis on" and "Redis is being used" are two different facts and
   // nothing distinguishes them until something is abused.
   logRateLimiterBackendAtBoot();
+  // Same reasoning as the line above: an exemption that is active and an
+  // exemption that is believed cleared must not look the same from outside.
+  logTestPhoneNumbersAtBoot();
   await runMigrations();
   await initAuthSchema();
   await initProjectSchema();
