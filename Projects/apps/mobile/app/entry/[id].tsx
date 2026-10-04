@@ -14,9 +14,11 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { router, useLocalSearchParams } from "expo-router";
+import * as Crypto from "expo-crypto";
 import { useData } from "@/lib/data-context";
 import Colors from "@/constants/colors";
-import { Photo } from "@/lib/types";
+import { Photo, type AnnotationVector } from "@/lib/types";
+import { describeCaptureTime } from "@/lib/photo-capture-time";
 import {
   buildEntryPhotosReportHtml,
   runReportExport,
@@ -25,11 +27,12 @@ import {
 } from "@/lib/export-utils";
 import { BackButton } from "@/components/BackButton";
 import { EvidenceImage, type EvidenceImageStatus } from "@/components/EvidenceImage";
+import { PhotoAnnotator } from "@/components/PhotoAnnotator";
 
 export default function EntryDetailScreen() {
   const insets = useSafeAreaInsets();
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { getEntry, getSite, deleteEntry } = useData();
+  const { getEntry, getSite, deleteEntry, updateEntry } = useData();
 
   const entry = getEntry(id);
   const site = entry ? getSite(entry.siteId) : null;
@@ -37,6 +40,9 @@ export default function EntryDetailScreen() {
   const webTopInset = Platform.OS === "web" ? 67 : 0;
   const webBottomInset = Platform.OS === "web" ? 34 : 0;
   const [previewPhoto, setPreviewPhoto] = React.useState<Photo | null>(null);
+  const captureTime = previewPhoto ? describeCaptureTime(previewPhoto) : null;
+  const [annotatingPhoto, setAnnotatingPhoto] = React.useState<Photo | null>(null);
+  const [savingAnnotation, setSavingAnnotation] = React.useState(false);
 
   /**
    * What each tile actually managed to render. Reported by EvidenceImage rather
@@ -107,6 +113,78 @@ export default function EntryDetailScreen() {
     month: "long",
     year: "numeric",
   });
+
+  /**
+   * Annotating a saved photograph.
+   *
+   * THE RULE THIS OBEYS, which is the non-negotiable one: an annotation
+   * CREATES A NEW RECORD ALONGSIDE THE ORIGINAL AND NEVER REPLACES IT. The
+   * original is the evidence; an annotation is a derived document about it.
+   * Nothing in this codebase has ever deleted or versioned a stored object
+   * (AUDIT L33), so an overwrite would be unrecoverable.
+   *
+   * `PhotoAnnotator` makes that easy to honour, because it does not produce an
+   * image at all -- it emits a stroke vector, and the derivative reuses the
+   * original's bytes and adds the vector on top. So there is exactly one copy
+   * of the pixels on the server and two records pointing at it, and the
+   * original is reachable forever by its own id.
+   *
+   * `storageKey`/`storagePath` ARE copied from the original, which the two
+   * capture screens' handlers do not do. Without them the derivative is a
+   * photograph with no storage address -- precisely the state AUDIT L39
+   * describes the server as accepting -- because `uploadPhotoOnce`
+   * short-circuits on `isManagedMediaUri(photo.uri)` and returns the record
+   * untouched, so nothing downstream ever fills them in.
+   */
+  const handleSaveAnnotation = async (vector: AnnotationVector) => {
+    if (!annotatingPhoto || savingAnnotation) return;
+    const sourceId = annotatingPhoto.id;
+    const withOriginalMarked = entry.photos.map((p) =>
+      p.id === sourceId && !p.kind ? { ...p, kind: "original" as const } : p
+    );
+    const source = withOriginalMarked.find((p) => p.id === sourceId) ?? annotatingPhoto;
+    const derivative: Photo = {
+      id: Crypto.randomUUID(),
+      uri: source.uri,
+      base64: source.base64,
+      mimeType: source.mimeType,
+      storageKey: source.storageKey,
+      storagePath: source.storagePath,
+      caption: source.caption,
+      // `timestamp` is when this derivative was created. Everything describing
+      // the PHOTOGRAPH is inherited: an annotation is a document about the same
+      // moment, so it depicts the same capture time, the same place and the
+      // same bytes.
+      timestamp: new Date().toISOString(),
+      ...(source.capturedAt ? { capturedAt: source.capturedAt } : {}),
+      captureTimeSource: source.captureTimeSource,
+      ...(source.contentSha256 ? { contentSha256: source.contentSha256 } : {}),
+      latitude: source.latitude,
+      longitude: source.longitude,
+      kind: "annotated",
+      derivedFromId: source.id,
+      annotationVector: vector,
+    };
+
+    setSavingAnnotation(true);
+    try {
+      // `updateEntry` has no error handling of its own (AUDIT L38) and throws
+      // straight out of `apiJson`, so the try/catch is MANDATORY here rather
+      // than tidy: without it a failed PATCH closes the sheet silently and the
+      // annotation is gone with the screen still showing the old photograph.
+      // Awaited before the modal closes so success is reported only once the
+      // server has it. The queue redesign L38 actually needs is Part 5's.
+      await updateEntry(entry.id, { photos: withOriginalMarked.concat(derivative) });
+      setAnnotatingPhoto(null);
+    } catch {
+      Alert.alert(
+        "Annotation Not Saved",
+        "The annotation could not be saved. Your markings are still on screen — check your connection and save again. The original photograph is unchanged."
+      );
+    } finally {
+      setSavingAnnotation(false);
+    }
+  };
 
   /**
    * Every image is turned into a data URI BEFORE the html is built. The exporter
@@ -302,7 +380,7 @@ export default function EntryDetailScreen() {
           <Pressable style={styles.previewClose} onPress={() => setPreviewPhoto(null)}>
             <Ionicons name="close" size={26} color={Colors.white} />
           </Pressable>
-          {!!previewPhoto && (
+          {!!previewPhoto && captureTime && (
             <>
               <ScrollView
                 style={styles.previewScroll}
@@ -323,16 +401,90 @@ export default function EntryDetailScreen() {
                 />
               </ScrollView>
               <View style={styles.previewMeta}>
-                <Text style={styles.previewMetaText}>
-                  Captured {new Date(previewPhoto.timestamp || entry.timestamp).toLocaleString("en-AU")}
+                {/*
+                  This said "Captured <timestamp>" — and `timestamp` is when the
+                  record was created, not when the photograph was taken. For a
+                  photograph chosen from the gallery those are different dates,
+                  so the app was stating a capture time it had never read, with
+                  a fallback to the ENTRY's timestamp that was further out
+                  still. `describeCaptureTime` says which of the four states
+                  this photograph is actually in.
+                */}
+                <Text
+                  style={[
+                    styles.previewMetaText,
+                    captureTime.state !== "known" && styles.previewMetaUnknown,
+                  ]}
+                >
+                  {captureTime.label}
                 </Text>
                 {!!previewPhoto.caption && (
                   <Text style={styles.previewCaption}>{previewPhoto.caption}</Text>
+                )}
+
+                {/*
+                  The route to the annotator that never existed. `PhotoAnnotator`
+                  has worked on saved photographs all along; the entry detail
+                  view simply had no way to reach it.
+
+                  Offered on the ORIGINAL only. An annotation of an annotation
+                  would make `derivedFromId` a chain the viewer, the export and
+                  the AI report all treat as one level deep, and there is no
+                  reading of "the original is the evidence" in which that is
+                  wanted. The original stays annotatable as many times as you
+                  like -- each marking is its own new record.
+
+                  It closes the preview before opening the annotator rather than
+                  stacking one modal inside another, which iOS handles badly.
+                */}
+                {previewPhoto.kind !== "annotated" && (
+                  <Pressable
+                    style={styles.previewAnnotate}
+                    onPress={() => {
+                      const target = previewPhoto;
+                      setPreviewPhoto(null);
+                      setAnnotatingPhoto(target);
+                    }}
+                  >
+                    <Ionicons name="brush-outline" size={16} color={Colors.white} />
+                    <Text style={styles.previewAnnotateText}>Annotate</Text>
+                  </Pressable>
                 )}
               </View>
             </>
           )}
         </View>
+      </Modal>
+
+      {/*
+        Same pattern as `new-entry.tsx`: a page-sheet Modal holding the
+        annotator, dismissed by its own Cancel. `onRequestClose` is ignored
+        while a save is in flight so the Android back gesture cannot discard
+        markings mid-PATCH.
+      */}
+      <Modal
+        visible={!!annotatingPhoto}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => {
+          if (!savingAnnotation) setAnnotatingPhoto(null);
+        }}
+      >
+        {annotatingPhoto && (
+          <PhotoAnnotator
+            photo={annotatingPhoto}
+            onSave={handleSaveAnnotation}
+            onCancel={() => {
+              if (!savingAnnotation) setAnnotatingPhoto(null);
+            }}
+          />
+        )}
+        {savingAnnotation && (
+          <View style={styles.annotationSaving}>
+            <ActivityIndicator size="small" color={Colors.white} />
+            <Text style={styles.annotationSavingText}>Saving annotation…</Text>
+          </View>
+        )}
       </Modal>
     </View>
   );
@@ -585,6 +737,46 @@ const styles = StyleSheet.create({
   previewMetaText: {
     color: Colors.white,
     fontSize: 13,
+    fontFamily: "Inter_600SemiBold",
+  },
+  // Anything other than a real capture time is amber rather than white, so
+  // "Date taken unknown" and "Added <date>" cannot be skim-read as "Taken".
+  previewMetaUnknown: {
+    color: Colors.warning,
+  },
+  previewAnnotate: {
+    marginTop: 6,
+    alignSelf: "flex-start",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: "rgba(255,255,255,0.18)",
+  },
+  previewAnnotateText: {
+    color: Colors.white,
+    fontSize: 14,
+    fontFamily: "Inter_600SemiBold",
+  },
+  // Overlaid rather than inline: the annotator owns the whole sheet, and a
+  // save must visibly block a second tap without the canvas jumping.
+  annotationSaving: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    paddingVertical: 18,
+    backgroundColor: "rgba(0,0,0,0.75)",
+  },
+  annotationSavingText: {
+    color: Colors.white,
+    fontSize: 14,
     fontFamily: "Inter_600SemiBold",
   },
   previewCaption: {

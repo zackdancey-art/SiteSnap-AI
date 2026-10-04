@@ -16,9 +16,9 @@ import { Ionicons } from "@expo/vector-icons";
 import { router, useLocalSearchParams } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
 import * as Crypto from "expo-crypto";
-import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
 import DateTimePicker, { DateTimePickerEvent } from "@react-native-community/datetimepicker";
 import { useData, type SaveProgress } from "@/lib/data-context";
+import { CAPTION_MAX_LENGTH, createStoredPhoto } from "@/lib/photo-capture";
 import Colors from "@/constants/colors";
 import { AnnotationVector, HourlyNote, Photo } from "@/lib/types";
 import { AddressSuggestion, fetchAddressSuggestions } from "@/lib/geo";
@@ -56,53 +56,24 @@ type EntryDirtySnapshot = {
   photosJson: string;
 };
 
+/**
+ * The fingerprint `isDirty` compares, and therefore what the unsaved-changes
+ * guard can see.
+ *
+ * `caption` is in here deliberately. This used to be the id list alone, which
+ * was complete when a photograph's only mutable property was whether it was in
+ * the list at all. Now that a caption can be typed, an id-only fingerprint
+ * means editing ONLY captions leaves `isDirty` false -- so the guard stays
+ * disarmed, the swipe-back gesture is live, and the captions are gone with no
+ * warning. Adding a field to `Photo` that a person can edit means adding it
+ * here.
+ */
 function snapshotPhotos(photos: PhotoWithBase64[]): string {
-  return JSON.stringify(photos.map((p) => p.id));
+  return JSON.stringify(photos.map((p) => [p.id, p.caption ?? ""]));
 }
 
 function snapshotHourlyNotes(hourlyNotes: HourlyNote[]): string {
   return JSON.stringify(hourlyNotes.map((h) => ({ hour: h.hour, note: h.note })));
-}
-
-function normalizeImageMimeType(_mimeType?: string | null) {
-  return "image/jpeg";
-}
-
-function extractGpsFromExif(exif: Record<string, unknown> | undefined | null): { latitude?: number; longitude?: number } {
-  if (!exif) return {};
-  const lat = exif["GPSLatitude"] ?? exif["GPS Latitude"];
-  const lon = exif["GPSLongitude"] ?? exif["GPS Longitude"];
-  const latRef = String(exif["GPSLatitudeRef"] ?? "N");
-  const lonRef = String(exif["GPSLongitudeRef"] ?? "E");
-  if (typeof lat !== "number" || typeof lon !== "number") return {};
-  return {
-    latitude: latRef === "S" ? -lat : lat,
-    longitude: lonRef === "W" ? -lon : lon,
-  };
-}
-
-async function createStoredPhoto(asset: ImagePicker.ImagePickerAsset): Promise<PhotoWithBase64> {
-  const manipulated = await manipulateAsync(
-    asset.uri,
-    [],
-    {
-      compress: 0.55,
-      format: SaveFormat.JPEG,
-      base64: true,
-    }
-  );
-
-  const gps = extractGpsFromExif(asset.exif as Record<string, unknown> | undefined | null);
-
-  return {
-    id: Crypto.randomUUID(),
-    uri: manipulated.uri,
-    caption: "",
-    timestamp: new Date().toISOString(),
-    base64: manipulated.base64 || asset.base64 || "",
-    mimeType: normalizeImageMimeType(asset.mimeType),
-    ...gps,
-  };
 }
 
 export default function NewEntryScreen() {
@@ -383,7 +354,7 @@ export default function NewEntryScreen() {
       });
 
       if (!result.canceled && result.assets[0]) {
-        const newPhoto = await createStoredPhoto(result.assets[0]);
+        const newPhoto = await createStoredPhoto(result.assets[0], "camera");
         setPhotos((prev) => [...prev, newPhoto]);
       }
     } catch (err) {
@@ -400,12 +371,20 @@ export default function NewEntryScreen() {
         mediaTypes: ["images"],
         quality: 0.35,
         base64: true,
+        // `exif: true` was set on the camera call and NOT on this one, so a
+        // gallery photograph arrived with no EXIF block at all — no
+        // coordinates, and no `DateTimeOriginal` to read a capture time from.
+        // That asymmetry is why a picked photograph could only ever be dated at
+        // the moment it was selected.
+        exif: true,
         allowsMultipleSelection: true,
         selectionLimit: 0,
       });
 
       if (!result.canceled && result.assets.length > 0) {
-        const newPhotos: Photo[] = await Promise.all(result.assets.map((asset) => createStoredPhoto(asset)));
+        const newPhotos: Photo[] = await Promise.all(
+          result.assets.map((asset) => createStoredPhoto(asset, "gallery"))
+        );
         setPhotos((prev) => [...prev, ...newPhotos]);
       }
     } catch (err) {
@@ -416,6 +395,25 @@ export default function NewEntryScreen() {
 
   const removePhoto = (id: string) => {
     setPhotos((prev) => prev.filter((p) => p.id !== id));
+  };
+
+  /**
+   * Captions are typed straight into the photograph's own record. They are
+   * already carried everywhere a `Photo` goes -- the preview modal, the export,
+   * and the AI report's input -- so nothing downstream needed changing; the
+   * only thing that never existed was a field to type one into.
+   *
+   * Held in the `photos` state only -- the draft autosave carries the text
+   * fields and NOT the photographs (see the `saveDraft` effect, which passes
+   * date/weather/location/crew/notes and nothing else), so a caption is no
+   * more and no less durable than the photograph it describes. Making either
+   * survive a killed app means putting image bytes in the draft store, which
+   * is AUDIT L6's problem and not this commit's. What this commit does ensure
+   * is that leaving the screen with unsaved captions now warns, via
+   * `snapshotPhotos`.
+   */
+  const updateCaption = (id: string, caption: string) => {
+    setPhotos((prev) => prev.map((p) => (p.id === id ? { ...p, caption } : p)));
   };
 
   const handleSaveAnnotation = (vector: AnnotationVector) => {
@@ -431,8 +429,28 @@ export default function NewEntryScreen() {
         uri: source.uri,
         base64: source.base64,
         mimeType: source.mimeType,
+        // Carried over, which this handler alone was not doing — the
+        // inspections screen's equivalent always has. It matters in EDIT mode:
+        // the original is already stored, so its uri is a managed path,
+        // `uploadPhotoOnce` short-circuits on `isManagedMediaUri` and returns
+        // the derivative untouched, and nothing downstream ever fills these in.
+        // The result was a photograph with no storage address — the state AUDIT
+        // L39 describes the server as accepting. On a fresh capture both are
+        // undefined and this is a no-op.
+        storageKey: source.storageKey,
+        storagePath: source.storagePath,
         caption: source.caption,
+        // `timestamp` is when this derivative was created, which is now.
+        // Everything describing the PHOTOGRAPH comes from the original: an
+        // annotation is a derived document about the same moment, so it depicts
+        // the same capture time, the same place, and the same bytes (it reuses
+        // the original's uri/base64 and adds a stroke vector — no new raster).
+        // Without this the derivative silently reported the annotation time as
+        // its capture time.
         timestamp: new Date().toISOString(),
+        ...(source.capturedAt ? { capturedAt: source.capturedAt } : {}),
+        captureTimeSource: source.captureTimeSource,
+        ...(source.contentSha256 ? { contentSha256: source.contentSha256 } : {}),
         latitude: source.latitude,
         longitude: source.longitude,
         kind: "annotated",
@@ -775,16 +793,31 @@ export default function NewEntryScreen() {
         <View style={styles.formGroup}>
           <Text style={styles.label}>Photos ({photos.length})</Text>
 
+          {/*
+            A vertical list, not the horizontal strip this used to be.
+            88x88 thumbnails side by side had nowhere to put a caption, which
+            is the whole reason per-photo captions did not exist: the field had
+            no room to go. One row per photograph gives each one its own
+            caption without shrinking the thumbnail.
+          */}
           {photos.length > 0 && (
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              style={styles.photoScroll}
-              contentContainerStyle={styles.photoScrollContent}
-            >
+            <View style={styles.photoList}>
               {photos.map((photo) => (
-                <View key={photo.id} style={styles.photoThumb}>
+                <View key={photo.id} style={styles.photoRow}>
+                <View style={styles.photoThumb}>
                   <AnnotatedImage photo={photo} />
+                  {/*
+                    Shown at the moment of attaching, because this is the only
+                    point at which the person can still do something about it:
+                    retake the photograph, or accept that this one has no date.
+                    A gallery image with no readable `DateTimeOriginal` is NOT
+                    dated "now" — it is recorded as unknown and labelled here.
+                  */}
+                  {photo.captureTimeSource === "unknown" && (
+                    <View style={styles.photoNoDate}>
+                      <Text style={styles.photoNoDateText}>No date</Text>
+                    </View>
+                  )}
                   {photo.kind === "annotated" ? (
                     <View style={styles.photoBadge}>
                       <Text style={styles.photoBadgeText}>Annotated</Text>
@@ -804,8 +837,24 @@ export default function NewEntryScreen() {
                     <Ionicons name="close" size={14} color={Colors.white} />
                   </Pressable>
                 </View>
+
+                  {/*
+                    Plain text, deliberately. These feed the AI narrative
+                    report, so what matters is that a builder will actually
+                    type in one -- not that it can be formatted.
+                  */}
+                  <TextInput
+                    style={styles.captionInput}
+                    placeholder="Caption — what this shows"
+                    placeholderTextColor={Colors.textTertiary}
+                    value={photo.caption}
+                    onChangeText={(text) => updateCaption(photo.id, text)}
+                    multiline
+                    maxLength={CAPTION_MAX_LENGTH}
+                  />
+                </View>
               ))}
-            </ScrollView>
+            </View>
           )}
 
           <View style={styles.photoActions}>
@@ -1107,12 +1156,30 @@ const styles = StyleSheet.create({
   chipTextActive: {
     color: Colors.white,
   },
-  photoScroll: {
+  photoList: {
     marginTop: 4,
-  },
-  photoScrollContent: {
     gap: 10,
-    paddingRight: 4,
+  },
+  photoRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 10,
+  },
+  // Matches the thumbnail's height so a row reads as one unit, and grows with
+  // the text rather than scrolling inside a 88pt box.
+  captionInput: {
+    flex: 1,
+    minHeight: 88,
+    backgroundColor: Colors.surface,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 14,
+    fontFamily: "Inter_400Regular",
+    color: Colors.text,
+    textAlignVertical: "top",
   },
   photoThumb: {
     width: 88,
@@ -1142,6 +1209,22 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(0,0,0,0.6)",
     alignItems: "center",
     justifyContent: "center",
+  },
+  // Top-left, so it cannot collide with the remove control (top-right) or the
+  // annotate control / annotated badge (bottom).
+  photoNoDate: {
+    position: "absolute",
+    top: 4,
+    left: 4,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    borderRadius: 6,
+    backgroundColor: Colors.warning,
+  },
+  photoNoDateText: {
+    fontSize: 9,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.white,
   },
   photoBadge: {
     position: "absolute",

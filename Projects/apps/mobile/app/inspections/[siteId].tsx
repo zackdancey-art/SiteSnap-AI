@@ -11,7 +11,6 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import Svg, { Path } from "react-native-svg";
 import * as ImagePicker from "expo-image-picker";
 import * as Crypto from "expo-crypto";
-import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
 import Colors from "@/constants/colors";
 import { formatDate } from "@/lib/format";
 import { buildHtmlDocument, runReportExport, escapeHtml, buildAnnotationOverlayHtml } from "@/lib/export-utils";
@@ -21,6 +20,7 @@ import { AnnotatedImage } from "@/components/AnnotatedImage";
 import { PhotoAnnotator } from "@/components/PhotoAnnotator";
 import { getApiBaseUrl } from "@/lib/api-base-url";
 import { useData, uploadPhotos } from "@/lib/data-context";
+import { CAPTION_MAX_LENGTH, createStoredPhoto } from "@/lib/photo-capture";
 import { hydratePhotos, savePhotoPayloads, stripPhotoArray } from "@/lib/photo-payload-store";
 import { ScreenHeader } from "@/components/ScreenHeader";
 import { AnnotationVector, Photo } from "@/lib/types";
@@ -213,48 +213,6 @@ async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) throw new Error(`API ${res.status}`);
   return res.json() as Promise<T>;
-}
-
-function normalizeImageMimeType(_mimeType?: string | null) {
-  return "image/jpeg";
-}
-
-function extractGpsFromExif(exif: Record<string, unknown> | undefined | null): { latitude?: number; longitude?: number } {
-  if (!exif) return {};
-  const lat = exif["GPSLatitude"] ?? exif["GPS Latitude"];
-  const lon = exif["GPSLongitude"] ?? exif["GPS Longitude"];
-  const latRef = String(exif["GPSLatitudeRef"] ?? "N");
-  const lonRef = String(exif["GPSLongitudeRef"] ?? "E");
-  if (typeof lat !== "number" || typeof lon !== "number") return {};
-  return {
-    latitude: latRef === "S" ? -lat : lat,
-    longitude: lonRef === "W" ? -lon : lon,
-  };
-}
-
-/** Mirrors new-entry.tsx's createStoredPhoto: camera/library asset → compressed, base64-carrying Photo. */
-async function createStoredPhoto(asset: ImagePicker.ImagePickerAsset): Promise<Photo> {
-  const manipulated = await manipulateAsync(
-    asset.uri,
-    [],
-    {
-      compress: 0.55,
-      format: SaveFormat.JPEG,
-      base64: true,
-    }
-  );
-
-  const gps = extractGpsFromExif(asset.exif as Record<string, unknown> | undefined | null);
-
-  return {
-    id: Crypto.randomUUID(),
-    uri: manipulated.uri,
-    caption: "",
-    timestamp: new Date().toISOString(),
-    base64: manipulated.base64 || asset.base64 || "",
-    mimeType: normalizeImageMimeType(asset.mimeType),
-    ...gps,
-  };
 }
 
 const DEFAULT_ITEMS = [
@@ -626,6 +584,24 @@ export default function InspectionsScreen() {
     updateActiveLocal({ results: updated });
   };
 
+  /**
+   * Per-photo caption on a checklist item.
+   *
+   * Deliberately the same shape as `updateResultNotesLocal`: local on every
+   * keystroke, PATCHed on `onEndEditing`. A PATCH per character would be a
+   * request per keypress on a site with poor signal, and the notes field next
+   * to it already settled that trade-off.
+   */
+  const updateResultPhotoCaptionLocal = (idx: number, photoId: string, caption: string) => {
+    if (!showActive) return;
+    const updated = showActive.results.map((r, i) =>
+      i === idx
+        ? { ...r, photos: (r.photos ?? []).map((p) => (p.id === photoId ? { ...p, caption } : p)) }
+        : r
+    );
+    updateActiveLocal({ results: updated });
+  };
+
   /** Captures/picks a photo for a checklist item, uploads it via the shared company-bound
    *  upload flow (same path as new-entry), persists its base64 locally, then appends it
    *  (with base64, for on-screen display) to that item's photos and PATCHes. */
@@ -655,12 +631,16 @@ export default function InspectionsScreen() {
           mediaTypes: ["images"],
           quality: 0.35,
           base64: true,
+          // Set on the camera branch above and missing here, exactly as in
+          // new-entry.tsx — so a picked photograph carried no EXIF and could
+          // not be dated from its own metadata.
+          exif: true,
         });
         if (!result.canceled) asset = result.assets[0];
       }
       if (!asset) return;
 
-      const photo = await createStoredPhoto(asset);
+      const photo = await createStoredPhoto(asset, source);
       const [uploaded] = await uploadPhotos([photo]);
       await savePhotoPayloads([uploaded]);
 
@@ -704,7 +684,13 @@ export default function InspectionsScreen() {
       base64: source.base64,
       mimeType: source.mimeType,
       caption: source.caption,
+      // Record-created time, which is now. The capture metadata is the
+      // original's — same moment, same place, same bytes — so an annotation
+      // does not report the time it was drawn as the time of the photograph.
       timestamp: new Date().toISOString(),
+      ...(source.capturedAt ? { capturedAt: source.capturedAt } : {}),
+      captureTimeSource: source.captureTimeSource,
+      ...(source.contentSha256 ? { contentSha256: source.contentSha256 } : {}),
       latitude: source.latitude,
       longitude: source.longitude,
       storagePath: source.storagePath,
@@ -1032,15 +1018,13 @@ export default function InspectionsScreen() {
                     placeholderTextColor={Colors.textTertiary}
                     multiline
                   />
+                  {/* Rows rather than a horizontal strip, for the same reason as
+                      new-entry: a caption needs somewhere to go. */}
                   {!!(result.photos && result.photos.length > 0) && (
-                    <ScrollView
-                      horizontal
-                      showsHorizontalScrollIndicator={false}
-                      style={styles.resultPhotoScroll}
-                      contentContainerStyle={styles.resultPhotoScrollContent}
-                    >
+                    <View style={styles.resultPhotoList}>
                       {result.photos!.map((photo) => (
-                        <View key={photo.id} style={styles.resultPhotoThumb}>
+                        <View key={photo.id} style={styles.resultPhotoRow}>
+                        <View style={styles.resultPhotoThumb}>
                           <AnnotatedImage photo={photo} />
                           {photo.kind === "annotated" ? (
                             <View style={styles.photoBadge}>
@@ -1061,8 +1045,22 @@ export default function InspectionsScreen() {
                             <Ionicons name="close" size={12} color={Colors.white} />
                           </Pressable>
                         </View>
+
+                          <TextInput
+                            style={styles.resultPhotoCaption}
+                            value={photo.caption}
+                            onChangeText={(v) => updateResultPhotoCaptionLocal(idx, photo.id, v)}
+                            onEndEditing={() =>
+                              patchActive(showActive.id, { results: showActive.results })
+                            }
+                            placeholder="Caption — what this shows"
+                            placeholderTextColor={Colors.textTertiary}
+                            multiline
+                            maxLength={CAPTION_MAX_LENGTH}
+                          />
+                        </View>
                       ))}
-                    </ScrollView>
+                    </View>
                   )}
                   <View style={styles.resultPhotoActions}>
                     <Pressable
@@ -1413,8 +1411,9 @@ const styles = StyleSheet.create({
   resultBtnNa: { backgroundColor: Colors.textTertiary, borderColor: Colors.textTertiary },
   notesInput: { borderWidth: 1, borderColor: Colors.border, borderRadius: 10, padding: 10, fontSize: 13, color: Colors.text, backgroundColor: Colors.surface, minHeight: 40 },
 
-  resultPhotoScroll: { marginTop: 2 },
-  resultPhotoScrollContent: { gap: 8, paddingRight: 4 },
+  resultPhotoList: { marginTop: 2, gap: 8 },
+  resultPhotoRow: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
+  resultPhotoCaption: { flex: 1, minHeight: 72, backgroundColor: Colors.surface, borderRadius: 10, borderWidth: 1, borderColor: Colors.border, paddingHorizontal: 10, paddingVertical: 8, fontSize: 13, color: Colors.text, textAlignVertical: "top" },
   resultPhotoThumb: { width: 72, height: 72, borderRadius: 10, overflow: "hidden", position: "relative" },
   photoBadge: { position: "absolute", bottom: 4, left: 4, right: 4, paddingVertical: 2, borderRadius: 6, backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center" },
   photoBadgeText: { fontSize: 8, fontWeight: "700", color: Colors.white },
