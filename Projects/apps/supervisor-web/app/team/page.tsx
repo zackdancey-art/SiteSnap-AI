@@ -112,7 +112,17 @@ export default function TeamPage() {
     e.preventDefault();
     setInviteError("");
     setInviteResults([]);
-    const emails = inviteEmails.split(/[\s,;]+/).map((e) => e.trim()).filter(Boolean);
+    // Lowercased before it leaves the browser. AUDIT L46: the API stores an
+    // invited address exactly as typed, while registration lowercases, and
+    // acceptance compares the two with string equality — so a capitalised
+    // invitation is refused `wrong_user`, which tells the right person the
+    // invitation is for somebody else. Fixing the comparison properly needs a
+    // backfill migration; normalising here stops new bad invitations being
+    // created and costs nothing. The mobile invite screens already do this.
+    const emails = inviteEmails
+      .split(/[\s,;]+/)
+      .map((e) => e.trim().toLowerCase())
+      .filter(Boolean);
     if (emails.length === 0) { setInviteError("Enter at least one email address."); return; }
     setInviting(true);
     try {
@@ -290,8 +300,23 @@ export default function TeamPage() {
                         <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 5 }}>
                           Email addresses
                         </label>
+                        {/*
+                          autoCapitalize/autoCorrect/spellCheck are not cosmetic
+                          here. iOS Safari defaults a type="text" input to
+                          sentence capitalisation, so a supervisor inviting crew
+                          from an iPad produced "Alice@example.com" every time —
+                          and AUDIT L46 then refused the invitation. type stays
+                          "text" rather than "email" because this field takes
+                          several addresses and the browser's single-address
+                          validation would reject the list; inputMode gives the
+                          email keyboard without it.
+                        */}
                         <input
                           type="text"
+                          inputMode="email"
+                          autoCapitalize="none"
+                          autoCorrect="off"
+                          spellCheck={false}
                           value={inviteEmails}
                           onChange={(e) => setInviteEmails(e.target.value)}
                           placeholder="alice@example.com, bob@example.com"

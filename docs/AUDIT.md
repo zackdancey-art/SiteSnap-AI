@@ -1026,7 +1026,50 @@ The invite is not burned — the Postgres path deletes the row before checking a
 
 Found while establishing whether a second test account could accept an invitation (the `TEST_PHONE_NUMBERS` work), by reading the acceptance path rather than by hitting it.
 
-**Disposition:** Open, recorded 4 October 2026. Fix is one `.toLowerCase()` in each schema plus a lowercasing backfill of `site_invites.invited_email` for rows not yet accepted — and because that is a migration, it is the orchestrator's to number and must not be bundled into a feature branch casually. Until then: **type invited addresses in lower case.**
+**How addresses actually get capitalised — every email input audited.** The suspicion was the
+mobile app: iOS defaults a text field to sentence capitalisation, so a contractor inviting crew
+from a phone would produce a capitalised address every time. **The mobile app is clean on both
+counts** — all five of its email fields set `autoCapitalize="none"` and `keyboardType="email-address"`,
+and both invite screens already `.toLowerCase()` before sending (`app/site-invite.tsx:38`,
+`app/company-invite.tsx:33`).
+
+The exposed field was the **portal's**, which nobody suspected:
+
+| Where | Field | Keyboard props | Lowercased before send |
+|---|---|---|---|
+| mobile `app/signup.tsx:363` | email | `autoCapitalize="none"`, `keyboardType="email-address"` | API lowercases |
+| mobile `app/login.tsx:119` | email | both, plus `autoComplete`/`textContentType` | API lowercases |
+| mobile `app/forgot-password.tsx:176` | email | both, plus `autoComplete`/`textContentType` | API lowercases (`auth.ts:811`) |
+| mobile `app/site-invite.tsx:101` | invite emails | both | **yes**, `:38` |
+| mobile `app/company-invite.tsx:113` | invite emails | both | **yes**, `:33` |
+| web `app/page.tsx:61` | login email | `type="email"` — iOS does not autocapitalise these | API lowercases |
+| web `app/forgot-password/page.tsx:62` | email | `type="email"` | API lowercases |
+| **web `app/team/page.tsx:293`** | **invite emails** | **`type="text"`, no props — iOS autocapitalises** | **no** |
+
+One field, wrong on both axes, and it is the one a supervisor uses to bring their crew on. On a
+desktop browser there is no autocapitalisation, so this needed an iPad or a deliberately
+capitalised address to fire — which is why it is narrower than "every real user" and still wrong
+for the client most likely to be issuing invitations in bulk.
+
+**Also noted, not fixed:** `app/deliveries/[siteId].tsx:508` ("Phone or email", supplier contact)
+sets `keyboardType="email-address"` with no `autoCapitalize="none"`. It is freeform contact text
+that nothing matches on, so it is cosmetic rather than this finding.
+
+**Disposition:** PARTIALLY FIXED on `fix/offline-photo-sync` (the commit this paragraph lands in). The portal's invite
+field now sets `inputMode="email"`, `autoCapitalize="none"`, `autoCorrect="off"` and
+`spellCheck={false}`, and `handleInvite` lowercases each address before it leaves the browser. The
+second of those is the one that closes it: the keyboard props only cover the mobile-keyboard case,
+while normalising at submit covers a paste, an autocomplete and a deliberately capitalised address
+too. `type` stays `"text"` rather than `"email"` because the field takes several addresses and the
+browser's single-address validation would reject the list.
+
+**The server half remains OPEN**, and it is the real fix: the two schemas should lowercase
+(`routes/projects.ts:293`, `routes/company.ts:77`), with a backfill of
+`site_invites.invited_email` for rows not yet accepted. That is a migration, so it is the
+orchestrator's to number and is deliberately not bundled into a feature branch. Until it lands,
+an invitation issued by any client **other** than these three — a direct API call, a future
+client, a replayed request — can still create an unacceptable invite, and existing capitalised
+rows stay broken. For those: **re-issue in lower case.**
 
 ### L47 — The portal counts entries on the overview and offers no way to see them — LOW (completeness; the count is the only evidence they exist)
 
