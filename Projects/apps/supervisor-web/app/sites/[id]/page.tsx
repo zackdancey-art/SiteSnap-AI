@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import { useRouter, useParams } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import ProfileDropdown from "@/components/ProfileDropdown";
@@ -229,25 +229,68 @@ export default function SiteDetailPage() {
     return entries.flatMap((e) => (e.photos ?? []));
   }, [entries]);
 
+  /**
+   * What still needs signing, and a stable key for it.
+   *
+   * A path that has been attempted is excluded whether it succeeded or failed,
+   * which is a correctness requirement and not an optimisation: `photos` is a
+   * fresh array on every render, so the effect below would otherwise run on
+   * every render, and the only thing that stops it re-requesting is a path
+   * being accounted for. When failures were discarded they were never
+   * accounted for, so a single path the server refuses put the portal into an
+   * unbounded loop of sign requests.
+   *
+   * `pendingKey` is what the effect actually depends on. The array identity
+   * changes every render; the key changes only when the SET of pending paths
+   * does, so the effect fires on a real change rather than on a re-render.
+   */
+  const pendingPhotoPaths = useMemo(
+    () => photos.map((p) => p.uri).filter((u) => u && !signedPhotoUrls.has(u) && !photoErrors.has(u)),
+    [photos, signedPhotoUrls, photoErrors]
+  );
+  const pendingKey = pendingPhotoPaths.join("\u0000");
+
+  /**
+   * The in-flight guard, and why it is a ref rather than the `signingPhotos`
+   * state it used to be.
+   *
+   * The old condition read `signingPhotos` inside the effect while declaring
+   * only `[tab, photos]` as dependencies — the exact shape
+   * `eslint-plugin-react-hooks` exists to flag (not installed here on purpose;
+   * that is a repo-wide change for its own branch). It happened to work only
+   * because `photos` changed identity on every render, so the effect re-ran
+   * often enough to see fresh state. Remove that accident — which the
+   * `pendingKey` dependency above deliberately does — and a stale `false`
+   * would let a second request start while the first was still open, or a
+   * stale `true` would wedge signing permanently.
+   *
+   * A ref is not reactive, so it is never stale and never a dependency. It is
+   * the right tool for "is there a request open right now"; state is the right
+   * tool for "should the header say Loading", and those are two different
+   * questions that were being answered by one variable.
+   */
+  const signInFlight = useRef(false);
+  // Bumped when a request settles, to re-check for work the completed round did
+  // not cover. Without it, a pending set that changes while a request is open
+  // would be dropped: the effect fires, the ref refuses it, and nothing fires
+  // again. Each round strictly shrinks the pending set — every path asked for
+  // is recorded — so this terminates.
+  const [signRound, setSignRound] = useState(0);
+
   // Sign photo URLs when the Photos tab is opened.
-  //
-  // A path that has been attempted is excluded whether it succeeded or failed,
-  // which is a correctness requirement and not an optimisation: `photos` is a
-  // fresh array on every render, so this effect runs on every render, and the
-  // only thing that stops it re-requesting is a path being accounted for. When
-  // failures were discarded they were never accounted for, so a single path the
-  // server refuses put the portal into an unbounded loop of sign requests —
-  // invisible until the CSP fix above made any of this reachable at all.
   useEffect(() => {
-    if (tab !== "photos" || photos.length === 0 || signingPhotos) return;
-    const unattempted = photos
-      .map((p) => p.uri)
-      .filter((u) => u && !signedPhotoUrls.has(u) && !photoErrors.has(u));
-    if (unattempted.length === 0) return;
+    if (tab !== "photos" || pendingPhotoPaths.length === 0) return;
+    if (signInFlight.current) return;
+
+    const batch = pendingPhotoPaths;
+    signInFlight.current = true;
+    let cancelled = false;
     setSigningPhotos(true);
     setPhotoRequestError(null);
-    signUploadPaths(unattempted)
+
+    signUploadPaths(batch)
       .then((results) => {
+        if (cancelled) return;
         const signed = new Map<string, string>();
         const refused = new Map<string, string>();
         results.forEach(({ path, url, error }) => {
@@ -257,20 +300,31 @@ export default function SiteDetailPage() {
         // A path asked for and absent from the response is neither signed nor
         // refused; record it so it is not asked for again on the next render.
         const answered = new Set(results.map((r) => r.path));
-        unattempted.forEach((path) => {
+        batch.forEach((path) => {
           if (!answered.has(path)) refused.set(path, "The server did not answer for this photo.");
         });
         if (signed.size > 0) setSignedPhotoUrls((prev) => new Map([...prev, ...signed]));
         if (refused.size > 0) setPhotoErrors((prev) => new Map([...prev, ...refused]));
       })
       .catch((err: unknown) => {
+        if (cancelled) return;
         // The whole request failed, so nothing is attributable to a path. Left
         // out of `photoErrors` on purpose: the retry below has to be able to ask
         // for all of them again.
         setPhotoRequestError(err instanceof Error ? err.message : "Could not load photos.");
       })
-      .finally(() => setSigningPhotos(false));
-  }, [tab, photos]);
+      .finally(() => {
+        signInFlight.current = false;
+        if (cancelled) return;
+        setSigningPhotos(false);
+        setSignRound((n) => n + 1);
+      });
+
+    // Leaving the tab or changing site abandons the result rather than writing
+    // it into state that no longer belongs to it. The ref is cleared by
+    // `finally` either way, so an abandoned request does not wedge the next one.
+    return () => { cancelled = true; };
+  }, [tab, pendingKey, signRound]);
 
   // Retry clears the record of what was attempted, which is what lets the effect
   // above ask again.
