@@ -194,15 +194,50 @@ export async function approveDiary(diaryId: string): Promise<Diary> {
   return data.diary;
 }
 
-export async function generateDiary(payload: { siteId: string; period: string; entries: Entry[] }): Promise<Diary> {
-  // `generation` rides along so the preview and the exports can mark the diary
-  // honestly even before it is persisted.
+/**
+ * Ask the API to generate a diary for one site and period.
+ *
+ * SENDS `siteId` AND `period` AND NOTHING ELSE, and that is the fix for AUDIT
+ * L45 rather than an omission.
+ *
+ * `/api/generate-diary` resolves its entries one of two ways
+ * (`routes/ai.ts` → `resolveDiaryRequest`): if the request carries a non-empty
+ * `entries` array it uses that array and never reads the store; otherwise it
+ * loads the site and its entries itself. This portal was sending an `entries`
+ * array built by hand with `photos: []` hardcoded — so it was taking the first
+ * branch and displacing the server's own load, which is the one that supplies
+ * the photographs. Every diary the portal generated was written from notes
+ * alone, while the same endpoint called from the phone saw the images. The
+ * mobile app's primary call sends `{ siteId, period }` too; this now matches it.
+ *
+ * Passing the photographs through instead would have been the smaller edit and
+ * the worse one. Three things come back with the second branch that cannot be
+ * had on the first:
+ *
+ *   - The photographs, with their `storageKey`s, mapped by the server's own
+ *     code. The server then reads each image out of its own media store after
+ *     checking the upload belongs to the caller's company (H7). A
+ *     caller-supplied key is deliberately not trusted for that, so the client
+ *     is the wrong place for this data to come from in any case.
+ *   - The site record. With a client `entries` array the server resolves
+ *     `site: body.site || {}`, and this portal never sent a `site` object — so
+ *     the generated report's header and the model's prompt both had no site
+ *     name, client or address. Reports generated from the office were
+ *     unidentified.
+ *   - No fifty-entry cap. `entries` on the request schema is
+ *     `.max(50)`; the server's own load has no such limit. A monthly report on
+ *     a busy site was silently truncated by a number the portal never saw.
+ *
+ * The caller still needs its own entry list for the "no entries to report on"
+ * pre-check — hence the parameter staying — but it is a guard, not a payload.
+ *
+ * `generation` rides along in the response so the preview and the exports can
+ * mark the diary honestly even before it is persisted.
+ */
+export async function generateDiary(payload: { siteId: string; period: string }): Promise<Diary> {
   const data = await request<{ success: boolean; diary: Diary; generation?: DiaryGeneration | null }>("POST", `/api/generate-diary`, {
-    period: payload.period,
-    entries: payload.entries.map((e) => ({
-      date: e.date, notes: e.notes, weather: e.weather, crewCount: e.crewCount, photos: [],
-    })),
     siteId: payload.siteId,
+    period: payload.period,
   });
   return { ...data.diary, generation: data.generation ?? null };
 }

@@ -368,11 +368,15 @@ function ReportsPageInner() {
 
   const handleGenerate = async () => {
     if (!genSiteId) { setGenError("Please select a site."); return; }
+    // A local pre-check only, so an obviously empty site does not cost a round
+    // trip. The entries themselves are NOT sent: the endpoint loads them from
+    // the store, which is the only path that reaches the photographs. See
+    // generateDiary in lib/api.ts (AUDIT L45).
     const siteEntries = data?.entries.filter((e) => e.siteId === genSiteId) ?? [];
     if (siteEntries.length === 0) { setGenError("This site has no entries to generate a report from."); return; }
     setGenerating(true); setGenError(""); setGenSuccess("");
     try {
-      const diary = await generateDiary({ siteId: genSiteId, period: genPeriod, entries: siteEntries });
+      const diary = await generateDiary({ siteId: genSiteId, period: genPeriod });
       setLocalDiaries((prev) => [diary, ...(prev.length > 0 ? prev : (bootstrapData?.diaries ?? []))]);
       setGenSuccess(`✓ ${genPeriod.charAt(0).toUpperCase() + genPeriod.slice(1)} report generated successfully. Scroll down to view it.`);
       setSelectedSite(genSiteId);

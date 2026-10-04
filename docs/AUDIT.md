@@ -1034,7 +1034,32 @@ This compounds C1's open half. A saved diary records no generator, model or prom
 
 Found while scoping the Entries tab, not while looking for it.
 
-**Disposition:** Open, recorded 4 October 2026. Check whether `/api/generate-diary` wants canonical paths or signed URLs before changing it — if signed, this is coupled to L42's chunking, because a diary over a fortnight long will exceed 50 paths. Web-dashboard branch.
+**Answered: neither, and no signing is involved (4 October 2026)**
+
+The endpoint wants no photograph data from the client at all. `routes/ai.ts` → `resolveDiaryRequest` resolves entries one of two ways, and the choice is made by the request:
+
+```ts
+if (Array.isArray(body.entries) && body.entries.length > 0) {
+  return { site: body.site || {}, period, entries: filterEntriesByPeriod(body.entries, period) };
+}
+// … otherwise: listSites(actor) + listEntries(actor, siteId), mapped with
+//    storageKey carried through, and no 50-entry cap.
+```
+
+So the hand-built `entries` array was not merely incomplete — **it was displacing the server's own load**, which is the branch that supplies the photographs. The server reads each image out of its own media store via `normalizeBase64Image` → `extractUploadId` → `uploadBelongsToActorCompany` → `mediaStorage.readFile`, and the H7 comment there records that a client-supplied `storagePath` is deliberately **not** trusted for this. Signed URLs are a browser-display mechanism and have no part in it, so this is **not** coupled to L42's batching. The fortnight/50-path concern was unfounded.
+
+The mobile client's primary call sends `{ siteId, period }` and nothing else, and takes the second branch. The portal now does the same.
+
+**Two further defects fall out of the same line, both unlooked-for**
+
+1. **The generated reports were unidentified.** On the client-entries branch the site is `body.site || {}`, and this portal never sent a `site` object. `tryGenerateWithOpenAI` puts it in the prompt's `reportContext` and `buildFullReport` puts it in the report header — so every diary generated from the office had no site name, client or address, in the document *and* in what the model was told it was describing.
+2. **A silent fifty-entry truncation.** `entries` on the request schema is `z.array(DiaryEntrySchema).max(50)`. The server's own load has no cap — `filterEntriesByPeriod` does not impose one. A monthly report on a site logging daily was therefore cut off by a limit the portal never knew about. (The cap still applies to mobile's *fallback* call, which does send entries. That is a mobile-side limit and is left where it is.)
+
+**Fix:** the portal sends `{ siteId, period }`. The entry list stays in `reports/page.tsx` only as a local "this site has nothing to report on" pre-check, so an obviously empty site does not cost a round trip — a guard, not a payload. Three defects closed by deleting code.
+
+**Still open, and this makes it sharper:** C1's provenance half. A saved diary records no generator, model or prompt version, and now that the photographs genuinely do reach the generator, the record still cannot say whether a given diary was written with them — only that it could have been.
+
+**Disposition:** Fixed, 4 October 2026. What cannot be checked from here: that the model's output is visibly better. That needs a live generation against a site with photographs, compared with a diary generated before this commit.
 
 ### L46 — Invite emails are stored **as typed** while registration lowercases, so a mixed-case invitation can never be accepted — MEDIUM (feature failure; permanent for the affected invite, and the error message names the wrong cause)
 
