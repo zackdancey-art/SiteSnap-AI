@@ -27,6 +27,39 @@ const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: "reports",     label: "Reports",     icon: "📋" },
 ];
 
+/**
+ * How many paths go in one `/api/uploads/sign` request.
+ *
+ * The server refuses more than 50 per request and returns 400 for the WHOLE
+ * request — so a site with 51 photographs displayed none of them, and a site
+ * with 49 displayed all of them. The photograph count decided whether the
+ * feature existed (AUDIT L42).
+ *
+ * BATCHED, NOT VIEWPORT-DRIVEN, AND WHY
+ *
+ * Signing only what is on screen would save requests for photographs the
+ * manager never scrolls to, but it does not make any individual photograph
+ * cheaper: the cost is one indexed ownership lookup plus an HMAC per path
+ * either way. What it does cost is an IntersectionObserver per tile, a request
+ * queue fed from render, and the same machinery again for the Entries tab —
+ * real complexity in an effect that has just been repaired for re-entrancy,
+ * and the part most likely to reintroduce it.
+ *
+ * Batching is a slice on top of the structure already here. The first batch
+ * displays immediately and the rest fill in behind it, so the count no longer
+ * decides whether any photograph appears, which is what was asked for.
+ *
+ * The expense worth managing is not the signatures — a few hundred bytes of
+ * JSON each — but the photographs, which are megabytes each. That is handled
+ * where it belongs, with `loading="lazy"` on the images, so the bytes are not
+ * fetched until a tile is near the viewport however many have been signed.
+ *
+ * 25 rather than 50: half the server's ceiling, so a batch cannot be pushed
+ * over it by an off-by-one, and small enough that the first row of tiles
+ * appears quickly on a site with hundreds.
+ */
+const SIGN_BATCH_SIZE = 25;
+
 const SEVERITY_CFG: Record<string, { label: string; color: string; bg: string }> = {
   "near-miss": { label: "Near Miss", color: "#F59E0B", bg: "#FFFBEB" },
   minor:       { label: "Minor",     color: "#E8731A", bg: "#FFF7ED" },
@@ -60,7 +93,13 @@ function PhotosTab({
           <span>📷</span>
           <span className="card-title">Site Photos</span>
           <span className="card-count">{photos.length}</span>
-          {signing && <span style={{ marginLeft: 8, fontSize: 12, color: "var(--text-secondary)" }}>Loading…</span>}
+          {signing && (
+            <span style={{ marginLeft: 8, fontSize: 12, color: "var(--text-secondary)" }}>
+              {photos.length > SIGN_BATCH_SIZE
+                ? `Loading ${signedUrls.size} of ${photos.length}…`
+                : "Loading…"}
+            </span>
+          )}
         </div>
 
         {/* A manager looking at grey squares is told what went wrong and can ask
@@ -114,6 +153,8 @@ function PhotosTab({
                     <img
                       src={signedUrl}
                       alt={p.caption ?? `Photo ${i + 1}`}
+                      loading="lazy"
+                      decoding="async"
                       style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
                     />
                   ) : (
@@ -282,7 +323,7 @@ export default function SiteDetailPage() {
     if (tab !== "photos" || pendingPhotoPaths.length === 0) return;
     if (signInFlight.current) return;
 
-    const batch = pendingPhotoPaths;
+    const batch = pendingPhotoPaths.slice(0, SIGN_BATCH_SIZE);
     signInFlight.current = true;
     let cancelled = false;
     setSigningPhotos(true);
