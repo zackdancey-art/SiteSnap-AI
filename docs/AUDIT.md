@@ -1249,6 +1249,49 @@ locale/timezone (server and browser differ), anything reading `localStorage`, `d
 portal authenticates by httpOnly cookie, so a component that renders one way before the session is
 known and another way after is also a candidate.
 
-**Disposition:** Open, recorded 4 October 2026, for the web-dashboard branch. Secondary to L42–L48:
-it degrades the page rather than breaking it. First step is `pnpm -C Projects --filter
-sitesnap-supervisor-web run dev` and reading the full message, not a code change.
+**Located by reading, 4 October 2026 — both suspects were present, and the first two on the list.**
+The development build was not needed in the end: the site detail page contained two independent
+mismatches, each of a kind the list above predicted, and each provable from the source.
+
+1. **`getSavedUser()` called during render.** `lib/api.ts:34` returns `null` when `typeof window
+   === "undefined"` and the real user otherwise. `app/sites/[id]/page.tsx` called it in the
+   component body and passed the result to `<Sidebar userName={user?.name ?? user?.email ??
+   "Manager"} />`. The server therefore rendered the literal text "Manager" and the browser
+   rendered the account's name from the same component — a rendered **text** disagreement, which is
+   `#425` precisely, and `#418`'s report of it.
+
+2. **`toLocaleDateString` on a server that is not in the viewer's time zone.** Three call sites on
+   the same page, one of them (`diary.generatedAt`) formatting an hour and minute. The portal's
+   server runs in UTC; a manager's browser does not. That one does not disagree occasionally — it
+   disagrees on every load, by the offset.
+
+Either is sufficient to explain the trio, and `#423` — React discarding the server HTML and
+re-rendering the whole root — is the expected consequence of a mismatch React cannot patch locally.
+
+**Fixed on the site detail page** (the commit this paragraph lands in): both values are resolved
+after mount, so the server render and the first client render agree and the browser-only facts
+arrive in an effect. The pattern was not invented for this — `components/ProfileDropdown.tsx:19-23`
+already did it correctly, which is why the profile dropdown was not among the symptoms. The dates
+deliberately wait for the browser rather than being pinned to a fixed zone: the viewer's local time
+is the right thing to show on a compliance record and is genuinely unknowable on the server.
+
+**The cause is portal-wide, and the rest is NOT fixed.** Measured on the same day:
+
+| Where | What | Count |
+|---|---|---|
+| `app/{settings,activity,dashboard,sites,team,locations,reports}/page.tsx` | `getSavedUser()` in the component body | 7 pages |
+| `lib/useRole.ts:8` | `getSavedUser()` in the component body, inside a hook | 1 hook, imported by `settings` and `team` |
+| `app/{activity,dashboard,sites,locations,reports}/page.tsx` | `toLocale*` formatting during render | 8 call sites |
+| `app/dashboard/page.tsx:20` | `new Date()` during render — the current time, formatted | 1, and certain to differ |
+
+Deliberately left for its own change rather than swept in behind a photograph fix. `useRole` is the
+reason: it decides which controls a company role may see, so making it resolve after mount means
+role-gated UI renders as "viewer" for one frame and then changes. That is a visible behaviour change
+across two pages, it wants someone to look at it, and it is not what a reviewer reading a CSP and
+photograph-display branch is reviewing for. `app/dashboard/page.tsx:20` is the cheapest of the
+remainder and the most certainly broken.
+
+**Disposition:** Half closed. The site detail page is fixed and the mechanism is no longer a
+hypothesis. The remaining 16 call sites in the table above are open, as one follow-up change to the
+portal's handling of browser-only values — a `useSavedUser()` hook or a session provider, applied
+across the pages at once, with the `useRole` behaviour change called out for review.

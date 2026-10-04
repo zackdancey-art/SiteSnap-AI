@@ -11,7 +11,7 @@ import {
   approveDiary, signUploadPaths,
 } from "@/lib/api";
 import type {
-  BootstrapData, Diary,
+  BootstrapData, Diary, User,
   Timecard, Incident, Inspection, Delivery,
 } from "@/lib/api";
 
@@ -228,7 +228,6 @@ function PhotosTab({
 export default function SiteDetailPage() {
   const router = useRouter();
   const { id: siteId } = useParams<{ id: string }>();
-  const user = getSavedUser();
 
   const [bootstrap, setBootstrap]     = useState<BootstrapData | null>(null);
   const [timecards, setTimecards]     = useState<Timecard[]>([]);
@@ -238,6 +237,34 @@ export default function SiteDetailPage() {
   const [loadingMain, setLoadingMain]   = useState(true);
   const [tab, setTab]                   = useState<Tab>("overview");
   const [approving, setApproving]       = useState<string | null>(null);
+  /**
+   * Two things that exist only in the browser, and the React hydration errors
+   * they were causing (AUDIT L49: #418, #423, #425 in the production console).
+   *
+   * `getSavedUser()` reads `localStorage`, and returns `null` when there is no
+   * `window`. It was being called DURING render, so the server rendered the
+   * sidebar as "Manager" and the browser rendered the real name from the same
+   * component on the same markup — a text mismatch, which is exactly what #418
+   * and #425 report. Resolved after mount instead, matching the pattern already
+   * in `components/ProfileDropdown.tsx`: server and first client render agree,
+   * then the effect fills in what only the browser can know.
+   *
+   * `mounted` gates the dates for the same reason and is not the same fact. A
+   * timestamp formatted with `toLocaleDateString` uses the formatting
+   * environment's time zone: the server runs in UTC and a manager's browser
+   * does not, so `generatedAt` rendered an hour and minute that differed
+   * between the two renders every single time. The viewer's local time is the
+   * right thing to show and is unknowable on the server, so the dates wait for
+   * the browser rather than being forced to a fixed zone that would be wrong
+   * for somebody.
+   */
+  const [user, setUser] = useState<User | null>(null);
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setUser(getSavedUser());
+    setMounted(true);
+  }, []);
+
   const [signedPhotoUrls, setSignedPhotoUrls] = useState<Map<string, string>>(new Map());
   const [signingPhotos, setSigningPhotos]     = useState(false);
   // Per-path refusals, and the whole-request failure, kept separately: one grey
@@ -367,6 +394,17 @@ export default function SiteDetailPage() {
     return () => { cancelled = true; };
   }, [tab, pendingKey, signRound]);
 
+  /**
+   * A date as the viewer's browser would write it, or an em dash until the
+   * browser is the one doing the writing. One helper for all three call sites
+   * so a fourth cannot reintroduce the mismatch by formatting inline.
+   */
+  const localDate = (value?: string | null, options?: Intl.DateTimeFormatOptions) => {
+    if (!value || !mounted) return "—";
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? "—" : parsed.toLocaleDateString("en-AU", options);
+  };
+
   // Retry clears the record of what was attempted, which is what lets the effect
   // above ask again.
   const retryPhotos = () => {
@@ -489,7 +527,7 @@ export default function SiteDetailPage() {
                         ["Site Name", site.name],
                         ["Client", site.client || "—"],
                         ["Address", site.address || "—"],
-                        ["Start Date", site.startDate ? new Date(site.startDate).toLocaleDateString("en-AU") : "—"],
+                        ["Start Date", localDate(site.startDate)],
                         ["Status", site.status],
                         ["Total Hours Logged", `${(totalHours.regular + totalHours.overtime).toFixed(1)}h (${totalHours.regular.toFixed(1)}h reg + ${totalHours.overtime.toFixed(1)}h OT)`],
                       ].map(([label, value]) => (
@@ -696,13 +734,13 @@ export default function SiteDetailPage() {
                             {diary.reportPeriod ?? "daily"}
                           </span>
                           <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
-                            {new Date(diary.generatedAt).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+                            {localDate(diary.generatedAt, { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}
                           </span>
                         </div>
                         {diary.summary && <p style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.6, margin: 0, maxWidth: 600 }}>{diary.summary}</p>}
                         {diary.signedBy && (
                           <div style={{ marginTop: 8, fontSize: 12, color: "var(--success)", fontWeight: 600 }}>
-                            ✅ Approved by {diary.signedBy} · {diary.signedAt ? new Date(diary.signedAt).toLocaleDateString("en-AU") : ""}
+                            ✅ Approved by {diary.signedBy} · {localDate(diary.signedAt)}
                           </div>
                         )}
                       </div>
