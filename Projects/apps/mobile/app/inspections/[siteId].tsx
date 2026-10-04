@@ -11,7 +11,6 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import Svg, { Path } from "react-native-svg";
 import * as ImagePicker from "expo-image-picker";
 import * as Crypto from "expo-crypto";
-import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
 import Colors from "@/constants/colors";
 import { formatDate } from "@/lib/format";
 import { buildHtmlDocument, runReportExport, escapeHtml, buildAnnotationOverlayHtml } from "@/lib/export-utils";
@@ -21,6 +20,7 @@ import { AnnotatedImage } from "@/components/AnnotatedImage";
 import { PhotoAnnotator } from "@/components/PhotoAnnotator";
 import { getApiBaseUrl } from "@/lib/api-base-url";
 import { useData, uploadPhotos } from "@/lib/data-context";
+import { createStoredPhoto } from "@/lib/photo-capture";
 import { hydratePhotos, savePhotoPayloads, stripPhotoArray } from "@/lib/photo-payload-store";
 import { ScreenHeader } from "@/components/ScreenHeader";
 import { AnnotationVector, Photo } from "@/lib/types";
@@ -213,48 +213,6 @@ async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) throw new Error(`API ${res.status}`);
   return res.json() as Promise<T>;
-}
-
-function normalizeImageMimeType(_mimeType?: string | null) {
-  return "image/jpeg";
-}
-
-function extractGpsFromExif(exif: Record<string, unknown> | undefined | null): { latitude?: number; longitude?: number } {
-  if (!exif) return {};
-  const lat = exif["GPSLatitude"] ?? exif["GPS Latitude"];
-  const lon = exif["GPSLongitude"] ?? exif["GPS Longitude"];
-  const latRef = String(exif["GPSLatitudeRef"] ?? "N");
-  const lonRef = String(exif["GPSLongitudeRef"] ?? "E");
-  if (typeof lat !== "number" || typeof lon !== "number") return {};
-  return {
-    latitude: latRef === "S" ? -lat : lat,
-    longitude: lonRef === "W" ? -lon : lon,
-  };
-}
-
-/** Mirrors new-entry.tsx's createStoredPhoto: camera/library asset → compressed, base64-carrying Photo. */
-async function createStoredPhoto(asset: ImagePicker.ImagePickerAsset): Promise<Photo> {
-  const manipulated = await manipulateAsync(
-    asset.uri,
-    [],
-    {
-      compress: 0.55,
-      format: SaveFormat.JPEG,
-      base64: true,
-    }
-  );
-
-  const gps = extractGpsFromExif(asset.exif as Record<string, unknown> | undefined | null);
-
-  return {
-    id: Crypto.randomUUID(),
-    uri: manipulated.uri,
-    caption: "",
-    timestamp: new Date().toISOString(),
-    base64: manipulated.base64 || asset.base64 || "",
-    mimeType: normalizeImageMimeType(asset.mimeType),
-    ...gps,
-  };
 }
 
 const DEFAULT_ITEMS = [
@@ -655,12 +613,16 @@ export default function InspectionsScreen() {
           mediaTypes: ["images"],
           quality: 0.35,
           base64: true,
+          // Set on the camera branch above and missing here, exactly as in
+          // new-entry.tsx — so a picked photograph carried no EXIF and could
+          // not be dated from its own metadata.
+          exif: true,
         });
         if (!result.canceled) asset = result.assets[0];
       }
       if (!asset) return;
 
-      const photo = await createStoredPhoto(asset);
+      const photo = await createStoredPhoto(asset, source);
       const [uploaded] = await uploadPhotos([photo]);
       await savePhotoPayloads([uploaded]);
 
@@ -704,7 +666,12 @@ export default function InspectionsScreen() {
       base64: source.base64,
       mimeType: source.mimeType,
       caption: source.caption,
+      // Record-created time, which is now. The capture metadata is the
+      // original's — same moment, same place, same bytes — so an annotation
+      // does not report the time it was drawn as the time of the photograph.
       timestamp: new Date().toISOString(),
+      ...(source.capturedAt ? { capturedAt: source.capturedAt } : {}),
+      captureTimeSource: source.captureTimeSource,
       latitude: source.latitude,
       longitude: source.longitude,
       storagePath: source.storagePath,

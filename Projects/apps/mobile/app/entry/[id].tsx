@@ -17,6 +17,7 @@ import { router, useLocalSearchParams } from "expo-router";
 import { useData } from "@/lib/data-context";
 import Colors from "@/constants/colors";
 import { Photo } from "@/lib/types";
+import { describeCaptureTime } from "@/lib/photo-capture-time";
 import {
   buildEntryPhotosReportHtml,
   runReportExport,
@@ -37,6 +38,7 @@ export default function EntryDetailScreen() {
   const webTopInset = Platform.OS === "web" ? 67 : 0;
   const webBottomInset = Platform.OS === "web" ? 34 : 0;
   const [previewPhoto, setPreviewPhoto] = React.useState<Photo | null>(null);
+  const captureTime = previewPhoto ? describeCaptureTime(previewPhoto) : null;
 
   /**
    * What each tile actually managed to render. Reported by EvidenceImage rather
@@ -302,7 +304,7 @@ export default function EntryDetailScreen() {
           <Pressable style={styles.previewClose} onPress={() => setPreviewPhoto(null)}>
             <Ionicons name="close" size={26} color={Colors.white} />
           </Pressable>
-          {!!previewPhoto && (
+          {!!previewPhoto && captureTime && (
             <>
               <ScrollView
                 style={styles.previewScroll}
@@ -323,8 +325,22 @@ export default function EntryDetailScreen() {
                 />
               </ScrollView>
               <View style={styles.previewMeta}>
-                <Text style={styles.previewMetaText}>
-                  Captured {new Date(previewPhoto.timestamp || entry.timestamp).toLocaleString("en-AU")}
+                {/*
+                  This said "Captured <timestamp>" — and `timestamp` is when the
+                  record was created, not when the photograph was taken. For a
+                  photograph chosen from the gallery those are different dates,
+                  so the app was stating a capture time it had never read, with
+                  a fallback to the ENTRY's timestamp that was further out
+                  still. `describeCaptureTime` says which of the four states
+                  this photograph is actually in.
+                */}
+                <Text
+                  style={[
+                    styles.previewMetaText,
+                    captureTime.state !== "known" && styles.previewMetaUnknown,
+                  ]}
+                >
+                  {captureTime.label}
                 </Text>
                 {!!previewPhoto.caption && (
                   <Text style={styles.previewCaption}>{previewPhoto.caption}</Text>
@@ -586,6 +602,11 @@ const styles = StyleSheet.create({
     color: Colors.white,
     fontSize: 13,
     fontFamily: "Inter_600SemiBold",
+  },
+  // Anything other than a real capture time is amber rather than white, so
+  // "Date taken unknown" and "Added <date>" cannot be skim-read as "Taken".
+  previewMetaUnknown: {
+    color: Colors.warning,
   },
   previewCaption: {
     color: "rgba(255,255,255,0.78)",

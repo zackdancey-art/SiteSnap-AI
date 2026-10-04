@@ -23,7 +23,38 @@ export interface Photo {
   id: string;
   uri: string;
   caption: string;
+  /**
+   * When this RECORD was created — not when the photograph was taken.
+   *
+   * It has always meant this, and every photograph already stored means this by
+   * it, so the meaning is left alone. `capturedAt` below is the separate field
+   * that answers "when was this taken", because conflating the two is how a
+   * record ends up asserting a capture time it never had.
+   */
   timestamp: string;
+  /**
+   * When the photograph was actually taken, ISO-8601, or ABSENT when that is
+   * not known.
+   *
+   * Absent is a real and expected state — a screenshot, a download, an image
+   * that has been through a messaging app. It must never be filled in with the
+   * time of selection: a photograph in an evidence record dated today that was
+   * taken last week is a false record. Read `captureTimeSource` alongside it.
+   */
+  capturedAt?: string;
+  /**
+   * How `capturedAt` was established, so a reader can tell a known capture time
+   * from an unknown one without inferring it from a missing field.
+   *
+   * - `camera`  — photographed in the app; the shutter time is the capture time.
+   * - `exif`    — read from the file's own `DateTimeOriginal`.
+   * - `unknown` — chosen from the gallery and carrying no readable date.
+   *
+   * Absent on records created before this field existed, which is a fourth
+   * state and not the same as `unknown`: those photographs may or may not have
+   * a recoverable capture time, and nothing has established which.
+   */
+  captureTimeSource?: "camera" | "exif" | "unknown";
   base64?: string;
   mimeType?: string;
   storagePath?: string;

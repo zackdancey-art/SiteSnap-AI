@@ -16,9 +16,9 @@ import { Ionicons } from "@expo/vector-icons";
 import { router, useLocalSearchParams } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
 import * as Crypto from "expo-crypto";
-import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
 import DateTimePicker, { DateTimePickerEvent } from "@react-native-community/datetimepicker";
 import { useData, type SaveProgress } from "@/lib/data-context";
+import { createStoredPhoto } from "@/lib/photo-capture";
 import Colors from "@/constants/colors";
 import { AnnotationVector, HourlyNote, Photo } from "@/lib/types";
 import { AddressSuggestion, fetchAddressSuggestions } from "@/lib/geo";
@@ -62,47 +62,6 @@ function snapshotPhotos(photos: PhotoWithBase64[]): string {
 
 function snapshotHourlyNotes(hourlyNotes: HourlyNote[]): string {
   return JSON.stringify(hourlyNotes.map((h) => ({ hour: h.hour, note: h.note })));
-}
-
-function normalizeImageMimeType(_mimeType?: string | null) {
-  return "image/jpeg";
-}
-
-function extractGpsFromExif(exif: Record<string, unknown> | undefined | null): { latitude?: number; longitude?: number } {
-  if (!exif) return {};
-  const lat = exif["GPSLatitude"] ?? exif["GPS Latitude"];
-  const lon = exif["GPSLongitude"] ?? exif["GPS Longitude"];
-  const latRef = String(exif["GPSLatitudeRef"] ?? "N");
-  const lonRef = String(exif["GPSLongitudeRef"] ?? "E");
-  if (typeof lat !== "number" || typeof lon !== "number") return {};
-  return {
-    latitude: latRef === "S" ? -lat : lat,
-    longitude: lonRef === "W" ? -lon : lon,
-  };
-}
-
-async function createStoredPhoto(asset: ImagePicker.ImagePickerAsset): Promise<PhotoWithBase64> {
-  const manipulated = await manipulateAsync(
-    asset.uri,
-    [],
-    {
-      compress: 0.55,
-      format: SaveFormat.JPEG,
-      base64: true,
-    }
-  );
-
-  const gps = extractGpsFromExif(asset.exif as Record<string, unknown> | undefined | null);
-
-  return {
-    id: Crypto.randomUUID(),
-    uri: manipulated.uri,
-    caption: "",
-    timestamp: new Date().toISOString(),
-    base64: manipulated.base64 || asset.base64 || "",
-    mimeType: normalizeImageMimeType(asset.mimeType),
-    ...gps,
-  };
 }
 
 export default function NewEntryScreen() {
@@ -383,7 +342,7 @@ export default function NewEntryScreen() {
       });
 
       if (!result.canceled && result.assets[0]) {
-        const newPhoto = await createStoredPhoto(result.assets[0]);
+        const newPhoto = await createStoredPhoto(result.assets[0], "camera");
         setPhotos((prev) => [...prev, newPhoto]);
       }
     } catch (err) {
@@ -400,12 +359,20 @@ export default function NewEntryScreen() {
         mediaTypes: ["images"],
         quality: 0.35,
         base64: true,
+        // `exif: true` was set on the camera call and NOT on this one, so a
+        // gallery photograph arrived with no EXIF block at all — no
+        // coordinates, and no `DateTimeOriginal` to read a capture time from.
+        // That asymmetry is why a picked photograph could only ever be dated at
+        // the moment it was selected.
+        exif: true,
         allowsMultipleSelection: true,
         selectionLimit: 0,
       });
 
       if (!result.canceled && result.assets.length > 0) {
-        const newPhotos: Photo[] = await Promise.all(result.assets.map((asset) => createStoredPhoto(asset)));
+        const newPhotos: Photo[] = await Promise.all(
+          result.assets.map((asset) => createStoredPhoto(asset, "gallery"))
+        );
         setPhotos((prev) => [...prev, ...newPhotos]);
       }
     } catch (err) {
@@ -432,7 +399,16 @@ export default function NewEntryScreen() {
         base64: source.base64,
         mimeType: source.mimeType,
         caption: source.caption,
+        // `timestamp` is when this derivative was created, which is now.
+        // Everything describing the PHOTOGRAPH comes from the original: an
+        // annotation is a derived document about the same moment, so it depicts
+        // the same capture time, the same place, and the same bytes (it reuses
+        // the original's uri/base64 and adds a stroke vector — no new raster).
+        // Without this the derivative silently reported the annotation time as
+        // its capture time.
         timestamp: new Date().toISOString(),
+        ...(source.capturedAt ? { capturedAt: source.capturedAt } : {}),
+        captureTimeSource: source.captureTimeSource,
         latitude: source.latitude,
         longitude: source.longitude,
         kind: "annotated",
@@ -785,6 +761,18 @@ export default function NewEntryScreen() {
               {photos.map((photo) => (
                 <View key={photo.id} style={styles.photoThumb}>
                   <AnnotatedImage photo={photo} />
+                  {/*
+                    Shown at the moment of attaching, because this is the only
+                    point at which the person can still do something about it:
+                    retake the photograph, or accept that this one has no date.
+                    A gallery image with no readable `DateTimeOriginal` is NOT
+                    dated "now" — it is recorded as unknown and labelled here.
+                  */}
+                  {photo.captureTimeSource === "unknown" && (
+                    <View style={styles.photoNoDate}>
+                      <Text style={styles.photoNoDateText}>No date</Text>
+                    </View>
+                  )}
                   {photo.kind === "annotated" ? (
                     <View style={styles.photoBadge}>
                       <Text style={styles.photoBadgeText}>Annotated</Text>
@@ -1142,6 +1130,22 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(0,0,0,0.6)",
     alignItems: "center",
     justifyContent: "center",
+  },
+  // Top-left, so it cannot collide with the remove control (top-right) or the
+  // annotate control / annotated badge (bottom).
+  photoNoDate: {
+    position: "absolute",
+    top: 4,
+    left: 4,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    borderRadius: 6,
+    backgroundColor: Colors.warning,
+  },
+  photoNoDateText: {
+    fontSize: 9,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.white,
   },
   photoBadge: {
     position: "absolute",
