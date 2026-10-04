@@ -1,4 +1,5 @@
 import * as Crypto from "expo-crypto";
+import { File } from "expo-file-system";
 import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
 import type * as ImagePicker from "expo-image-picker";
 
@@ -55,6 +56,35 @@ function normalizeImageMimeType(_mimeType?: string | null) {
   return "image/jpeg";
 }
 
+/**
+ * SHA-256 over the bytes that are uploaded — not the bytes that were picked.
+ *
+ * This matters more than it reads. `manipulateAsync` re-encodes the image, so a
+ * hash taken from the asset the picker handed over would describe a file that
+ * never reaches the server, and every later verification against the stored
+ * object would fail. So this runs on `manipulateAsync`'s OUTPUT file, which is
+ * the exact path `uploadPhotoOnce` hands to FormData.
+ *
+ * The queued/offline path reconstructs that same file from the base64 in
+ * AsyncStorage (`lib/photo-bytes.ts`), and base64 is a lossless encoding of the
+ * same bytes, so the hash holds across a capture that syncs days later.
+ *
+ * Returns undefined rather than throwing: a photograph that cannot be hashed is
+ * still evidence worth keeping, and failing the capture over a missing checksum
+ * would trade a real photograph for a metadata field.
+ */
+export async function hashUploadedBytes(uri: string): Promise<string | undefined> {
+  try {
+    const bytes = await new File(uri).bytes();
+    const digest = await Crypto.digest(Crypto.CryptoDigestAlgorithm.SHA256, bytes);
+    return Array.from(new Uint8Array(digest))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+  } catch {
+    return undefined;
+  }
+}
+
 /** Where a photograph came from. Decides how its capture time is established. */
 export type CaptureSource = "camera" | "gallery";
 
@@ -100,6 +130,8 @@ export async function createStoredPhoto(
   const captureTimeSource: Photo["captureTimeSource"] =
     source === "camera" ? "camera" : exifCaptureTime ? "exif" : "unknown";
 
+  const contentSha256 = await hashUploadedBytes(manipulated.uri);
+
   return {
     id: Crypto.randomUUID(),
     uri: manipulated.uri,
@@ -107,6 +139,7 @@ export async function createStoredPhoto(
     timestamp: now,
     ...(capturedAt ? { capturedAt } : {}),
     captureTimeSource,
+    ...(contentSha256 ? { contentSha256 } : {}),
     base64: manipulated.base64 || asset.base64 || "",
     mimeType: normalizeImageMimeType(asset.mimeType),
     ...gps,

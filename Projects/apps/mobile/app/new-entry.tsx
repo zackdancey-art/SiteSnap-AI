@@ -409,6 +409,7 @@ export default function NewEntryScreen() {
         timestamp: new Date().toISOString(),
         ...(source.capturedAt ? { capturedAt: source.capturedAt } : {}),
         captureTimeSource: source.captureTimeSource,
+        ...(source.contentSha256 ? { contentSha256: source.contentSha256 } : {}),
         latitude: source.latitude,
         longitude: source.longitude,
         kind: "annotated",

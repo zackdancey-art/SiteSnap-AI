@@ -55,6 +55,14 @@ export interface Photo {
    * a recoverable capture time, and nothing has established which.
    */
   captureTimeSource?: "camera" | "exif" | "unknown";
+  /**
+   * Lowercase hex SHA-256 of the bytes that were uploaded.
+   *
+   * Computed over `manipulateAsync`'s OUTPUT — the file that is actually sent —
+   * so it can be verified against the stored object. A hash of the picked
+   * asset would describe a file that never reaches the server.
+   */
+  contentSha256?: string;
   base64?: string;
   mimeType?: string;
   storagePath?: string;
