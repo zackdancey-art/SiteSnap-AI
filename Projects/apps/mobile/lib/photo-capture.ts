@@ -17,6 +17,7 @@ export {
   extractGpsFromExif,
   readCaptureTimeFromExif,
   describeCaptureTime,
+  CAPTION_MAX_LENGTH,
   type CaptureTimeState,
 } from "@/lib/photo-capture-time";
 

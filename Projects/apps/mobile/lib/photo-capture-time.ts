@@ -18,6 +18,22 @@ import type { Photo } from "./types";
  * file explicitly and the compile fails loudly if that changes.
  */
 
+/**
+ * The cap on a per-photo caption.
+ *
+ * One number, in the pure module, because the field appears on three screens
+ * and a cap that disagrees between them would let a caption be typed on one
+ * and silently truncated on another.
+ *
+ * 280 characters is a deliberate choice rather than a round number: a caption
+ * is a sentence or two saying what a photograph shows, it is stored inline in
+ * `photos_json` and mirrored into AsyncStorage with the queued payload (AUDIT
+ * L6 -- that store already grows without limit), and it is fed to the AI
+ * report, where a long free-text field invites a builder to write the note
+ * that belongs in Notes & Observations.
+ */
+export const CAPTION_MAX_LENGTH = 280;
+
 export type ExifBag = Record<string, unknown> | undefined | null;
 
 /**

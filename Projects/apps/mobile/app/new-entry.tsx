@@ -18,7 +18,7 @@ import * as ImagePicker from "expo-image-picker";
 import * as Crypto from "expo-crypto";
 import DateTimePicker, { DateTimePickerEvent } from "@react-native-community/datetimepicker";
 import { useData, type SaveProgress } from "@/lib/data-context";
-import { createStoredPhoto } from "@/lib/photo-capture";
+import { CAPTION_MAX_LENGTH, createStoredPhoto } from "@/lib/photo-capture";
 import Colors from "@/constants/colors";
 import { AnnotationVector, HourlyNote, Photo } from "@/lib/types";
 import { AddressSuggestion, fetchAddressSuggestions } from "@/lib/geo";
@@ -56,8 +56,20 @@ type EntryDirtySnapshot = {
   photosJson: string;
 };
 
+/**
+ * The fingerprint `isDirty` compares, and therefore what the unsaved-changes
+ * guard can see.
+ *
+ * `caption` is in here deliberately. This used to be the id list alone, which
+ * was complete when a photograph's only mutable property was whether it was in
+ * the list at all. Now that a caption can be typed, an id-only fingerprint
+ * means editing ONLY captions leaves `isDirty` false -- so the guard stays
+ * disarmed, the swipe-back gesture is live, and the captions are gone with no
+ * warning. Adding a field to `Photo` that a person can edit means adding it
+ * here.
+ */
 function snapshotPhotos(photos: PhotoWithBase64[]): string {
-  return JSON.stringify(photos.map((p) => p.id));
+  return JSON.stringify(photos.map((p) => [p.id, p.caption ?? ""]));
 }
 
 function snapshotHourlyNotes(hourlyNotes: HourlyNote[]): string {
@@ -383,6 +395,25 @@ export default function NewEntryScreen() {
 
   const removePhoto = (id: string) => {
     setPhotos((prev) => prev.filter((p) => p.id !== id));
+  };
+
+  /**
+   * Captions are typed straight into the photograph's own record. They are
+   * already carried everywhere a `Photo` goes -- the preview modal, the export,
+   * and the AI report's input -- so nothing downstream needed changing; the
+   * only thing that never existed was a field to type one into.
+   *
+   * Held in the `photos` state only -- the draft autosave carries the text
+   * fields and NOT the photographs (see the `saveDraft` effect, which passes
+   * date/weather/location/crew/notes and nothing else), so a caption is no
+   * more and no less durable than the photograph it describes. Making either
+   * survive a killed app means putting image bytes in the draft store, which
+   * is AUDIT L6's problem and not this commit's. What this commit does ensure
+   * is that leaving the screen with unsaved captions now warns, via
+   * `snapshotPhotos`.
+   */
+  const updateCaption = (id: string, caption: string) => {
+    setPhotos((prev) => prev.map((p) => (p.id === id ? { ...p, caption } : p)));
   };
 
   const handleSaveAnnotation = (vector: AnnotationVector) => {
@@ -752,15 +783,18 @@ export default function NewEntryScreen() {
         <View style={styles.formGroup}>
           <Text style={styles.label}>Photos ({photos.length})</Text>
 
+          {/*
+            A vertical list, not the horizontal strip this used to be.
+            88x88 thumbnails side by side had nowhere to put a caption, which
+            is the whole reason per-photo captions did not exist: the field had
+            no room to go. One row per photograph gives each one its own
+            caption without shrinking the thumbnail.
+          */}
           {photos.length > 0 && (
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              style={styles.photoScroll}
-              contentContainerStyle={styles.photoScrollContent}
-            >
+            <View style={styles.photoList}>
               {photos.map((photo) => (
-                <View key={photo.id} style={styles.photoThumb}>
+                <View key={photo.id} style={styles.photoRow}>
+                <View style={styles.photoThumb}>
                   <AnnotatedImage photo={photo} />
                   {/*
                     Shown at the moment of attaching, because this is the only
@@ -793,8 +827,24 @@ export default function NewEntryScreen() {
                     <Ionicons name="close" size={14} color={Colors.white} />
                   </Pressable>
                 </View>
+
+                  {/*
+                    Plain text, deliberately. These feed the AI narrative
+                    report, so what matters is that a builder will actually
+                    type in one -- not that it can be formatted.
+                  */}
+                  <TextInput
+                    style={styles.captionInput}
+                    placeholder="Caption — what this shows"
+                    placeholderTextColor={Colors.textTertiary}
+                    value={photo.caption}
+                    onChangeText={(text) => updateCaption(photo.id, text)}
+                    multiline
+                    maxLength={CAPTION_MAX_LENGTH}
+                  />
+                </View>
               ))}
-            </ScrollView>
+            </View>
           )}
 
           <View style={styles.photoActions}>
@@ -1096,12 +1146,30 @@ const styles = StyleSheet.create({
   chipTextActive: {
     color: Colors.white,
   },
-  photoScroll: {
+  photoList: {
     marginTop: 4,
-  },
-  photoScrollContent: {
     gap: 10,
-    paddingRight: 4,
+  },
+  photoRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 10,
+  },
+  // Matches the thumbnail's height so a row reads as one unit, and grows with
+  // the text rather than scrolling inside a 88pt box.
+  captionInput: {
+    flex: 1,
+    minHeight: 88,
+    backgroundColor: Colors.surface,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 14,
+    fontFamily: "Inter_400Regular",
+    color: Colors.text,
+    textAlignVertical: "top",
   },
   photoThumb: {
     width: 88,

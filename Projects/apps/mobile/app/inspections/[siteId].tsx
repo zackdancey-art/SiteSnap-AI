@@ -20,7 +20,7 @@ import { AnnotatedImage } from "@/components/AnnotatedImage";
 import { PhotoAnnotator } from "@/components/PhotoAnnotator";
 import { getApiBaseUrl } from "@/lib/api-base-url";
 import { useData, uploadPhotos } from "@/lib/data-context";
-import { createStoredPhoto } from "@/lib/photo-capture";
+import { CAPTION_MAX_LENGTH, createStoredPhoto } from "@/lib/photo-capture";
 import { hydratePhotos, savePhotoPayloads, stripPhotoArray } from "@/lib/photo-payload-store";
 import { ScreenHeader } from "@/components/ScreenHeader";
 import { AnnotationVector, Photo } from "@/lib/types";
@@ -584,6 +584,24 @@ export default function InspectionsScreen() {
     updateActiveLocal({ results: updated });
   };
 
+  /**
+   * Per-photo caption on a checklist item.
+   *
+   * Deliberately the same shape as `updateResultNotesLocal`: local on every
+   * keystroke, PATCHed on `onEndEditing`. A PATCH per character would be a
+   * request per keypress on a site with poor signal, and the notes field next
+   * to it already settled that trade-off.
+   */
+  const updateResultPhotoCaptionLocal = (idx: number, photoId: string, caption: string) => {
+    if (!showActive) return;
+    const updated = showActive.results.map((r, i) =>
+      i === idx
+        ? { ...r, photos: (r.photos ?? []).map((p) => (p.id === photoId ? { ...p, caption } : p)) }
+        : r
+    );
+    updateActiveLocal({ results: updated });
+  };
+
   /** Captures/picks a photo for a checklist item, uploads it via the shared company-bound
    *  upload flow (same path as new-entry), persists its base64 locally, then appends it
    *  (with base64, for on-screen display) to that item's photos and PATCHes. */
@@ -1000,15 +1018,13 @@ export default function InspectionsScreen() {
                     placeholderTextColor={Colors.textTertiary}
                     multiline
                   />
+                  {/* Rows rather than a horizontal strip, for the same reason as
+                      new-entry: a caption needs somewhere to go. */}
                   {!!(result.photos && result.photos.length > 0) && (
-                    <ScrollView
-                      horizontal
-                      showsHorizontalScrollIndicator={false}
-                      style={styles.resultPhotoScroll}
-                      contentContainerStyle={styles.resultPhotoScrollContent}
-                    >
+                    <View style={styles.resultPhotoList}>
                       {result.photos!.map((photo) => (
-                        <View key={photo.id} style={styles.resultPhotoThumb}>
+                        <View key={photo.id} style={styles.resultPhotoRow}>
+                        <View style={styles.resultPhotoThumb}>
                           <AnnotatedImage photo={photo} />
                           {photo.kind === "annotated" ? (
                             <View style={styles.photoBadge}>
@@ -1029,8 +1045,22 @@ export default function InspectionsScreen() {
                             <Ionicons name="close" size={12} color={Colors.white} />
                           </Pressable>
                         </View>
+
+                          <TextInput
+                            style={styles.resultPhotoCaption}
+                            value={photo.caption}
+                            onChangeText={(v) => updateResultPhotoCaptionLocal(idx, photo.id, v)}
+                            onEndEditing={() =>
+                              patchActive(showActive.id, { results: showActive.results })
+                            }
+                            placeholder="Caption — what this shows"
+                            placeholderTextColor={Colors.textTertiary}
+                            multiline
+                            maxLength={CAPTION_MAX_LENGTH}
+                          />
+                        </View>
                       ))}
-                    </ScrollView>
+                    </View>
                   )}
                   <View style={styles.resultPhotoActions}>
                     <Pressable
@@ -1381,8 +1411,9 @@ const styles = StyleSheet.create({
   resultBtnNa: { backgroundColor: Colors.textTertiary, borderColor: Colors.textTertiary },
   notesInput: { borderWidth: 1, borderColor: Colors.border, borderRadius: 10, padding: 10, fontSize: 13, color: Colors.text, backgroundColor: Colors.surface, minHeight: 40 },
 
-  resultPhotoScroll: { marginTop: 2 },
-  resultPhotoScrollContent: { gap: 8, paddingRight: 4 },
+  resultPhotoList: { marginTop: 2, gap: 8 },
+  resultPhotoRow: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
+  resultPhotoCaption: { flex: 1, minHeight: 72, backgroundColor: Colors.surface, borderRadius: 10, borderWidth: 1, borderColor: Colors.border, paddingHorizontal: 10, paddingVertical: 8, fontSize: 13, color: Colors.text, textAlignVertical: "top" },
   resultPhotoThumb: { width: 72, height: 72, borderRadius: 10, overflow: "hidden", position: "relative" },
   photoBadge: { position: "absolute", bottom: 4, left: 4, right: 4, paddingVertical: 2, borderRadius: 6, backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center" },
   photoBadgeText: { fontSize: 8, fontWeight: "700", color: Colors.white },
