@@ -178,6 +178,21 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   align-items: start;
 }
 
+/* The left nav sticks only while it IS a left nav.
+   It used to carry `position: sticky; top: 24` as an inline style on the
+   element, which no media query could reach — and sticky creates a stacking
+   context, which is what made the overlay above paint nav-over-panel instead
+   of merely overlapping. Above 900px the nav is a column beside the content
+   and sticking is the point; at or below 900px it is a strip above the
+   content, where sticking it would pin the whole switcher to the top of the
+   scroll area and leave the panel almost no room. */
+@media (min-width: 901px) {
+  .settings-nav {
+    position: sticky;
+    top: 24px;
+  }
+}
+
 /* ── Cards ── */
 .card {
   background: var(--surface);
@@ -445,8 +460,56 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   .metrics-grid { grid-template-columns: repeat(2, 1fr); }
 
   /* The settings left-nav stops being a column and becomes a strip above the
-     content it switches between. */
-  .settings-layout { grid-template-columns: 1fr; }
+     content it switches between.
+
+     `display: flex`, NOT a one-column grid. A one-column grid is what Part 1
+     shipped, and it painted the nav ON TOP OF the panel it was supposed to sit
+     above — every settings tab was unreadable on a phone (AUDIT L53).
+
+     Why a grid could not work here. `.settings-layout` is the same element as
+     `.page-body`, which is `flex: 1 1` inside `.app-shell { height: 100dvh;
+     overflow: hidden }` — so it has a DEFINITE height and scrolls internally.
+     Measured at 390x844: the container's content box is 688px, and the two
+     auto rows came out `248.625px 423.375px`. The content panel held at its
+     423.375px min-content size; the nav did not, because its inline
+     `overflow: hidden` gives a grid item an automatic minimum size of ZERO.
+     So the algorithm handed the nav whatever was left — 672 - 423.375 =
+     248.625px — while the nav's actual content height was 392px. It overflowed
+     its own row by 143px into the row below, and `position: sticky` made it a
+     stacking context so it painted over the panel rather than under it.
+
+     At two columns the rows never bind, which is why this was invisible on a
+     desktop. A flex column has no track sizing to get this wrong: the children
+     take their content heights and `.page-body`'s `overflow-y: auto` scrolls
+     them, exactly as every other page in the portal already works. */
+  .settings-layout {
+    display: flex;
+    flex-direction: column;
+    /* Both of the declarations below are load-bearing, and both were found by
+       LOOKING at a 390px screenshot rather than by measuring — the overlap was
+       already 0 while the nav was still half-width and still clipped.
+
+       `align-items: stretch` overrides the `align-items: start` on the base
+       rule above. That declaration is written for the GRID layout, where the
+       cross axis is vertical and `start` means "do not stretch the nav down
+       the full row". Re-entered in a flex COLUMN the cross axis swings to
+       horizontal, where the same keyword means "do not stretch the nav
+       across" — so the nav shrank to its content width and sat as a narrow
+       card in a full-width column. Same declaration, different axis, opposite
+       meaning.
+
+       `flex-shrink: 0` because a flex item shrinks below its content by
+       default, and the nav's `overflow: hidden` then CLIPS the remainder
+       rather than scrolling it: Display, Live Map, Reports & Exports, Data &
+       Privacy, About, Security and Sign Out were simply absent, with nothing
+       to indicate they existed. `.page-body` is the scroll container
+       (`overflow-y: auto`), so the honest behaviour is for both children to
+       take their natural height and let the page scroll — which is what
+       `.page-body > .card { flex-shrink: 0 }` already does for every other
+       page in this stylesheet. Same rule, same reason. */
+    align-items: stretch;
+  }
+  .settings-layout > * { flex-shrink: 0; }
 
   /* Wide tables were CLIPPED, not scrollable. `.card` is `overflow: hidden`,
      so the right-hand columns of the 5-to-7-column tables (Live Map
@@ -523,3 +586,40 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 
 /* Hide scrollbar on tab bars */
 .tab-bar::-webkit-scrollbar { display: none; }
+
+/* ── Scroll affordance on the two horizontal strips ───────────────────────
+   Both the site tab bar and (below 640px) the sidebar are deliberately
+   horizontally scrollable, not accidentally clipped. Measured in Chrome at
+   390x844 on the live portal: the sidebar reports clientWidth 390 against
+   scrollWidth 830 with `overflow-x: auto`, and the tab bar clientWidth 390
+   against scrollWidth 733. Seven nav items and eight tabs are all reachable
+   by swiping.
+
+   The problem was that nothing SAID so. The scrollbar is hidden on the tab
+   bar (above), iOS draws no persistent scrollbar on the sidebar either, and
+   both strips happened to cut cleanly between two items — so a strip reading
+   "nts | Inspections | Dockets | Photos" looks like a rendering fault rather
+   than a surface you can push sideways.
+
+   A right-edge fade is the affordance. It is a `mask-image`, which uses
+   colour only as an alpha ramp — no palette value is being chosen here, and
+   it therefore adapts to whatever is behind it: the dark navy sidebar and the
+   white tab bar both fade to their own background with one rule. A gradient
+   painted in a token colour would have to be written twice and would be wrong
+   the moment either surface changed.
+
+   Only where the strips actually overflow. Above 900px the tab bar's eight
+   tabs fit, and the sidebar is a vertical column, so neither is masked. */
+@media (max-width: 900px) {
+  .tab-bar {
+    mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+  }
+}
+
+@media (max-width: 640px) {
+  .sidebar {
+    mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+  }
+}
