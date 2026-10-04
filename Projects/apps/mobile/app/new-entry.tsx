@@ -429,6 +429,16 @@ export default function NewEntryScreen() {
         uri: source.uri,
         base64: source.base64,
         mimeType: source.mimeType,
+        // Carried over, which this handler alone was not doing — the
+        // inspections screen's equivalent always has. It matters in EDIT mode:
+        // the original is already stored, so its uri is a managed path,
+        // `uploadPhotoOnce` short-circuits on `isManagedMediaUri` and returns
+        // the derivative untouched, and nothing downstream ever fills these in.
+        // The result was a photograph with no storage address — the state AUDIT
+        // L39 describes the server as accepting. On a fresh capture both are
+        // undefined and this is a no-op.
+        storageKey: source.storageKey,
+        storagePath: source.storagePath,
         caption: source.caption,
         // `timestamp` is when this derivative was created, which is now.
         // Everything describing the PHOTOGRAPH comes from the original: an
