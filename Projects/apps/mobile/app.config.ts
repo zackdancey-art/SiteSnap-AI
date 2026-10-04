@@ -25,6 +25,41 @@ const IS_DEV = APP_ENV !== "production";
 // Running it bare would publish against a config that has no runtimeVersion.
 const UPDATES_ENABLED = APP_ENV === "production" || APP_ENV === "preview";
 
+/**
+ * The iOS location purpose string -- ONE constant, used in both places that
+ * set it.
+ *
+ * Two problems, one fix.
+ *
+ * FIRST, it was set twice with different wording: `ios.infoPlist`
+ * .NSLocationWhenInUseUsageDescription said "...for site diary entries" and
+ * the `expo-location` plugin's `locationWhenInUsePermission` said "...for site
+ * entries". Both write the same Info.plist key during prebuild, so which text
+ * a user actually saw depended on mod ordering, and nothing reported the
+ * disagreement. One constant makes the question stop mattering.
+ *
+ * SECOND, and the reason this is being touched now: both said the location was
+ * used to auto-fill WEATHER. That was true of the only caller that existed.
+ * Part 3 turns on location tracking, which is a materially different thing --
+ * it is employee monitoring, and the people monitored are crew members invited
+ * by their employer. A permission prompt that says "weather" while the app
+ * records where someone is working is a false statement at the exact moment
+ * consent is being asked for.
+ *
+ * So the string is widened now, in the one native commit, rather than at the
+ * point the feature lands. Declaring a purpose before the feature ships is
+ * harmless -- iOS only surfaces the string when the permission is actually
+ * requested -- and it means Part 3 costs no second native build.
+ *
+ * The in-app explanation Part 3 shows BEFORE this prompt is a separate thing
+ * and is not a substitute for it.
+ */
+const LOCATION_WHEN_IN_USE_PURPOSE =
+  "SiteSnap uses your location to record where site photos and diary entries were made, " +
+  "and to fill in local weather conditions. If your employer enables location tracking, " +
+  "SiteSnap also records your location while you are using the app for work; you can see " +
+  "whether that is on in Settings.";
+
 const buildStamp = new Date().toISOString().replace("T", " ").slice(0, 16);
 
 export default ({ config }: ConfigContext): ExpoConfig => {
@@ -103,8 +138,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
           "SiteSnap accesses your photo library to attach existing site photos to diary entries.",
         NSPhotoLibraryAddUsageDescription:
           "SiteSnap saves exported site diaries and photos to your library.",
-        NSLocationWhenInUseUsageDescription:
-          "SiteSnap uses your location to auto-fill weather conditions for site diary entries.",
+        NSLocationWhenInUseUsageDescription: LOCATION_WHEN_IN_USE_PURPOSE,
         NSMicrophoneUsageDescription:
           "SiteSnap may use the microphone when recording video on site.",
         NSLocalNetworkUsageDescription:
@@ -179,8 +213,9 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       [
         "expo-location",
         {
-          locationWhenInUsePermission:
-            "SiteSnap uses your location to auto-fill weather conditions for site entries.",
+          // Same constant as `ios.infoPlist` above, deliberately: both write
+          // NSLocationWhenInUseUsageDescription.
+          locationWhenInUsePermission: LOCATION_WHEN_IN_USE_PURPOSE,
         },
       ],
       [
