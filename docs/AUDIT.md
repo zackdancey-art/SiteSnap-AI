@@ -618,6 +618,24 @@ The fix is that the drain uploads before it posts. The bytes wait in the AsyncSt
 
 **L6 got better, not worse.** The queued path now calls `deletePhotoPayloads` after a successful sync, released *after* the dequeue so a crash in between orphans bytes rather than losing them. Before this branch nothing ever deleted a queued payload.
 
+**Closed by device evidence, 4 October 2026.** The test above proves the drain posts managed
+paths; it does not prove the bytes reached the bucket, and this entry's own "verification
+required" paragraph says a device pass cannot settle it either. What settled it was the sign
+call. Sixteen photographs on the portal's Photos tab were each issued a signed URL, and five of
+the sixteen upload ids carry the prefix `17910700…` — a `Date.now()` value of
+2026-10-03T23:26Z, the offline capture session. A signed URL is only issued for a path whose
+upload id has a row in the `uploads` table owned by the caller's company
+(`routes/uploads.ts:94-99`), and that row is written by `recordUpload` **after**
+`await storage.saveFile(...)` has returned (`routes/uploads.ts:47-56`) — a `saveFile` throw
+returns 500 and creates no row. The id is server-generated and cannot be supplied by the client.
+So a row for a last-night id means bytes were written for that id last night. The drain worked.
+
+The one thing this evidence does **not** establish is that the objects fetch under the exact
+filenames the entries record: `uploadBelongsToActorCompany` matches on id and company only, never
+on filename (`storage/uploadsStore.ts`), so a managed path with the right id and a wrong filename
+signs and then 404s. A successful GET would have closed that gap, and no GET was made — see
+**L48**, which is why.
+
 ### L29 — *(reserved)*
 
 Reserved for the finding Prompt 23 refers to as "the user's conflicting L26, renumbered L29". No second L26 exists in git: `docs/AUDIT.md` carries L24–L27 byte-identically on `main`, on `fix/stage-1-field-app-defects` and on `feat/invite-universal-links`, and its L26 is the double-tapped-Save finding above. The number is left unused rather than claimed, so that whatever it refers to can take it without a collision. See `docs/STAGE-1-3-REVIEW.md` Part 4.
@@ -963,7 +981,21 @@ export async function signUploadPaths(paths: string[]): Promise<{ path: string; 
 
 No `error` in either the declared type or the returned object, so the component cannot distinguish "this photograph was never uploaded" from "this photograph belongs to someone else" from "the request failed entirely" — three different diagnoses that render identically.
 
-This cost real time. Five grey tiles on a site page during the L28 device pass were consistent with four distinct causes, and the server had already sent the string that would have separated them.
+This cost real time. Five grey tiles on a site page during the L28 device pass were consistent
+with four distinct causes, and the server had already sent the string that would have separated
+them.
+
+**And there is a fifth, which this entry's four did not cover.** The four enumerated what the
+*sign call* can return — not signed, signed `null` with `Invalid upload path.`, signed `null` with
+`Not found.`, or the whole request 400ing on L42's cap. The cause actually found on 4 October 2026
+sits **downstream of a complete success**: every path signed, and the browser then refused to load
+any of them, because the API origin is absent from the portal's own Content-Security-Policy
+`img-src` (**L48**). The GET was never issued. A grey tile is therefore consistent with five
+states, one of which the component cannot see at all — a CSP refusal is reported to the console by
+the browser, not to the fetch, so there is no promise to catch and nothing for an error state to
+hang off. Any fix for this entry that renders "failed" instead of "loading" must say which of the
+five, and the fifth is reachable only by listening for the document's `securitypolicyviolation`
+event.
 
 **Disposition:** Open, recorded 4 October 2026. Fix is small: surface `error` through the wrapper, render a failed tile as failed rather than as loading, and retry once. Web-dashboard branch.
 
@@ -1084,3 +1116,121 @@ rows stay broken. For those: **re-issue in lower case.**
 Not a defect so much as an unfinished screen, recorded because the count makes it look finished.
 
 **Disposition:** Open, recorded 4 October 2026. This is the scoped Entries tab, and it is the reason the web-dashboard branch exists; L42–L45 are the defects it will sit on top of.
+
+### L48 — The portal's Content-Security-Policy omits the API origin from `img-src`, so **every photograph on the portal is refused by the browser** — HIGH (feature failure; total, silent, and affects every site on every load)
+
+**Where the policy is set: `Projects/apps/supervisor-web/next.config.mjs:16-48`** — a `cspDirectives`
+string joined at module scope and emitted by Next's `async headers()` for `source: "/(.*)"`. Not
+middleware, not a `<meta http-equiv>` tag. (There is a stray `index.html` at the portal root — a
+legacy standalone page predating the app router — and it carries no CSP meta; nothing else in the
+repo sets one. The API deliberately disables Helmet's own CSP, `services/api/src/server.ts:139`,
+which is correct: it serves JSON and signed media, not HTML.)
+
+The policy as shipped:
+
+```js
+const cspDirectives = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+  "style-src 'self' 'unsafe-inline'",
+  // img-src already defined above with tile server
+  `connect-src 'self' ${apiOrigin(process.env.NEXT_PUBLIC_API_URL)} https://*.tile.openstreetmap.org`,
+  "img-src 'self' data: blob: https://*.tile.openstreetmap.org",
+  "font-src 'self'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join("; ");
+```
+
+**The defect is one word of asymmetry.** `connect-src` interpolates `apiOrigin(...)`. `img-src`
+does not. So the portal is permitted to *ask* the API for signed URLs and forbidden to *load* what
+it gets back. Console, repeated for all sixteen photographs on a site's Photos tab:
+
+```
+Refused to load https://api.getsitesnapai.com/api/uploads/<id>/<file>.jpg?sig=…&exp=…
+because it does not appear in the img-src directive of the Content Security Policy.
+```
+
+Note the comment on the line above `connect-src`: *"img-src already defined above with tile
+server"*. It is defined *below*, and without the API origin. That comment is the fingerprint — the
+tile server was added to both directives in one edit and the API origin was added to only one, and
+the comment was left asserting the opposite.
+
+**Why nothing reported it.** A CSP refusal is not a failed request. The browser blocks it before
+any network activity, reports it to the console and to the document's `securitypolicyviolation`
+event, and the `<img>` fires `onerror` with no status — so the portal's own code cannot tell this
+from a 404, and L43's `.catch(console.error)` never runs because no promise rejected. There is no
+`report-uri` or `report-to` directive, so no violation has ever left a browser. This is the whole
+reason it survived to be diagnosed by reading a console by hand.
+
+#### The rest of the policy, audited directive by directive
+
+The instruction was to audit the whole thing rather than append one origin, on the reasoning that a
+policy blocking its own API is likely blocking more. It is — though the largest finding is the
+opposite shape: a directive that blocks nothing.
+
+| Directive | Verdict |
+|---|---|
+| `default-src 'self'` | Correct as a floor. Worth knowing what it silently governs: `media-src`, `frame-src`, `child-src`, `worker-src`, `manifest-src` and `prefetch-src` all have no explicit directive and so inherit `'self'`. **`media-src` is the next L48 waiting to happen** — the moment any video or audio evidence is served from the API it is refused exactly as the photographs are, with the same silence. |
+| `script-src 'self' 'unsafe-inline' 'unsafe-eval'` | **The real security finding.** Both relaxations ship to production unconditionally; the inline comment says *"needed for Next.js dev HMR; tighten in prod if possible"* and nothing makes it conditional. With `'unsafe-inline'` present the directive stops being an XSS control in any meaningful sense — an injected `<script>` or an `onclick` attribute executes, and `'unsafe-eval'` additionally permits `eval`/`new Function` on attacker-controlled strings. This is a portal holding other companies' site evidence behind a cookie session. The correct fix is a **per-request nonce**, which cannot be done from `headers()` at all (the value there is computed once at build) — it requires moving the CSP into `middleware.ts`, which the portal does not currently have. That is a bigger change than this entry's title and belongs in its own commit. |
+| `style-src 'self' 'unsafe-inline'` | Effectively forced: Next's App Router and Leaflet both inject inline `<style>`/`style=`. Nonce-able along with the scripts; much lower severity, since inline CSS exfiltration requires more than injection. |
+| `connect-src 'self' <apiOrigin> https://*.tile.openstreetmap.org` | Correct, and **it is the pattern `img-src` should copy**. One build-time hazard to record: `apiOrigin()` falls back to `'self'` when `NEXT_PUBLIC_API_URL` is absent, and `next.config.mjs` runs at **build** time, so an env var supplied only at runtime bakes a CSP that blocks the API entirely with no build error. Production demonstrably has it at build time — the sign call succeeds — so this is a trap for a future deploy, not a live fault. |
+| `img-src 'self' data: blob: https://*.tile.openstreetmap.org` | **The finding.** Add `${apiOrigin(process.env.NEXT_PUBLIC_API_URL)}`. `data:` and `blob:` are both genuinely needed (Leaflet marker data URIs; any client-side object URL) and are low-risk for images. |
+| `font-src 'self'` | Correct. Verified no Google Fonts or `@font-face` to a remote host in `app/`, `components/`, `lib/` or `styles.css`. |
+| `object-src 'none'` | Correct and worth keeping. Note it forecloses one plausible future: a PDF report rendered in an `<object>`/`<embed>` would need `object-src` widened, and `frame-src` too since it inherits `'self'`. |
+| `base-uri 'self'`, `form-action 'self'` | Correct. |
+| `frame-ancestors 'none'` | Correct, and consistent with the `X-Frame-Options: DENY` on the line below. |
+| *missing* `report-to` / `report-uri` | **The second-order finding, and arguably the more important one.** The policy has been refusing all site photography in production and the only record of it is a console the developer had to open. A reporting endpoint would have surfaced this on the day it shipped. Any widening of this policy should land together with a reporting directive, or the next L48 is diagnosed the same way this one was. |
+| *missing* `upgrade-insecure-requests` | Low value here — every origin referenced is already `https:` — but harmless and it closes a mixed-content foot-gun. |
+
+**No Sentry browser SDK is present in the portal** (`package.json` lists only `leaflet`,
+`react-leaflet`, `next`, `react`, `react-dom`), so no `connect-src` entry for an ingest host is
+needed. Worth stating because the privacy page lists Sentry as a processor, which is true of the
+API and not of this client; if a browser SDK is ever added, `connect-src` needs its ingest origin
+or every error report is silently refused by this same policy.
+
+**Disposition:** Open, recorded 4 October 2026. **The first item of the web-dashboard branch**, and
+deliberately not fixed on `fix/offline-photo-sync` — that branch is a mobile-sync branch being
+merged, and a portal CSP change in it could not be reverted alone. Three commits, in this order:
+(1) add the API origin to `img-src` and delete the stale comment — one line, fixes the photographs;
+(2) add `report-to` plus an explicit `media-src` and `frame-src` so the next omission announces
+itself; (3) the `script-src` nonce migration into `middleware.ts`, on its own, because it changes
+how every page is served. L48 blocks L42–L44: until the photographs can load at all, no fix to the
+signing path can be verified end to end.
+
+### L49 — The portal hydrates with server/client HTML mismatches — React `#418`, `#423`, `#425` — LOW (correctness and performance; recorded from console evidence, cause not yet located)
+
+Observed in the production portal console on 4 October 2026 alongside L48, on the site detail page.
+The three codes decode as follows — taken from React's published error index
+(`curl -sL https://react.dev/errors/418` and the same for 423 and 425, 4 October 2026), not from
+memory, because a minified code is useless if the mapping is wrong:
+
+- **`#418`** — "Hydration failed because the server rendered %s didn't match the client."
+- **`#423`** — "There was an error while hydrating but React was able to recover by instead client rendering the entire root."
+- **`#425`** — "Text content does not match server-rendered HTML."
+
+Together they say the server-rendered markup and the first client render disagree, that at least
+part of the disagreement is rendered **text**, and that React could not patch it up locally and so
+discarded the server HTML and re-rendered the whole root on the client. The consequence is not a
+visible break — 423 is explicitly the recovery — but the SSR work is thrown away on every load, and
+a root that falls back to client rendering can briefly show nothing where it should show content.
+
+(The index at react.dev tracks current React; the portal is on `react` ^18.3. The codes are stable
+across those versions and the sense is unchanged, but the 18.x wording of 418 and 423 is phrased
+slightly differently — "the initial UI does not match what was rendered on the server", and a
+mention of the mismatch falling outside a Suspense boundary. Noted so the quoted strings are not
+mistaken for a verbatim copy of what 18.3 would print in development.)
+
+**Not yet diagnosed, deliberately.** The codes are minified and the cause is a specific element, so
+locating it wants the development build's unminified message rather than a guess. The usual
+suspects in this codebase, in the order worth checking: a date or time formatted with the viewer's
+locale/timezone (server and browser differ), anything reading `localStorage`, `document` or
+`window` during the first render, and a `Date.now()`/`Math.random()` value in rendered output. The
+portal authenticates by httpOnly cookie, so a component that renders one way before the session is
+known and another way after is also a candidate.
+
+**Disposition:** Open, recorded 4 October 2026, for the web-dashboard branch. Secondary to L42–L48:
+it degrades the page rather than breaking it. First step is `pnpm -C Projects --filter
+sitesnap-supervisor-web run dev` and reading the full message, not a code change.
