@@ -11,14 +11,15 @@ import {
   approveDiary, signUploadPaths,
 } from "@/lib/api";
 import type {
-  BootstrapData, Diary, User,
+  BootstrapData, Diary, Entry, User,
   Timecard, Incident, Inspection, Delivery,
 } from "@/lib/api";
 
-type Tab = "overview" | "timesheets" | "incidents" | "inspections" | "dockets" | "photos" | "reports";
+type Tab = "overview" | "entries" | "timesheets" | "incidents" | "inspections" | "dockets" | "photos" | "reports";
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: "overview",    label: "Overview",    icon: "🏗️" },
+  { id: "entries",     label: "Entries",     icon: "📄" },
   { id: "timesheets",  label: "Timesheets",  icon: "⏱️" },
   { id: "incidents",   label: "Incidents",   icon: "⚠️" },
   { id: "inspections", label: "Inspections", icon: "🔍" },
@@ -73,17 +74,164 @@ function formatTime(t?: string) {
   return `${h % 12 || 12}:${String(m).padStart(2, "0")} ${h >= 12 ? "PM" : "AM"}`;
 }
 
+type PhotoView = { uri: string; caption?: string };
+type Shot = { url: string; caption?: string };
+
+/**
+ * One photograph tile, in whichever of its three states applies: signed and
+ * displayable, refused with the server's reason, or not yet attempted.
+ *
+ * Shared by the Photos tab and the Entries tab deliberately. Those three states
+ * are the whole of what L42–L44 were about, and two copies of them would drift:
+ * one would still be saying "Loading…" over a finished failure long after the
+ * other had stopped.
+ */
+function PhotoTile({
+  photo, index, signedUrls, errors, compact, onOpen,
+}: {
+  photo: PhotoView;
+  index: number;
+  signedUrls: Map<string, string>;
+  errors: Map<string, string>;
+  /** Small, with the caption rendered beneath by the caller rather than over the image. */
+  compact?: boolean;
+  onOpen: (shot: Shot) => void;
+}) {
+  const signedUrl = signedUrls.get(photo.uri);
+  const failure = signedUrl ? undefined : errors.get(photo.uri);
+
+  return (
+    <div
+      onClick={() => signedUrl && onOpen({ url: signedUrl, caption: photo.caption })}
+      title={failure ?? photo.caption ?? undefined}
+      style={{
+        borderRadius: compact ? 8 : 12, overflow: "hidden",
+        background: "var(--surface-secondary)",
+        aspectRatio: "4/3",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        border: "1px solid var(--border)",
+        cursor: signedUrl ? "pointer" : "default",
+        position: "relative",
+        transition: "transform 0.15s, box-shadow 0.15s",
+      }}
+      onMouseEnter={(e) => { if (signedUrl) { (e.currentTarget as HTMLDivElement).style.transform = "scale(1.02)"; (e.currentTarget as HTMLDivElement).style.boxShadow = "0 6px 20px rgba(0,0,0,0.12)"; } }}
+      onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.transform = "scale(1)"; (e.currentTarget as HTMLDivElement).style.boxShadow = "none"; }}
+    >
+      {signedUrl ? (
+        <img
+          src={signedUrl}
+          alt={photo.caption ?? `Photo ${index + 1}`}
+          loading="lazy"
+          decoding="async"
+          style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+        />
+      ) : (
+        // "Loading…" under a load that has finished and failed is the defect,
+        // not the styling: it tells a manager to wait for something that is
+        // never coming.
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: compact ? 2 : 8, padding: compact ? 4 : 10, textAlign: "center" }}>
+          <span style={{ fontSize: compact ? 18 : 32, opacity: 0.4 }}>{failure ? "⚠" : "📷"}</span>
+          <span style={{ fontSize: compact ? 9 : 11, color: failure ? "var(--error)" : "var(--text-tertiary)" }}>
+            {failure ? "Unavailable" : "Loading…"}
+          </span>
+          {failure && !compact && (
+            <span style={{ fontSize: 10, color: "var(--text-tertiary)", lineHeight: 1.3 }}>{failure}</span>
+          )}
+        </div>
+      )}
+      {photo.caption && signedUrl && !compact && (
+        <div style={{
+          position: "absolute", bottom: 0, left: 0, right: 0,
+          background: "linear-gradient(transparent, rgba(15,43,70,0.75))",
+          padding: "20px 10px 8px",
+          fontSize: 11, color: "#fff", fontWeight: 500,
+        }}>
+          {photo.caption}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The full-screen view of one photograph. Shared for the same reason as the tile. */
+function PhotoLightbox({ shot, onClose }: { shot: Shot; onClose: () => void }) {
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0, zIndex: 1000,
+        background: "rgba(10,18,30,0.92)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        padding: 24,
+      }}
+      onClick={onClose}
+    >
+      <button
+        onClick={onClose}
+        style={{ position: "absolute", top: 20, right: 20, background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: 10, width: 38, height: 38, fontSize: 20, cursor: "pointer" }}
+      >
+        ✕
+      </button>
+      <img
+        src={shot.url}
+        alt={shot.caption ?? "Site photo"}
+        style={{ maxWidth: "90vw", maxHeight: "85vh", borderRadius: 12, objectFit: "contain", boxShadow: "0 20px 60px rgba(0,0,0,0.5)" }}
+        onClick={(e) => e.stopPropagation()}
+      />
+      {shot.caption && (
+        <div style={{ position: "absolute", bottom: 28, left: "50%", transform: "translateX(-50%)", color: "#fff", fontSize: 14, fontWeight: 500, background: "rgba(0,0,0,0.5)", padding: "6px 16px", borderRadius: 20 }}>
+          {shot.caption}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The banner that tells a manager some photographs did not load, and offers to
+ * ask again. Shared by both tabs that display photographs.
+ */
+function PhotoFailureBanner({
+  failedCount, total, requestError, onRetry,
+}: {
+  failedCount: number;
+  total: number;
+  requestError: string | null;
+  onRetry: () => void;
+}) {
+  if (!requestError && failedCount === 0) return null;
+  return (
+    <div style={{
+      margin: "16px 20px 0", padding: "10px 14px",
+      display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+      borderRadius: 10,
+      border: "1px solid var(--error)",
+      background: "var(--surface-secondary)",
+      fontSize: 13, color: "var(--text-secondary)",
+    }}>
+      <span style={{ color: "var(--error)" }}>⚠</span>
+      <span style={{ flex: 1, minWidth: 160 }}>
+        {requestError
+          ? `Photos could not be loaded: ${requestError}`
+          : `${failedCount} of ${total} photo${total === 1 ? "" : "s"} could not be loaded.`}
+      </span>
+      <button className="btn-ghost" onClick={onRetry} style={{ fontSize: 12, padding: "5px 12px" }}>
+        Try again
+      </button>
+    </div>
+  );
+}
+
 function PhotosTab({
   photos, signedUrls, errors, requestError, signing, onRetry,
 }: {
-  photos: { uri: string; caption?: string }[];
+  photos: PhotoView[];
   signedUrls: Map<string, string>;
   errors: Map<string, string>;
   requestError: string | null;
   signing: boolean;
   onRetry: () => void;
 }) {
-  const [lightbox, setLightbox] = useState<{ url: string; caption?: string } | null>(null);
+  const [lightbox, setLightbox] = useState<Shot | null>(null);
   const failedCount = photos.filter((p) => errors.has(p.uri)).length;
 
   return (
@@ -104,123 +252,159 @@ function PhotosTab({
 
         {/* A manager looking at grey squares is told what went wrong and can ask
             again. Shown whether the failure was per-path or whole-request. */}
-        {!signing && (requestError || failedCount > 0) && (
-          <div style={{
-            margin: "16px 20px 0", padding: "10px 14px",
-            display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
-            borderRadius: 10,
-            border: "1px solid var(--error)",
-            background: "var(--surface-secondary)",
-            fontSize: 13, color: "var(--text-secondary)",
-          }}>
-            <span style={{ color: "var(--error)" }}>⚠</span>
-            <span style={{ flex: 1, minWidth: 160 }}>
-              {requestError
-                ? `Photos could not be loaded: ${requestError}`
-                : `${failedCount} of ${photos.length} photo${photos.length === 1 ? "" : "s"} could not be loaded.`}
-            </span>
-            <button className="btn-ghost" onClick={onRetry} style={{ fontSize: 12, padding: "5px 12px" }}>
-              Try again
-            </button>
-          </div>
+        {!signing && (
+          <PhotoFailureBanner failedCount={failedCount} total={photos.length} requestError={requestError} onRetry={onRetry} />
         )}
 
         {photos.length === 0 ? (
           <div className="empty-state"><p>No photos uploaded yet.</p></div>
         ) : (
           <div style={{ padding: 20, display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 14 }}>
-            {photos.map((p, i) => {
-              const signedUrl = signedUrls.get(p.uri);
-              const failure = signedUrl ? undefined : errors.get(p.uri);
+            {photos.map((p, i) => (
+              <PhotoTile key={`${p.uri}-${i}`} photo={p} index={i} signedUrls={signedUrls} errors={errors} onOpen={setLightbox} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {lightbox && <PhotoLightbox shot={lightbox} onClose={() => setLightbox(null)} />}
+    </>
+  );
+}
+
+/**
+ * The diary entries the crew logged, read-only.
+ *
+ * This is the half of the product the office uses and it had no way in: the
+ * Overview tab counted entries and then offered nothing to click (AUDIT L47).
+ * Everything here comes from `bootstrap.entries`, already filtered to this site
+ * by the page — no endpoint was added and no route was added.
+ *
+ * Deliberately a list and not a detail route. `sites/[id]/entries/[entryId]`
+ * with its own endpoint would establish a detail-route pattern the portal has
+ * nowhere else, and that decision belongs with dashboard parity rather than
+ * with a photograph fix.
+ */
+function EntriesTab({
+  entries, signedUrls, errors, requestError, signing, onRetry, formatDate,
+}: {
+  entries: Entry[];
+  signedUrls: Map<string, string>;
+  errors: Map<string, string>;
+  requestError: string | null;
+  signing: boolean;
+  onRetry: () => void;
+  formatDate: (value?: string | null, options?: Intl.DateTimeFormatOptions) => string;
+}) {
+  const [lightbox, setLightbox] = useState<Shot | null>(null);
+
+  // Newest first — the office reads the most recent day first. `date` is the
+  // work date and `timestamp` when it was logged; the second breaks ties within
+  // a day. Both compare as ISO strings.
+  const ordered = useMemo(
+    () => [...entries].sort(
+      (a, b) =>
+        (b.date ?? "").localeCompare(a.date ?? "") ||
+        (b.timestamp ?? "").localeCompare(a.timestamp ?? "")
+    ),
+    [entries]
+  );
+
+  const allPhotos = entries.flatMap((e) => e.photos ?? []);
+  const failedCount = allPhotos.filter((p) => errors.has(p.uri)).length;
+
+  return (
+    <>
+      <div className="card">
+        <div className="card-header">
+          <span>📄</span>
+          <span className="card-title">Diary Entries</span>
+          <span className="card-count">{entries.length}</span>
+          {signing && (
+            <span style={{ marginLeft: 8, fontSize: 12, color: "var(--text-secondary)" }}>Loading photos…</span>
+          )}
+        </div>
+
+        {!signing && (
+          <PhotoFailureBanner failedCount={failedCount} total={allPhotos.length} requestError={requestError} onRetry={onRetry} />
+        )}
+
+        {entries.length === 0 ? (
+          <div className="empty-state"><p>No diary entries logged yet.</p></div>
+        ) : (
+          <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 14 }}>
+            {ordered.map((entry) => {
+              const photos = entry.photos ?? [];
               return (
-                <div
-                  key={i}
-                  onClick={() => signedUrl && setLightbox({ url: signedUrl, caption: p.caption })}
+                <article
+                  key={entry.id}
                   style={{
-                    borderRadius: 12, overflow: "hidden",
-                    background: "var(--surface-secondary)",
-                    aspectRatio: "4/3",
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    border: "1px solid var(--border)",
-                    cursor: signedUrl ? "pointer" : "default",
-                    position: "relative",
-                    transition: "transform 0.15s, box-shadow 0.15s",
+                    border: "1px solid var(--border)", borderRadius: 12,
+                    padding: 16, background: "var(--surface)",
                   }}
-                  onMouseEnter={(e) => { if (signedUrl) { (e.currentTarget as HTMLDivElement).style.transform = "scale(1.02)"; (e.currentTarget as HTMLDivElement).style.boxShadow = "0 6px 20px rgba(0,0,0,0.12)"; } }}
-                  onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.transform = "scale(1)"; (e.currentTarget as HTMLDivElement).style.boxShadow = "none"; }}
                 >
-                  {signedUrl ? (
-                    <img
-                      src={signedUrl}
-                      alt={p.caption ?? `Photo ${i + 1}`}
-                      loading="lazy"
-                      decoding="async"
-                      style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-                    />
-                  ) : (
-                    // "Loading…" under a load that has finished and failed is the
-                    // defect, not the styling: it tells a manager to wait for
-                    // something that is never coming.
-                    <div
-                      style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, padding: 10, textAlign: "center" }}
-                      title={failure ?? undefined}
-                    >
-                      <span style={{ fontSize: 32, opacity: 0.4 }}>{failure ? "⚠" : "📷"}</span>
-                      <span style={{ fontSize: 11, color: failure ? "var(--error)" : "var(--text-tertiary)" }}>
-                        {failure ? "Unavailable" : "Loading…"}
+                  <header style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+                    <span style={{ fontSize: 15, fontWeight: 600, color: "var(--text)" }}>
+                      {formatDate(entry.date, { weekday: "short", day: "numeric", month: "short", year: "numeric" })}
+                    </span>
+                    <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+                      {entry.ownerEmail ? `Logged by ${entry.ownerEmail}` : "Logged by an unrecorded account"}
+                    </span>
+                    {entry.timestamp && (
+                      <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
+                        · {formatDate(entry.timestamp, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}
                       </span>
-                      {failure && (
-                        <span style={{ fontSize: 10, color: "var(--text-tertiary)", lineHeight: 1.3 }}>{failure}</span>
-                      )}
+                    )}
+                  </header>
+
+                  {(entry.weather || entry.crewCount || entry.locationAddress) && (
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+                      {entry.weather && <span className="badge">🌤️ {entry.weather}</span>}
+                      {entry.crewCount && <span className="badge">👷 {entry.crewCount}</span>}
+                      {entry.locationAddress && <span className="badge">📍 {entry.locationAddress}</span>}
                     </div>
                   )}
-                  {p.caption && signedUrl && (
+
+                  <p style={{
+                    margin: 0, fontSize: 13, lineHeight: 1.55,
+                    whiteSpace: "pre-wrap",
+                    color: entry.notes?.trim() ? "var(--text)" : "var(--text-tertiary)",
+                  }}>
+                    {entry.notes?.trim() || "No notes recorded for this entry."}
+                  </p>
+
+                  {photos.length > 0 && (
                     <div style={{
-                      position: "absolute", bottom: 0, left: 0, right: 0,
-                      background: "linear-gradient(transparent, rgba(15,43,70,0.75))",
-                      padding: "20px 10px 8px",
-                      fontSize: 11, color: "#fff", fontWeight: 500,
+                      marginTop: 12, display: "grid",
+                      gridTemplateColumns: "repeat(auto-fill, minmax(104px, 1fr))", gap: 10,
                     }}>
-                      {p.caption}
+                      {photos.map((photo, i) => (
+                        <figure key={`${photo.uri}-${i}`} style={{ margin: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+                          <PhotoTile
+                            photo={photo}
+                            index={i}
+                            signedUrls={signedUrls}
+                            errors={errors}
+                            compact
+                            onOpen={setLightbox}
+                          />
+                          {photo.caption && (
+                            <figcaption style={{ fontSize: 10, lineHeight: 1.3, color: "var(--text-secondary)" }}>
+                              {photo.caption}
+                            </figcaption>
+                          )}
+                        </figure>
+                      ))}
                     </div>
                   )}
-                </div>
+                </article>
               );
             })}
           </div>
         )}
       </div>
 
-      {/* Lightbox */}
-      {lightbox && (
-        <div
-          style={{
-            position: "fixed", inset: 0, zIndex: 1000,
-            background: "rgba(10,18,30,0.92)",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            padding: 24,
-          }}
-          onClick={() => setLightbox(null)}
-        >
-          <button
-            onClick={() => setLightbox(null)}
-            style={{ position: "absolute", top: 20, right: 20, background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: 10, width: 38, height: 38, fontSize: 20, cursor: "pointer" }}
-          >
-            ✕
-          </button>
-          <img
-            src={lightbox.url}
-            alt={lightbox.caption ?? "Site photo"}
-            style={{ maxWidth: "90vw", maxHeight: "85vh", borderRadius: 12, objectFit: "contain", boxShadow: "0 20px 60px rgba(0,0,0,0.5)" }}
-            onClick={(e) => e.stopPropagation()}
-          />
-          {lightbox.caption && (
-            <div style={{ position: "absolute", bottom: 28, left: "50%", transform: "translateX(-50%)", color: "#fff", fontSize: 14, fontWeight: 500, background: "rgba(0,0,0,0.5)", padding: "6px 16px", borderRadius: 20 }}>
-              {lightbox.caption}
-            </div>
-          )}
-        </div>
-      )}
+      {lightbox && <PhotoLightbox shot={lightbox} onClose={() => setLightbox(null)} />}
     </>
   );
 }
@@ -347,7 +531,10 @@ export default function SiteDetailPage() {
 
   // Sign photo URLs when the Photos tab is opened.
   useEffect(() => {
-    if (tab !== "photos" || pendingPhotoPaths.length === 0) return;
+    // Both tabs that display photographs, sharing one signing pass: a manager
+    // who opens Entries after Photos re-signs nothing, because the results are
+    // keyed by path and `pendingPhotoPaths` is already empty for them.
+    if ((tab !== "photos" && tab !== "entries") || pendingPhotoPaths.length === 0) return;
     if (signInFlight.current) return;
 
     const batch = pendingPhotoPaths.slice(0, SIGN_BATCH_SIZE);
@@ -697,6 +884,19 @@ export default function SiteDetailPage() {
                 )
               }
             </div>
+          )}
+
+          {/* ── Entries ── */}
+          {!loadingMain && tab === "entries" && (
+            <EntriesTab
+              entries={entries}
+              signedUrls={signedPhotoUrls}
+              errors={photoErrors}
+              requestError={photoRequestError}
+              signing={signingPhotos}
+              onRetry={retryPhotos}
+              formatDate={localDate}
+            />
           )}
 
           {/* ── Photos ── */}

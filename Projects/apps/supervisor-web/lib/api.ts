@@ -4,7 +4,25 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 export type User = { email: string; name: string; role: string; companyId?: string; companyRole?: string };
 export type Site = { id: string; name: string; client: string; address: string; status: string; startDate?: string };
 export type EntryPhoto = { uri: string; caption?: string };
-export type Entry = { id: string; siteId: string; date: string; notes: string; weather?: string; crewCount?: string; photos?: EntryPhoto[] };
+/**
+ * A diary entry as `/api/projects/bootstrap` already sends it.
+ *
+ * `ownerEmail`, `timestamp` and `locationAddress` are not new fields and no
+ * endpoint changed to provide them: `getScopedBootstrap` returns whole
+ * `EntryRecord`s, and the portal's type was simply narrower than the payload.
+ * They are optional here because the in-memory fallback store and older rows
+ * cannot all be relied on to carry them, not because the server might omit the
+ * key.
+ */
+export type Entry = {
+  id: string; siteId: string; date: string; notes: string;
+  weather?: string; crewCount?: string; photos?: EntryPhoto[];
+  /** The account that logged the entry. The portal has no name lookup, so this is shown as-is. */
+  ownerEmail?: string;
+  /** When it was logged, as opposed to the work date it is filed under. */
+  timestamp?: string;
+  locationAddress?: string;
+};
 export type DiarySection = {
   date?: string; weather?: string; crewCount?: string;
   workCompleted?: string; safetyObservations?: string;

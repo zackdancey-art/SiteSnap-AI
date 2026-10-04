@@ -1115,7 +1115,17 @@ rows stay broken. For those: **re-issue in lower case.**
 
 Not a defect so much as an unfinished screen, recorded because the count makes it look finished.
 
-**Disposition:** Open, recorded 4 October 2026. This is the scoped Entries tab, and it is the reason the web-dashboard branch exists; L42–L45 are the defects it will sit on top of.
+**Built — the list, deliberately not the detail route (4 October 2026)**
+
+An `EntriesTab` on the same page: a tab entry, a render branch, and a list component. Newest first by work date, with the logging timestamp breaking ties inside a day. Per entry: the date, who logged it, the notes, and the photographs with their captions, plus weather, crew count and location where the entry carries them. Read-only throughout — nothing on this screen writes.
+
+No endpoint was added and no route was added. The data was already in the client: `bootstrap.entries`, filtered to the site by the page, is the same array the photograph grid and the diary payload are derived from. `getScopedBootstrap` returns whole `EntryRecord`s with no field stripping, so `ownerEmail`, `timestamp` and `locationAddress` were already arriving and the portal's `Entry` type was simply narrower than the payload — widening it added three optional fields and changed no server behaviour.
+
+**Why a list and not `sites/[id]/entries/[entryId]`.** A deep-linkable detail route needs its own endpoint and establishes a detail-route pattern the portal has nowhere else — every other tab is a panel on this page. Introducing that pattern behind a photograph fix means the first screen to use it is also the one nobody reviewed it for. It belongs with dashboard parity, as its own decision.
+
+**It rests on L42–L44, and shares their one signing pass.** The photographs here are signed by the same effect, through the same batching, with the same per-path error reporting and the same retry — the effect's tab guard admits `"entries"` alongside `"photos"`. The three tile states (signed, refused with the server's reason, not yet attempted) were extracted into a shared `PhotoTile` rather than copied, because two copies of them would drift and one tab would keep saying "Loading…" over a finished failure after the other had stopped. The practical consequence: without L48's CSP fix this tab would have shipped as a list of grey rectangles, which is why it was built after it rather than before.
+
+**Disposition:** Closed as scoped. The entry count on the overview is now reachable. Recorded 4 October 2026.
 
 ### L48 — The portal's Content-Security-Policy omits the API origin from `img-src`, so **every photograph on the portal is refused by the browser** — HIGH (feature failure; total, silent, and affects every site on every load)
 
