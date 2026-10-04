@@ -6,12 +6,32 @@ import { useAuth, isTokenExpiringSoon } from "@/lib/auth-context";
 import {
   deletePhotoPayloads,
   hydrateEntriesWithPhotoPayloads,
+  hydratePhotos,
   savePhotoPayloads,
   stripPhotoPayloads,
 } from "@/lib/photo-payload-store";
-import { enqueue, peekQueue, dequeue, isNetworkError } from "@/lib/offline-queue";
-import { isManagedMediaUri, toCanonicalPath, toStorablePhotoUri } from "@/lib/photo-uri";
+import {
+  enqueue,
+  peekQueue,
+  peekFailedQueue,
+  dequeue,
+  isNetworkError,
+  markOpFailed,
+  retryFailedOps,
+  updateQueuedPayload,
+  type QueuedOp,
+} from "@/lib/offline-queue";
+import { drainQueue } from "@/lib/offline-drain";
+import { materializeQueuedPhoto } from "@/lib/photo-bytes";
+import {
+  canonicalUploadPathFromResponse,
+  isManagedMediaUri,
+  toCanonicalPath,
+  toStorablePhotoUri,
+  UploadAddressMissingError,
+} from "@/lib/photo-uri";
 import { reportMediaFailure } from "@/lib/media-telemetry";
+import { reportSyncFailure } from "@/lib/sync-telemetry";
 
 interface DataContextType {
   sites: Site[];
@@ -20,7 +40,16 @@ interface DataContextType {
   templates: SiteTemplate[];
   syncStatus: "idle" | "syncing" | "offline" | "error";
   lastSyncError: string | null;
+  /** Ops waiting for coverage. */
   pendingCount: number;
+  /**
+   * Ops the server refused and the drain has given up on. AUDIT L30: these used
+   * to be deleted, so this number and the list below it are the only way anyone
+   * holding the phone can learn that work did not sync.
+   */
+  failedOps: QueuedOp[];
+  /** Hands failed ops back to the drain. Returns how many were queued again. */
+  retryFailedSync: (ids?: string[]) => Promise<number>;
   addSite: (site: Omit<Site, "id" | "createdAt">) => Promise<void>;
   deleteSite: (id: string) => Promise<void>;
   addEntry: (
@@ -183,7 +212,25 @@ async function uploadPhotoOnce(photo: Entry["photos"][number]) {
   }
 
   const payload = (await res.json()) as { url?: string; storagePath?: string; storageKey?: string };
-  const canonicalPath = payload.url?.startsWith("/") ? payload.url : (payload.url || "");
+
+  // A 200 carrying no address is not a success — see
+  // `canonicalUploadPathFromResponse`. Reported from here rather than left to
+  // the drain because this is where the cause is known: the server took the
+  // bytes and did not name them. That is a different defect from an upload that
+  // never arrived, and it is the only one that can leave behind a record
+  // asserting it holds a photograph with no address for one.
+  let canonicalPath: string;
+  try {
+    canonicalPath = canonicalUploadPathFromResponse(payload.url, photo.id);
+  } catch (err) {
+    reportSyncFailure({
+      kind: "photo-upload-address-missing",
+      photoId: photo.id,
+      stage: "upload",
+      cause: err,
+    });
+    throw err;
+  }
 
   return {
     ...photo,
@@ -201,12 +248,34 @@ async function uploadPhoto(photo: Entry["photos"][number]): Promise<Entry["photo
       return await uploadPhotoOnce(photo);
     } catch (err) {
       lastErr = err;
+      // Not transient, and retrying it costs more than it could win: every
+      // attempt re-POSTs the same bytes and leaves another orphaned object in
+      // the bucket. Fail now and let the op dead-letter.
+      if (err instanceof UploadAddressMissingError) break;
       if (attempt < backoff.length) {
         await new Promise((r) => setTimeout(r, backoff[attempt]));
       }
     }
   }
   throw lastErr;
+}
+
+/**
+ * The uploader the offline drain is given.
+ *
+ * It differs from `uploadPhoto` in one respect: the bytes come from wherever
+ * they actually are. A photograph that has waited in the queue overnight may
+ * no longer have a readable `uri` — see `lib/photo-bytes.ts` — so it is written
+ * back out to a cache file first, and that file is deleted once the server has
+ * taken the bytes.
+ */
+async function uploadQueuedPhoto(photo: Entry["photos"][number]): Promise<Entry["photos"][number]> {
+  const materialized = materializeQueuedPhoto(photo);
+  try {
+    return await uploadPhoto(materialized.uri === photo.uri ? photo : { ...photo, uri: materialized.uri });
+  } finally {
+    materialized.release();
+  }
 }
 
 /**
@@ -426,48 +495,49 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const [syncStatus, setSyncStatus] = useState<"idle" | "syncing" | "offline" | "error">("idle");
   const [lastSyncError, setLastSyncError] = useState<string | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
+  const [failedOps, setFailedOps] = useState<QueuedOp[]>([]);
 
-  const drainOfflineQueue = async () => {
-    const queue = await peekQueue();
-    if (queue.length === 0) return;
-    setPendingCount(queue.length);
-    for (const op of queue) {
-      try {
-        if (op.type === "addEntry") {
-          const data = op.payload as Omit<Entry, "id" | "timestamp" | "createdAt">;
-          await apiJson<{ entry: Entry }>("/projects/entries", {
-            method: "POST",
-            body: JSON.stringify(stripPhotoPayloads({ ...data } as Entry)),
-          });
-        } else if (op.type === "addSite") {
-          await apiJson<{ site: Site }>("/projects/sites", {
-            method: "POST",
-            body: JSON.stringify(op.payload),
-          });
-        } else if (op.type === "updateEntry") {
-          const { id, patch } = op.payload as { id: string; patch: Partial<Entry> };
-          await apiJson<{ entry: Entry }>(`/projects/entries/${id}`, {
-            method: "PATCH",
-            body: JSON.stringify(patch),
-          });
-        } else if (op.type === "deleteEntry") {
-          await apiJson<{ ok: boolean }>(`/projects/entries/${op.payload as string}`, { method: "DELETE" });
-        } else if (op.type === "deleteSite") {
-          await apiJson<{ ok: boolean }>(`/projects/sites/${op.payload as string}`, { method: "DELETE" });
-        }
-        await dequeue(op.id);
-      } catch (err) {
-        if (!isNetworkError(err)) {
-          // Non-network error (e.g. 4xx): drop the op to avoid infinite retry
-          await dequeue(op.id);
-          console.warn("[queue] Dropping unrecoverable queued op", op.type, err);
-        }
-        // Network error: leave in queue for next refresh
-        break;
-      }
+  // The failed list is read from storage rather than accumulated in memory:
+  // ops dead-lettered on a previous launch must still be visible on this one.
+  const refreshFailedOps = React.useCallback(async () => {
+    try {
+      setFailedOps(await peekFailedQueue());
+    } catch {
+      // Storage being unreadable must not take the screen down with it.
     }
-    const remaining = await peekQueue();
-    setPendingCount(remaining.length);
+  }, []);
+
+  // The loop itself lives in `lib/offline-drain.ts` so it can be tested without a
+  // simulator; everything with an effect is injected from here. See that file's
+  // header for why, and `lib/offline-drain.test.ts` for what it proves.
+  const drainOfflineQueue = async () => {
+    await drainQueue({
+      peekQueue,
+      dequeue,
+      apiJson: (path, init) => apiJson(path, init as RequestInit),
+      isNetworkError,
+      stripPhotoPayloads,
+      hydratePhotos,
+      uploadPhoto: uploadQueuedPhoto,
+      deletePhotoPayloads,
+      isManagedMediaUri,
+      updateQueuedPayload,
+      markOpFailed,
+      report: reportSyncFailure,
+      onPending: setPendingCount,
+      onFailed: () => {
+        // The count comes back with the list, so there is one source for both.
+        void refreshFailedOps();
+      },
+      warn: (...args) => console.warn(...args),
+    });
+  };
+
+  const retryFailedSync = async (ids?: string[]) => {
+    const retried = await retryFailedOps(ids);
+    await refreshFailedOps();
+    if (retried > 0) await drainOfflineQueue();
+    return retried;
   };
 
   const refresh = async () => {
@@ -523,6 +593,15 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       }
     })();
   }, [authLoading, isAuthenticated, user?.email, token]);
+
+  // An op dead-lettered on a previous launch must be visible on this one before
+  // any drain runs — the phone may not have coverage again for days.
+  useEffect(() => {
+    void refreshFailedOps();
+    peekQueue()
+      .then((queue) => setPendingCount(queue.filter((op) => op.status !== "failed").length))
+      .catch(() => {});
+  }, [refreshFailedOps]);
 
   useEffect(() => {
     if (authLoading) return;
@@ -811,6 +890,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         syncStatus,
         lastSyncError,
         pendingCount,
+        failedOps,
+        retryFailedSync,
         addSite,
         deleteSite,
         addEntry,

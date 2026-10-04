@@ -124,7 +124,7 @@ automated fetches, so the policy pages themselves could not be read).
 | OpenAI | AI diary drafting | USA | Active; `store: false` now sent (commit `dfb7fc1`) |
 | Resend | Transactional email | USA | Active (`RESEND_API_KEY` configured) |
 | Twilio | SMS verification | USA | Active |
-| Sentry | Error reporting | USA | **API only.** The mobile DSN is empty, so no app crash data leaves a phone |
+| Sentry | Error reporting | USA | Active. **Server and app.** The app reports crashes and failed offline syncs; `attachScreenshot` is `false` and the payload is restricted to identifiers and counts by `apps/mobile/lib/sync-telemetry-redaction.ts` |
 
 **SendGrid is deliberately not listed in the published documents.** A complete SendGrid code
 path exists in `services/api/src/services/notificationService.ts` as an alternative to Resend,
@@ -133,6 +133,39 @@ processor that receives nothing would be as inaccurate as omitting one that does
 
 **Render Key Value / Redis is not in use** — the rate limiter runs in memory in production, so
 no emails, phone numbers or IP addresses are held as Redis keys.
+
+## Corrected after drafting: app-side error reporting
+
+The table above originally recorded Sentry as receiving data from the API only, on the
+grounds that the mobile DSN was empty. Section 5 of the Privacy Policy said "Crash reports
+from the server go to Sentry" and section 10 listed app crash reporting among the things not
+switched on. Closing AUDIT L31 changed that: the app now reports its own crashes, and
+reports when a photograph or an entry captured offline fails to reach the server — which is
+the whole point of L31, because a phone has no log and a sync that failed on a site in
+December could not otherwise be reconstructed in February.
+
+Both sentences were corrected in the canonical text and in both render copies, and the
+anti-drift check described at the end of this file was run to prove the copies followed.
+
+What the correction asserts, and where each claim is enforced in code:
+
+| Claim in section 5 | Enforced by |
+|---|---|
+| Reports carry identifiers, counts and error codes | `apps/mobile/lib/sync-telemetry-redaction.ts` — `transmittablePayload` is the whole payload, and `sync-telemetry-redaction.test.ts` asserts over all of it |
+| No photographs, note text, site addresses or email addresses | the same test, which puts real-shaped entry content into the report and asserts none of it is serialised |
+| No signed-media `?sig=`/`?exp=` pair | there is no `uri` field on `SyncFailureReport` at all, so there is nowhere for one to enter |
+| A server's own response wording is not transmitted | `transmittableDetail` withholds the message when a `status` is present, and `mayTransmitCause` keeps a server-originated `Error` out of the Sentry issue title |
+| No screenshot | `attachScreenshot: false` in `apps/mobile/app/_layout.tsx` |
+
+Sentry also records what any SDK records automatically — device model, operating system and
+app version — which section 5 now says. `sendDefaultPii` is `false`, so no IP address or
+account identity is attached.
+
+**Section 10 was not simply emptied of the claim.** The sentence sat in the breach-detection
+paragraph, supporting the point that nothing would tell us a breach had happened. That point
+still stands and the replacement says so: crash and sync reporting tells us our own software
+broke, not that someone got in. It is error reporting, not intrusion detection, and the
+paragraph would be misleading if the removal left a reader thinking otherwise.
 
 ## Deliberately not disclosed in the published documents
 

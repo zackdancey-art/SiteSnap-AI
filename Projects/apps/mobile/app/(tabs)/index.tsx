@@ -11,6 +11,7 @@ import {
 import { Ionicons, Feather } from "@expo/vector-icons";
 import { router } from "expo-router";
 import { useData } from "@/lib/data-context";
+import { SyncStatusBanner } from "@/components/SyncStatusBanner";
 import Colors from "@/constants/colors";
 import { Site } from "@/lib/types";
 import { TabScreenInsets, useTabScreenInsets } from "@/lib/useScreenInsets";
@@ -129,6 +130,8 @@ function SitesContent() {
           )}
         </View>
       </View>
+
+      <SyncStatusBanner />
 
       <FlatList
         data={filtered}

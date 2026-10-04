@@ -610,7 +610,31 @@ if (op.type === "addEntry") {
 
 **Verification required when it is fixed.** Mobile has no test harness (`find Projects/apps -name '*.test.ts*'` returns nothing), so the red-on-revert proof has to come from either the first mobile test setup or an API-side test that asserts the posted payload shape. A device pass alone cannot prove it, because the device displays the photographs whether or not they uploaded — which is the whole problem.
 
-**Disposition:** Open, unfixed, recorded 3 October 2026 from `fix/stage-1-field-app-defects`. Ranked first in `docs/STAGE-1-3-REVIEW.md` Part 8, ahead of every feature on the backlog.
+**Disposition:** **Fixed** on `fix/offline-photo-sync`, 4 October 2026. Proved red first (`7e843a8`), then fixed (`9832592`).
+
+The drain loop was extracted from `data-context.tsx` into `apps/mobile/lib/offline-drain.ts` as a pure, dependency-injected function, because the verification this entry says is required could not otherwise be written: `data-context.tsx` cannot load under `node --test`. The extraction was a **verbatim transcription including the defect**, the provider was rewired to call it, and only then was it fixed — so the module under test is the shipped path, not a parallel copy. `apps/mobile` now has its first test harness, 15 tests in 2 files, zero new dependencies, no native rebuild.
+
+The fix is that the drain uploads before it posts. The bytes wait in the AsyncStorage payload store that `savePhotoPayloads` already wrote at capture time, so they survive an app restart and a phone reboot; `lib/photo-bytes.ts` materialises them back to a cache file at drain time because `uploadPhotoOnce` sends from a `uri`, and releases it afterwards. Per-photograph progress is written back into the queued op, so a drain that fails on the fourth of four photographs retries one rather than four and does not duplicate the three already in the bucket.
+
+**L6 got better, not worse.** The queued path now calls `deletePhotoPayloads` after a successful sync, released *after* the dequeue so a crash in between orphans bytes rather than losing them. Before this branch nothing ever deleted a queued payload.
+
+**Closed by device evidence, 4 October 2026.** The test above proves the drain posts managed
+paths; it does not prove the bytes reached the bucket, and this entry's own "verification
+required" paragraph says a device pass cannot settle it either. What settled it was the sign
+call. Sixteen photographs on the portal's Photos tab were each issued a signed URL, and five of
+the sixteen upload ids carry the prefix `17910700…` — a `Date.now()` value of
+2026-10-03T23:26Z, the offline capture session. A signed URL is only issued for a path whose
+upload id has a row in the `uploads` table owned by the caller's company
+(`routes/uploads.ts:94-99`), and that row is written by `recordUpload` **after**
+`await storage.saveFile(...)` has returned (`routes/uploads.ts:47-56`) — a `saveFile` throw
+returns 500 and creates no row. The id is server-generated and cannot be supplied by the client.
+So a row for a last-night id means bytes were written for that id last night. The drain worked.
+
+The one thing this evidence does **not** establish is that the objects fetch under the exact
+filenames the entries record: `uploadBelongsToActorCompany` matches on id and company only, never
+on filename (`storage/uploadsStore.ts`), so a managed path with the right id and a wrong filename
+signs and then 404s. A successful GET would have closed that gap, and no GET was made — see
+**L48**, which is why.
 
 ### L29 — *(reserved)*
 
@@ -631,7 +655,11 @@ Not retrying a request the server has rejected is correct — an op that fails d
 
 **The correct shape** is a dead-letter state rather than a delete: mark the op failed, leave it in local storage, stop retrying it, and surface it in the UI as "this entry could not be synced" with the server's reason. That keeps the queue unblocked, which is what the `dequeue` was for, without destroying the record.
 
-**Disposition:** Open, unfixed. Fix alongside L28 — the same branch, and in that order, because an L28 fix that fails partway must not be silently swallowed by this.
+**Disposition:** **Fixed** on `fix/offline-photo-sync`, 4 October 2026 (`5e48e0b`). Dead-letter state rather than a delete, as this entry specified: `markOpFailed` sets `status: "failed"`, records the stage, HTTP status, the server's message, the time and how many photographs had already uploaded, and leaves the op in storage. Nothing in the app deletes a failed op.
+
+Visible from the app rather than from a log, in two places: a tappable banner on the sites list, and `app/settings/offline-sync.tsx` listing each failed op with what it was and why it failed. Retried by hand, not on a timer — the failures that land here have been refused on their merits, and the thing that has to change is usually outside the app, so the person who fixed it is the one who knows a retry is now worth making. There is deliberately **no discard action**: this is a compliance-evidence product and that deletion is the owner's decision, not a button.
+
+**A second defect in the same four lines, found while fixing this one.** The old loop `break`ed on *any* error, network or not. So one op the server refused did not merely vanish — it stopped every op queued behind it from being attempted at all, for as long as it sat at the head of the queue. Only a network error breaks now; a refusal dead-letters and the drain continues. Test: "a refused op does not stop the ops behind it".
 
 ### L31 — `EXPO_PUBLIC_SENTRY_DSN` is set in the **API's** `.env` and empty in the **mobile app's**, so there is no error telemetry from the field — MEDIUM (observability; the reason L28 and L30 would go unnoticed)
 
@@ -652,7 +680,127 @@ Nothing in the API reads an `EXPO_PUBLIC_`-prefixed variable — the prefix is E
 
 **One decision it creates rather than removes.** The Sentry init sets `attachScreenshot: true` (`apps/mobile/app/_layout.tsx:28`), so a crash report may carry a screenshot of a site photograph — which means supplying the mobile DSN sends image content to a US-hosted service and is a privacy decision, not a configuration switch. It is also the third US exposure path, alongside OpenAI and the legacy `us-east-1` bucket (see L32 and `docs/legal/README.md`). Recommended: `attachScreenshot: false` until L28 is closed.
 
-**Disposition:** Open. Owner action. Blocks nothing technically and blocks observing everything.
+**Disposition:** **Partly closed** on `fix/offline-photo-sync`, 4 October 2026 (`34b0cd2`, `5c0ed26`). The DSN half remains owner action and was not touched, read or printed. The two halves that were ours are done:
+
+**`attachScreenshot` is now `false`**, as this entry recommended. The reasoning is at the call site: a screenshot is a photograph of whatever was on screen, which on the capture screens is the note text, the site address and the photographs themselves — precisely what the redaction module below exists to withhold.
+
+**The failure modes now report themselves.** `lib/sync-telemetry.ts` raises a Sentry event for each of `queued-op-dead-lettered`, `queued-photo-upload-failed` and `queued-photo-bytes-missing`, de-duplicated per session so forty refused ops report forty distinct failures rather than forty copies of one. The payload rule is enforced by code rather than asserted in a comment: `lib/sync-telemetry-redaction.ts` imports nothing with a runtime and exports `transmittablePayload`, which *is* the whole payload, so its test asserts over all of it rather than over a sample. Identifiers and counts only. There is no `uri` field at all, so the signed-media `?sig=`/`?exp=` pair has nowhere to enter — the same closure as the logger fix, by structure rather than by filtering.
+
+Two leaks that were found while building it and are now closed: a server's own response message is withheld when a `status` is present, because we do not control what a 4xx body says and Stage 1's timecard validation echoes submitted values into it; and a server-originated `Error` is never handed to Sentry as the exception, because Sentry titles an issue with the exception's own message, which would have re-leaked in the title exactly what the payload had just withheld.
+
+**The disclosure consequence was carried, not deferred.** Section 5 of the published Privacy Policy said crash reports come from the server, and section 10 listed app crash reporting among the things not switched on. Both are now false and both were corrected in the canonical source and in both render copies, with the anti-drift check run to prove it (see L36 for the copies that check does not cover).
+
+### L36 — The supervisor portal publishes its **own** Privacy Policy and Terms, outside the anti-drift check, still carrying the superseded text — HIGH (disclosure accuracy; **confirmed live and publicly reachable 2026-10-04**, serving the 3 July draft plus two internal drafting notes)
+
+**Found while carrying the Sentry correction of L31, by grepping for other stale crash-reporting claims.**
+
+The October legal remediation replaced the canonical `docs/legal/` source, both in-app copies and both marketing-site copies — six files — and `Projects/scripts/ci.sh` was given an anti-drift check over exactly those six. `Projects/apps/supervisor-web/app/privacy/page.tsx` and `app/terms/page.tsx` are a **seventh and eighth** legal document. They were never touched, they carry no `BEGIN LEGAL TEXT` marker, and the drift check does not know they exist — so nothing reported the disagreement. The check passing is not evidence about them.
+
+**They are deployed and publicly reachable. Measured 2026-10-04, not inferred:**
+
+```
+$ dig +short app.getsitesnapai.com
+sitesnap-dashboard.onrender.com.
+gcp-us-west1-1.origin.onrender.com.
+216.24.57.18  216.24.57.16
+
+$ curl -sS -o /dev/null -L -w 'HTTP %{http_code}  %{content_type}  %{size_download}B\n' …
+https://app.getsitesnapai.com/           HTTP 200  text/html; charset=utf-8   6351B
+https://app.getsitesnapai.com/privacy    HTTP 200  text/html; charset=utf-8  30001B
+https://app.getsitesnapai.com/terms      HTTP 200  text/html; charset=utf-8  28452B
+https://app.getsitesnapai.com/login      HTTP 404  text/html; charset=utf-8   6695B
+```
+
+No authentication is required for either legal page. The served text was fingerprinted against
+the repo file and matches it, so `app/privacy/page.tsx` is what is being published. They are also
+linked from the portal UI in two places (`app/settings/page.tsx:623`,
+`components/ProfileDropdown.tsx:150`), but that is now the lesser fact: the URLs answer to
+anyone.
+
+**This contradicts two of our own records, and `docs/deploy-supervisor-web.md` is the one that
+matters.** That runbook opens "The Next.js supervisor dashboard (`Projects/apps/supervisor-web`)
+has **never been deployed**", and L26 recorded `app.getsitesnapai.com` as not resolving. Both are
+stale: a Render service `sitesnap-dashboard` exists, the custom domain is attached, and the app
+is serving. Whoever deployed it did not run the runbook's verification steps — `/login` is a 404,
+so the login route the runbook checks in step 1 either moved or was never built. **Fix the
+runbook's opening claim in the same pass as the pages**; a deploy runbook that says a live
+service has never been deployed is worse than no runbook.
+
+**The served date is `3 July 2026`** — not the 3 October pre-remediation text, the *July* draft.
+The canonical source and all three remediated copies read `4 October 2026`. So the portal is two
+revisions behind, not one.
+
+**Two internal drafting notes are being served to the public.** Neither appears in any of the
+three remediated copies:
+
+- A banner above the document: *"Draft — not yet in effect. This document requires legal review
+  and sign-off before SiteSnap onboards paying customers. The registered entity name must also be
+  confirmed and updated below once the company is incorporated in New Zealand."*
+  (`privacy/page.tsx:30`, and the same on `terms/page.tsx`.)
+- A reviewer's TODO inside the document body: *"Third-party processors are OpenAI,
+  Resend/SendGrid, Twilio, Sentry, and AWS S3 — **verify this remains current**."*
+  (`privacy/page.tsx:121`.)
+
+The banner cuts both ways and the aggravating direction is stronger. It does mean the page is not
+holding itself out as an operative policy, which is a real mitigation against the false claims
+below. But it publishes, on a page linked from the marketing site's "Manager sign-in" path, that
+the company is not yet incorporated and that its privacy policy has not had legal review — two
+sentences before the document says "SiteSnap AI Limited **is** a New Zealand company that
+operates the SiteSnap mobile application and supervisor web portal." A public self-contradiction
+about corporate existence is a worse disclosure problem than a stale processor list.
+
+**What they still say.** Nearly the whole table of "claims in the previous drafts that the code contradicts" in `docs/legal/README.md`, verbatim, still published:
+
+| Still live on the portal | Why it is false |
+|---|---|
+| "Usage data: anonymised analytics events to improve the product" (`privacy/page.tsx:53`) | There is no analytics SDK in the product at all |
+| "Improving the product through aggregate, anonymised analytics" (`:62`) | Same |
+| "Resend / SendGrid (USA)" (`:71`) | No `SENDGRID_API_KEY` is configured anywhere; SendGrid receives nothing |
+| "Deleted account data is permanently purged within 30 days" (`:80`) | There is no scheduled job of any kind in the API |
+| "Portability — request a machine-readable data export" (`:89`) | `backup-data.tsx` reads the device cache and omits timesheets, incidents, inspections, signatures, locations, photographs and the account record |
+| "All overseas transfers … comply with … IPP 12" (`:76`) | Asserts a conclusion with no analysis, about providers it places in the wrong countries |
+| Processor list: OpenAI, Resend/SendGrid, Twilio, Sentry, AWS S3 | **Omits Render entirely**, so the Singapore hosting leg — the one the whole Principle 12 position turns on — is undisclosed. Places S3 in no country. |
+| "Subscriptions are billed in advance in New Zealand Dollars" and "change pricing with 30 days' notice" (`terms/page.tsx:75`, `:107`) | There is no payment code in the repo. No Stripe, no RevenueCat, no in-app purchase dependency. The product cannot charge anyone. |
+
+The retention-period and HSWA wording is the same uncited seven-year claim already flagged as question 3 for a lawyer in `docs/legal/README.md`.
+
+**The generalisable part, and the reason severity is HIGH rather than MEDIUM.** The remediation was thorough about the copies it knew about and then *built a check over that same set*. A drift check can only prove the copies it enumerates agree; it cannot discover a copy. So the check's green result actively created confidence about documents it had never read — the same failure shape as L35 (a copy defect fixed at the layer nobody reads) and as the vacuity findings generally. **The right question after writing an anti-drift check is not "does it pass" but "how would I find a copy it does not list", and the answer here was one grep.**
+
+**Not fixed on `fix/offline-photo-sync`, deliberately.** Two reasons, and the first is the real one. Making these pages correct means rendering 2,612 and 1,308 words of reviewed legal text through a third layout, and the owner has twice reserved final say on published legal wording; replacing two complete legal documents inside a branch about offline photograph sync would also bury it in review and make it impossible to revert on its own. Extending the drift check to cover them *first* would simply turn CI red and block the branch. This is the next piece of legal work, not a line of this one.
+
+**What the fix is, when it is taken.** Port the reviewed canonical text into both portal pages as data rendered through their existing `Section` component (the shape `apps/mobile/constants/legal/*-content.ts` already proves), add the `BEGIN/END LEGAL TEXT` markers, and extend `assert_legal_copies` to compare three render targets per document instead of two — so that the check's green result finally means what it appears to mean. `docs/legal/README.md` records a deliberate decision against a permanent generator; a one-off transcription respects that.
+
+**Disposition:** Open, recorded 4 October 2026 from `fix/offline-photo-sync`. **Highest-priority disclosure item**, ahead of L32 and L33, because unlike those it is not a question of wording accuracy about a real feature — it is text the owner has already reviewed and replaced, still being served.
+
+### L37 — Nothing in the app rendered the sync state at all, so the badge the fix was to be verified against did not exist — MEDIUM (observability; the fix for L28 was unobservable by the same mechanism as L28)
+
+`data-context.tsx` has exposed `syncStatus`, `pendingCount` and `isPending` for as long as the queue has existed. **No component read any of them.** Grepped across `app/` and `components/`: before this branch there were zero renderers. There was no pending badge, no "waiting to send" indicator, and no surface of any kind that distinguished an entry held on the phone from an entry the server has.
+
+This is worth its own entry rather than a footnote on L28, because it is the same defect one level up. L28 was a silent data loss; this is the silence. A user had no way to know a write was still queued, so "it looks saved" was the only available signal — which is precisely the signal L28 made unreliable.
+
+It also made the obvious device-verification instruction unperformable. "Capture in airplane mode, turn the network on, wait for the badge to clear, then check from somewhere that is not the phone" cannot be followed on a build with no badge; the only honest substitute is to watch the pending count go to zero and then check the second surface.
+
+**Partly closed by `5e48e0b` on `fix/offline-photo-sync`**, which added the first two renderers: `components/SyncStatusBanner.tsx` on the sites list, and the Offline Sync row and screen in Settings. The banner renders nothing when there is nothing to say. That is a sync *surface*, not a per-entry badge — an individual entry in a list still does not show whether it has reached the server.
+
+**Disposition:** Partly open. The per-entry indicator is the remaining half and is the more useful one, because the question a person actually asks is "has *this* entry arrived", not "is anything pending".
+
+### L38 — Only `addSite` and `addEntry` are ever queued; an offline **edit or delete** fails and is lost — MEDIUM (data loss; narrower than L28 but the same silence)
+
+`drainOfflineQueue` has branches for `updateEntry`, `deleteEntry` and `deleteSite`. Nothing enqueues them. Grepping every `enqueue(` call site in `apps/mobile`: only `addSite` and `addEntry`. So three of the five `QueuedOpType` members are **unreachable** — dead branches that have never executed.
+
+The live half of the finding is what happens instead. `updateEntry` and `deleteEntry` have no network-error catch at all: offline, the `apiJson` call rejects and the error propagates to the caller. So editing an entry with no coverage — correcting a crew count, fixing a note, adding a photograph to yesterday's record — fails at the point of saving and is never queued for later. Whether the user is told depends on the calling screen, which is not the same guarantee as the capture path has.
+
+Discovered while fixing L28 and not expanded into, because adding three queued op types brings ordering and conflict questions with it (an edit queued behind the create of the entry it edits; a delete queued behind an edit) that are the offline-first architecture piece, not this branch. The dead branches were kept rather than deleted precisely because that work is coming.
+
+**Disposition:** Open, recorded 4 October 2026. Scope it with the offline-first architecture work rather than alone — the queue needs ordering guarantees before it can safely carry mutations.
+
+### L39 — The server accepts an entry photograph with a `file://` uri and no storage key — LOW (missing validation; the defect L28 would have announced itself through)
+
+`EntrySchema` types photographs as `z.array(z.record(z.unknown()))`, so the API will store whatever shape the client posts, including a photograph whose `uri` points at a path on a phone. Nothing rejects it and nothing warns.
+
+This is why it is recorded even though no client now sends one. For the months L28 was live, every offline-captured entry posted photographs the server could never serve, and **the server was in a position to notice and did not**. A validation rule rejecting an entry photograph without a managed storage key would have turned L28 from a silent data loss into a 400 on the first offline entry ever synced. The permissive schema is also why L28 needed no migration to fix — the same looseness that hid it let storage keys pass straight through — so this is a trade-off to decide deliberately rather than an oversight to patch reflexively.
+
+**Disposition:** Open. Worth adding as a server-side assertion once the client is known good, because it converts any future recurrence of this class of defect into a loud failure. Do not add it before the fixed client is actually deployed — it would reject entries queued by an older build that are still sitting on a phone.
 
 ### L32 — Camera GPS coordinates are extracted and persisted, while the published privacy text said they were not stored — MEDIUM (disclosure accuracy; the data itself is arguably wanted)
 
@@ -724,3 +872,383 @@ The promise a person actually reads is the `Alert` in the confirmation dialog, w
 **The generalisable part.** The item was found by grepping the API for promissory language, so it landed on the API's string. A copy defect found by searching the server is located at the wrong layer **by default** — mobile clients routinely discard response bodies. Fixing only what the grep found would have closed the item as done while changing nothing anybody reads, and the audit would have been wrong in a way that looked complete. When a finding is about what a person is told, the fix has to be traced to the surface that tells them.
 
 **Disposition:** No standing code issue. Recorded as a method note, in the manner of L25: check who renders a string before accepting that changing it fixed anything.
+
+---
+
+### L40 — An `eas update` published from a developer machine silently overrides the production build's API host with whatever the local `.env` says — MEDIUM (deploy integrity; the OTA path has no equivalent of `eas.json`'s per-profile `env`)
+
+**Found while answering whether `fix/offline-photo-sync` could be shipped over the air for the device pass.** Measured, not reasoned.
+
+`eas build` takes `EXPO_PUBLIC_API_URL` from the build profile's `env` block in `eas.json` — the `production` profile sets `https://api.getsitesnapai.com`, so that is what is inlined into the store binary. `eas update` does not use a build profile: it bundles **locally**, so `app.config.ts` and the Metro transform both see the publishing machine's environment, including `apps/mobile/.env`.
+
+What that resolves to on this machine today:
+
+```
+$ APP_ENV=production pnpm -C Projects --filter apps-mobile exec expo config --type public --json
+  runtimeVersion      : {"policy": "appVersion"}
+  updates.url         : https://u.expo.dev/0252315c-…
+  expo-updates plugin : present
+  extra.apiUrl        : 'https://sitesap-ai.onrender.com'      ← not api.getsitesnapai.com
+
+$ (APP_ENV unset → "development")
+  runtimeVersion      : ABSENT
+  updates.url         : ABSENT
+  expo-updates plugin : ABSENT
+  extra.apiUrl        : 'https://sitesap-ai.onrender.com'
+```
+
+So an OTA update published from here without an explicit override would move every production
+installation off the custom domain and onto the raw Render hostname. Both names currently answer
+from the same service (`api.getsitesnapai.com` is a CNAME to `sitesap-ai.onrender.com`), so **this
+does not break the app today** — which is precisely what makes it a finding rather than an
+incident. Nothing fails, nothing logs, and the installed app quietly stops depending on the name
+we control. The custom domain is the only thing that makes the host portable; an app pinned to
+`*.onrender.com` cannot be moved to another provider, or to a second Render service, without a
+further update.
+
+`resolveApiBaseUrl()` cannot catch this. Its two release guards reject an **empty** URL and a
+**localhost/plain-http** URL. `https://sitesap-ai.onrender.com` is neither, so it passes both and
+is used. The guards are correct for what they were written for; this is a different axis.
+
+**The `APP_ENV` half is already documented and is not the finding.** `app.config.ts:22-25` warns
+that `eas update` must carry `APP_ENV`, and the measurement above confirms it exactly: bare, there
+is no `runtimeVersion`, no updates URL and no `expo-updates` plugin. That one is a known trap with
+a written warning. The API host is the unwritten one, and it is worse because the `APP_ENV` mistake
+fails loudly at publish time while this one succeeds.
+
+**Fix (not taken here).** Either read the API URL for an update from the same single source the
+build profile uses, or add a publish-time assertion that refuses to publish to the `production`
+branch unless the resolved `extra.apiUrl` equals the `production` profile's `env` value in
+`eas.json`. The second is the cheaper one and fits the existing pattern — it is the same shape as
+`assert-ci-single-definition.sh` and `assert-babel-preset-expo.mjs`: a check whose whole purpose is
+that two definitions cannot drift without something reporting it. Until then the publish command
+must set it explicitly.
+
+**Disposition:** OPEN. No code change on `fix/offline-photo-sync`; recorded so the device pass does
+not publish an update that silently repoints the production app. Belongs with the next piece of
+release-path work, alongside fixing `docs/deploy-supervisor-web.md`'s stale opening claim (L36).
+
+### L41 — An upload response carrying no `url` wrote the **empty string** as the photograph's address and marked it uploaded — HIGH (data loss; a record asserting it holds evidence it does not hold)
+
+`uploadPhotoOnce` mapped the server's response to a stored address with one expression:
+
+```ts
+const canonicalPath = payload.url?.startsWith("/") ? payload.url : (payload.url || "");
+```
+
+Read the second fallback. A 200 response with no `url` — or a `null` one, or a `url` that is not a managed path — yields `""`. That empty string was then written as the photograph's `uri` and `storageKey`, the photograph was marked `uploaded: true`, the local bytes were released, and **nothing was emitted**: no throw, no dead-letter, no telemetry. Every layer above read a successfully uploaded photograph.
+
+That is the exact failure the `fix/offline-photo-sync` branch exists to eliminate, arrived at from the other end. L28 lost photographs because they were never sent; this loses them after they were sent, by forgetting where they went. It is worse in one respect — L28 left the bytes on the phone, where the queue could still find them, whereas this released them.
+
+Found while answering whether the branch's 11 drain tests covered the acceptance criterion. They do not: they inject a fake uploader, so the real response-mapping chain never executes in any test. The branch's whole claim — "a photograph is only ever marked uploaded when the server really holds it" — lived entirely on the untested side of that dependency seam.
+
+**Disposition:** FIXED on `fix/offline-photo-sync`, commit `23addf6`, its own commit. The mapping is now `canonicalUploadPathFromResponse` in `lib/photo-uri.ts`, which **throws** `UploadAddressMissingError` rather than returning a path it does not have; the caller reports `photo-upload-address-missing` telemetry and rethrows, so the photograph dead-letters like any other failed upload. The retry wrapper breaks on that error type specifically — a 200 with no address is not transient, and each retry would re-POST the bytes and orphan another object in the bucket. Eight tests, proven red on revert (7 of 8 failed with the old expression restored).
+
+### L42 — The supervisor portal signs photographs in **one** request capped at 50 paths, so a site with more than fifty photographs shows **zero** photographs — MEDIUM (feature failure; arrives on its own with time, on every site)
+
+`app/sites/[id]/page.tsx:185-187` pools photographs across the whole site's history:
+
+```ts
+const photos = useMemo(() => entries.flatMap((e) => (e.photos ?? [])), [entries]);
+```
+
+Not the visible date range, not a page — every entry the portal loaded. The signing effect then passes that entire array to `signUploadPaths` in a single call, and `POST /api/uploads/sign` refuses more than 50 paths with a **400 for the whole request** (`routes/uploads.ts:84-86`), not a partial result:
+
+```ts
+if (paths.length > 50) {
+  return res.status(400).json({ error: "Maximum 50 paths per sign request." });
+}
+```
+
+So the failure is all-or-nothing and it is not graceful: at 50 photographs the grid works, at 51 it is empty. On a site diary, where photographs accumulate daily and are never pruned, that threshold is crossed by roughly the end of the second week and then never uncrossed. The API's cap is correct — it bounds the HMAC work per request. The client's job is to chunk, and it does not.
+
+**Disposition:** Open, recorded 4 October 2026. Deliberately NOT fixed on `fix/offline-photo-sync`, which is a mobile-sync branch awaiting a merge decision; mixing a portal fix into it would make a single revert impossible. Belongs in the web-dashboard branch with L43, L44, L45 and L46 — they are all the same screen and the same afternoon.
+
+### L43 — The portal's signing failure is swallowed by `.catch(console.error)`, with no retry and no error state, and the per-path reason is discarded before it reaches the component — MEDIUM (observability; it is what makes L42 and L44 indistinguishable from an upload that never happened)
+
+Two separate discards, in two files.
+
+**The wholesale failure.** The signing effect ends `.catch(console.error).finally(() => setSigningPhotos(false))`. A 400 — L42's cap, say — therefore produces a browser console line and nothing else: no retry, no state, and a render that falls back to a grey tile with `📷 Loading…` (`page.tsx:93-94`). "Loading…" is not merely unhelpful, it is **wrong**: the load has finished and failed, and the word says it is still coming.
+
+**The per-path failure.** `POST /uploads/sign` already answers *why* each path failed — `error: "Invalid upload path."` when the path is not a managed uri, `error: "Not found."` when the upload record is not the caller's company's. The portal's client wrapper throws the field away at the type level:
+
+```ts
+export async function signUploadPaths(paths: string[]): Promise<{ path: string; url: string | null }[]> {
+  const data = await request<{ signed: { path: string; url: string | null }[] }>(…);
+  return data.signed;
+}
+```
+
+No `error` in either the declared type or the returned object, so the component cannot distinguish "this photograph was never uploaded" from "this photograph belongs to someone else" from "the request failed entirely" — three different diagnoses that render identically.
+
+This cost real time. Five grey tiles on a site page during the L28 device pass were consistent
+with four distinct causes, and the server had already sent the string that would have separated
+them.
+
+**And there is a fifth, which this entry's four did not cover.** The four enumerated what the
+*sign call* can return — not signed, signed `null` with `Invalid upload path.`, signed `null` with
+`Not found.`, or the whole request 400ing on L42's cap. The cause actually found on 4 October 2026
+sits **downstream of a complete success**: every path signed, and the browser then refused to load
+any of them, because the API origin is absent from the portal's own Content-Security-Policy
+`img-src` (**L48**). The GET was never issued. A grey tile is therefore consistent with five
+states, one of which the component cannot see at all — a CSP refusal is reported to the console by
+the browser, not to the fetch, so there is no promise to catch and nothing for an error state to
+hang off. Any fix for this entry that renders "failed" instead of "loading" must say which of the
+five, and the fifth is reachable only by listening for the document's `securitypolicyviolation`
+event.
+
+**Disposition:** Open, recorded 4 October 2026. Fix is small: surface `error` through the wrapper, render a failed tile as failed rather than as loading, and retry once. Web-dashboard branch.
+
+### L44 — The signing effect can wedge: its re-entrancy guard is read but not in its dependency array — LOW (concurrency; a third way a correctly uploaded photograph renders grey)
+
+```ts
+useEffect(() => {
+  if (tab !== "photos" || photos.length === 0 || signingPhotos) return;
+  …
+}, [tab, photos]);
+```
+
+`signingPhotos` is the guard against a second concurrent sign while one is in flight. It is read in the body and **absent from the deps**, so the effect does not re-run when it clears. The sequence that bites: the effect starts while `photos` is still partly loaded, `photos` then changes as the rest arrives, the re-run is turned away by the guard that is still `true`, and the guard's clearing schedules no further run. The later photographs are never signed, and nothing in the UI distinguishes that from L42 or L43.
+
+It needs `photos` to settle in two steps to happen at all, which is why it is LOW rather than MEDIUM — but the portal loads several collections in one `Promise.all` and a slow link is exactly where it would show.
+
+Noted rather than fixed: `eslint-plugin-react-hooks` would have flagged this, and installing it was deliberately declined because a repo-wide rule lights up files no current branch touches (see `docs/DECISIONS.md`). The decision stands; the consequence is that this class of defect is found by reading. Recorded so it is found once.
+
+**Disposition:** Open, recorded 4 October 2026. Web-dashboard branch, with L42 and L43 — all three are the same effect.
+
+### L45 — A diary generated from the portal is sent **no photographs at all**, so the AI has nothing visual to work from — MEDIUM (feature degradation; silent, and the product's headline feature)
+
+`lib/api.ts:180-189`:
+
+```ts
+entries: payload.entries.map((e) => ({
+  date: e.date, notes: e.notes, weather: e.weather, crewCount: e.crewCount, photos: [],
+})),
+```
+
+`photos: []` is a literal. Not a filter, not a fallback for a missing field — every entry is sent with an empty photograph array regardless of what it holds. The generator therefore sees notes, weather and crew counts only, for every diary generated from the portal, and the output is weaker in a way no one can see: it returns 200, it reads plausibly, and nothing records that the visual evidence was withheld.
+
+The mobile client does not do this, so the same site generates a materially different diary depending on which client asked — and the portal is the client a supervisor would use to produce the document that gets filed.
+
+This compounds C1's open half. A saved diary records no generator, model or prompt version; now it also does not record whether the generator was given the photographs. Two diaries on one site can differ for reasons the record cannot express.
+
+Found while scoping the Entries tab, not while looking for it.
+
+**Disposition:** Open, recorded 4 October 2026. Check whether `/api/generate-diary` wants canonical paths or signed URLs before changing it — if signed, this is coupled to L42's chunking, because a diary over a fortnight long will exceed 50 paths. Web-dashboard branch.
+
+### L46 — Invite emails are stored **as typed** while registration lowercases, so a mixed-case invitation can never be accepted — MEDIUM (feature failure; permanent for the affected invite, and the error message names the wrong cause)
+
+Neither invite schema normalises case:
+
+```ts
+// routes/projects.ts:292-295   and   routes/company.ts:76-79
+emails: z.array(z.string().email()).min(1).max(50),
+```
+
+Registration and login both do (`routes/auth.ts:114`: `.trim().toLowerCase()`). Acceptance compares the two with an exact string equality, in both the memory and the Postgres path:
+
+```ts
+if (invite.invitedEmail !== actorEmail) return "wrong_user";          // projectsStore.ts:1440
+if (invite.invited_email !== actorEmail) { … return "wrong_user"; }   // projectsStore.ts:1528
+```
+
+So an owner who types `Sam.Taylor@Example.com` into the invite box creates an invite bound to that exact string. The invited person signs up, becomes `sam.taylor@example.com`, and is refused `wrong_user` — a message meaning "this invitation is for somebody else". It is not: it is for them. The invite cannot be rescued by retrying, only by the owner re-issuing it in lower case, and nothing tells either party that is the fix. Email local-parts are case-sensitive per RFC 5321 and case-insensitive at every provider anyone uses, so storing what was typed is defensible in the abstract and wrong here, because the other half of the comparison has already normalised.
+
+The invite is not burned — the Postgres path deletes the row before checking and rolls back — so the token survives for the right person. There is no right person.
+
+Found while establishing whether a second test account could accept an invitation (the `TEST_PHONE_NUMBERS` work), by reading the acceptance path rather than by hitting it.
+
+**How addresses actually get capitalised — every email input audited.** The suspicion was the
+mobile app: iOS defaults a text field to sentence capitalisation, so a contractor inviting crew
+from a phone would produce a capitalised address every time. **The mobile app is clean on both
+counts** — all five of its email fields set `autoCapitalize="none"` and `keyboardType="email-address"`,
+and both invite screens already `.toLowerCase()` before sending (`app/site-invite.tsx:38`,
+`app/company-invite.tsx:33`).
+
+The exposed field was the **portal's**, which nobody suspected:
+
+| Where | Field | Keyboard props | Lowercased before send |
+|---|---|---|---|
+| mobile `app/signup.tsx:363` | email | `autoCapitalize="none"`, `keyboardType="email-address"` | API lowercases |
+| mobile `app/login.tsx:119` | email | both, plus `autoComplete`/`textContentType` | API lowercases |
+| mobile `app/forgot-password.tsx:176` | email | both, plus `autoComplete`/`textContentType` | API lowercases (`auth.ts:811`) |
+| mobile `app/site-invite.tsx:101` | invite emails | both | **yes**, `:38` |
+| mobile `app/company-invite.tsx:113` | invite emails | both | **yes**, `:33` |
+| web `app/page.tsx:61` | login email | `type="email"` — iOS does not autocapitalise these | API lowercases |
+| web `app/forgot-password/page.tsx:62` | email | `type="email"` | API lowercases |
+| **web `app/team/page.tsx:293`** | **invite emails** | **`type="text"`, no props — iOS autocapitalises** | **no** |
+
+One field, wrong on both axes, and it is the one a supervisor uses to bring their crew on. On a
+desktop browser there is no autocapitalisation, so this needed an iPad or a deliberately
+capitalised address to fire — which is why it is narrower than "every real user" and still wrong
+for the client most likely to be issuing invitations in bulk.
+
+**Also noted, not fixed:** `app/deliveries/[siteId].tsx:508` ("Phone or email", supplier contact)
+sets `keyboardType="email-address"` with no `autoCapitalize="none"`. It is freeform contact text
+that nothing matches on, so it is cosmetic rather than this finding.
+
+**Disposition:** PARTIALLY FIXED on `fix/offline-photo-sync` (the commit this paragraph lands in). The portal's invite
+field now sets `inputMode="email"`, `autoCapitalize="none"`, `autoCorrect="off"` and
+`spellCheck={false}`, and `handleInvite` lowercases each address before it leaves the browser. The
+second of those is the one that closes it: the keyboard props only cover the mobile-keyboard case,
+while normalising at submit covers a paste, an autocomplete and a deliberately capitalised address
+too. `type` stays `"text"` rather than `"email"` because the field takes several addresses and the
+browser's single-address validation would reject the list.
+
+**The server half remains OPEN**, and it is the real fix: the two schemas should lowercase
+(`routes/projects.ts:293`, `routes/company.ts:77`), with a backfill of
+`site_invites.invited_email` for rows not yet accepted. That is a migration, so it is the
+orchestrator's to number and is deliberately not bundled into a feature branch. Until it lands,
+an invitation issued by any client **other** than these three — a direct API call, a future
+client, a replayed request — can still create an unacceptable invite, and existing capitalised
+rows stay broken. For those: **re-issue in lower case.**
+
+### L47 — The portal counts entries on the overview and offers no way to see them — LOW (completeness; the count is the only evidence they exist)
+
+`TABS` (`page.tsx:19-27`) has seven tabs — Overview, Timesheets, Incidents, Inspections, Dockets, Photos, Reports. There is no Entries tab. The overview nevertheless leads with an Entries metric card (`page.tsx:300`):
+
+```ts
+{ label: "Entries", value: entries.length, icon: "📄", color: "var(--primary)" },
+```
+
+`entries` is loaded, filtered and used to derive the photograph grid and the diary payload, so the data is present in the client the whole time. A supervisor can therefore see that a site has 43 entries and cannot open one — on a product whose unit of record *is* the entry. Every other metric on that row has a tab behind it.
+
+Not a defect so much as an unfinished screen, recorded because the count makes it look finished.
+
+**Disposition:** Open, recorded 4 October 2026. This is the scoped Entries tab, and it is the reason the web-dashboard branch exists; L42–L45 are the defects it will sit on top of.
+
+### L48 — The portal's Content-Security-Policy omits the API origin from `img-src`, so **every photograph on the portal is refused by the browser** — HIGH (feature failure; total, silent, and affects every site on every load)
+
+**Where the policy is set: `Projects/apps/supervisor-web/next.config.mjs:16-48`** — a `cspDirectives`
+string joined at module scope and emitted by Next's `async headers()` for `source: "/(.*)"`. Not
+middleware, not a `<meta http-equiv>` tag. (There is a stray `index.html` at the portal root — a
+legacy standalone page predating the app router — and it carries no CSP meta; nothing else in the
+repo sets one. The API deliberately disables Helmet's own CSP, `services/api/src/server.ts:139`,
+which is correct: it serves JSON and signed media, not HTML.)
+
+The policy as shipped:
+
+```js
+const cspDirectives = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+  "style-src 'self' 'unsafe-inline'",
+  // img-src already defined above with tile server
+  `connect-src 'self' ${apiOrigin(process.env.NEXT_PUBLIC_API_URL)} https://*.tile.openstreetmap.org`,
+  "img-src 'self' data: blob: https://*.tile.openstreetmap.org",
+  "font-src 'self'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join("; ");
+```
+
+**The defect is one word of asymmetry.** `connect-src` interpolates `apiOrigin(...)`. `img-src`
+does not. So the portal is permitted to *ask* the API for signed URLs and forbidden to *load* what
+it gets back. Console, repeated for all sixteen photographs on a site's Photos tab:
+
+```
+Refused to load https://api.getsitesnapai.com/api/uploads/<id>/<file>.jpg?sig=…&exp=…
+because it does not appear in the img-src directive of the Content Security Policy.
+```
+
+Note the comment on the line above `connect-src`: *"img-src already defined above with tile
+server"*. It is defined *below*, and without the API origin. That comment is the fingerprint — the
+tile server was added to both directives in one edit and the API origin was added to only one, and
+the comment was left asserting the opposite.
+
+**Why nothing reported it.** A CSP refusal is not a failed request. The browser blocks it before
+any network activity, reports it to the console and to the document's `securitypolicyviolation`
+event, and the `<img>` fires `onerror` with no status — so the portal's own code cannot tell this
+from a 404, and L43's `.catch(console.error)` never runs because no promise rejected. There is no
+`report-uri` or `report-to` directive, so no violation has ever left a browser. This is the whole
+reason it survived to be diagnosed by reading a console by hand.
+
+#### The rest of the policy, audited directive by directive
+
+The instruction was to audit the whole thing rather than append one origin, on the reasoning that a
+policy blocking its own API is likely blocking more. It is — though the largest finding is the
+opposite shape: a directive that blocks nothing.
+
+| Directive | Verdict |
+|---|---|
+| `default-src 'self'` | Correct as a floor. Worth knowing what it silently governs: `media-src`, `frame-src`, `child-src`, `worker-src`, `manifest-src` and `prefetch-src` all have no explicit directive and so inherit `'self'`. **`media-src` is the next L48 waiting to happen** — the moment any video or audio evidence is served from the API it is refused exactly as the photographs are, with the same silence. |
+| `script-src 'self' 'unsafe-inline' 'unsafe-eval'` | **The real security finding.** Both relaxations ship to production unconditionally; the inline comment says *"needed for Next.js dev HMR; tighten in prod if possible"* and nothing makes it conditional. With `'unsafe-inline'` present the directive stops being an XSS control in any meaningful sense — an injected `<script>` or an `onclick` attribute executes, and `'unsafe-eval'` additionally permits `eval`/`new Function` on attacker-controlled strings. This is a portal holding other companies' site evidence behind a cookie session. The correct fix is a **per-request nonce**, which cannot be done from `headers()` at all (the value there is computed once at build) — it requires moving the CSP into `middleware.ts`, which the portal does not currently have. That is a bigger change than this entry's title and belongs in its own commit. |
+| `style-src 'self' 'unsafe-inline'` | Effectively forced: Next's App Router and Leaflet both inject inline `<style>`/`style=`. Nonce-able along with the scripts; much lower severity, since inline CSS exfiltration requires more than injection. |
+| `connect-src 'self' <apiOrigin> https://*.tile.openstreetmap.org` | Correct, and **it is the pattern `img-src` should copy**. One build-time hazard to record: `apiOrigin()` falls back to `'self'` when `NEXT_PUBLIC_API_URL` is absent, and `next.config.mjs` runs at **build** time, so an env var supplied only at runtime bakes a CSP that blocks the API entirely with no build error. Production demonstrably has it at build time — the sign call succeeds — so this is a trap for a future deploy, not a live fault. |
+| `img-src 'self' data: blob: https://*.tile.openstreetmap.org` | **The finding.** Add `${apiOrigin(process.env.NEXT_PUBLIC_API_URL)}`. `data:` and `blob:` are both genuinely needed (Leaflet marker data URIs; any client-side object URL) and are low-risk for images. |
+| `font-src 'self'` | Correct. Verified no Google Fonts or `@font-face` to a remote host in `app/`, `components/`, `lib/` or `styles.css`. |
+| `object-src 'none'` | Correct and worth keeping. Note it forecloses one plausible future: a PDF report rendered in an `<object>`/`<embed>` would need `object-src` widened, and `frame-src` too since it inherits `'self'`. |
+| `base-uri 'self'`, `form-action 'self'` | Correct. |
+| `frame-ancestors 'none'` | Correct, and consistent with the `X-Frame-Options: DENY` on the line below. |
+| *missing* `report-to` / `report-uri` | **The second-order finding, and arguably the more important one.** The policy has been refusing all site photography in production and the only record of it is a console the developer had to open. A reporting endpoint would have surfaced this on the day it shipped. Any widening of this policy should land together with a reporting directive, or the next L48 is diagnosed the same way this one was. |
+| *missing* `upgrade-insecure-requests` | Low value here — every origin referenced is already `https:` — but harmless and it closes a mixed-content foot-gun. |
+
+**No Sentry browser SDK is present in the portal** (`package.json` lists only `leaflet`,
+`react-leaflet`, `next`, `react`, `react-dom`), so no `connect-src` entry for an ingest host is
+needed. Worth stating because the privacy page lists Sentry as a processor, which is true of the
+API and not of this client; if a browser SDK is ever added, `connect-src` needs its ingest origin
+or every error report is silently refused by this same policy.
+
+**Disposition:** Open, recorded 4 October 2026. Deliberately not fixed on
+`fix/offline-photo-sync` — that branch is a mobile-sync branch being merged, and a portal CSP
+change in it could not be reverted alone. L48 blocks L42–L44: until the photographs can load at
+all, no fix to the signing path can be verified end to end.
+
+**Split across two branches, by owner decision, 4 October 2026.**
+
+*Web-dashboard branch — its first item, two commits:*
+
+1. Add `${apiOrigin(process.env.NEXT_PUBLIC_API_URL)}` to `img-src` and delete the stale comment
+   on the line above `connect-src`. One line; the photographs load.
+2. Add a `report-to`/`report-uri` endpoint **together with** explicit `media-src` and `frame-src`
+   directives. These belong in one commit and that is deliberate: the reporting endpoint is what
+   makes a future omission announce itself, and `media-src` is the omission already known about.
+   The first time this product serves **video** evidence it fails exactly as the photographs did
+   and exactly as silently, because `media-src` has no directive and inherits `default-src 'self'`.
+   That is not to be left for the day it bites — the whole lesson of this finding is that an
+   inherited restrictive default is invisible until a user hits it.
+
+*Its own branch, with its own review — NOT riding in behind a photograph fix:*
+
+3. The `script-src` nonce migration. It requires a `middleware.ts` computing a per-request nonce,
+   because `headers()` is evaluated once at build and cannot produce one. That makes it a security
+   change to how **every page** of a portal holding other companies' site evidence is served, and
+   it gets reviewed as one rather than as a line in a CSS-and-images commit. Recorded here with the
+   rest of L48 so the policy is described in one place; scheduled separately.
+
+### L49 — The portal hydrates with server/client HTML mismatches — React `#418`, `#423`, `#425` — LOW (correctness and performance; recorded from console evidence, cause not yet located)
+
+Observed in the production portal console on 4 October 2026 alongside L48, on the site detail page.
+The three codes decode as follows — taken from React's published error index
+(`curl -sL https://react.dev/errors/418` and the same for 423 and 425, 4 October 2026), not from
+memory, because a minified code is useless if the mapping is wrong:
+
+- **`#418`** — "Hydration failed because the server rendered %s didn't match the client."
+- **`#423`** — "There was an error while hydrating but React was able to recover by instead client rendering the entire root."
+- **`#425`** — "Text content does not match server-rendered HTML."
+
+Together they say the server-rendered markup and the first client render disagree, that at least
+part of the disagreement is rendered **text**, and that React could not patch it up locally and so
+discarded the server HTML and re-rendered the whole root on the client. The consequence is not a
+visible break — 423 is explicitly the recovery — but the SSR work is thrown away on every load, and
+a root that falls back to client rendering can briefly show nothing where it should show content.
+
+(The index at react.dev tracks current React; the portal is on `react` ^18.3. The codes are stable
+across those versions and the sense is unchanged, but the 18.x wording of 418 and 423 is phrased
+slightly differently — "the initial UI does not match what was rendered on the server", and a
+mention of the mismatch falling outside a Suspense boundary. Noted so the quoted strings are not
+mistaken for a verbatim copy of what 18.3 would print in development.)
+
+**Not yet diagnosed, deliberately.** The codes are minified and the cause is a specific element, so
+locating it wants the development build's unminified message rather than a guess. The usual
+suspects in this codebase, in the order worth checking: a date or time formatted with the viewer's
+locale/timezone (server and browser differ), anything reading `localStorage`, `document` or
+`window` during the first render, and a `Date.now()`/`Math.random()` value in rendered output. The
+portal authenticates by httpOnly cookie, so a component that renders one way before the session is
+known and another way after is also a candidate.
+
+**Disposition:** Open, recorded 4 October 2026, for the web-dashboard branch. Secondary to L42–L48:
+it degrades the page rather than breaking it. First step is `pnpm -C Projects --filter
+sitesnap-supervisor-web run dev` and reading the full message, not a code change.

@@ -7,6 +7,7 @@
     "start": "npx expo start --lan --clear",
     "dev": "npx expo start --lan --clear",
     "typecheck": "pnpm exec tsc --noEmit",
+    "test": "rm -rf dist-test && pnpm exec tsc -p tsconfig.test.json && ./scripts/run-tests.sh",
     "lint": "eslint . --ext .ts,.tsx --ignore-path ../../.eslintignore",
     "prebuild": "npx expo prebuild --clean"
   },

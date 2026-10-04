@@ -25,7 +25,15 @@ if (sentryDsn) {
     dsn: sentryDsn,
     environment: __DEV__ ? "development" : "production",
     tracesSampleRate: __DEV__ ? 1.0 : 0.2,
-    attachScreenshot: true,
+    // Deliberately off, and the Privacy Policy says so.
+    //
+    // A screenshot is a photograph of whatever was on screen when the app
+    // crashed, which on the capture screens is the note text, the site address
+    // and the photographs themselves. `lib/sync-telemetry-redaction.ts` exists
+    // to keep exactly that content out of a telemetry payload; attaching a
+    // picture of it would make that work pointless. Do not turn this on without
+    // deciding, in writing, what a crash on new-entry.tsx is allowed to send.
+    attachScreenshot: false,
     enableNativeFramesTracking: true,
     sendDefaultPii: false,
     beforeSend(event) {

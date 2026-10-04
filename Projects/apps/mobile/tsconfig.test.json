@@ -1,0 +1,43 @@
+{
+  "//": [
+    "Build for `pnpm --filter apps-mobile run test`.",
+    "",
+    "Separate from tsconfig.json because the package's own program is an Expo",
+    "app: it includes .tsx screens, JSX, expo-router and React Native globals,",
+    "none of which node can load. This config compiles ONLY the modules that",
+    "are free of them, to plain CommonJS that `node --test` can require.",
+    "",
+    "`files` is an explicit list rather than a glob on purpose. A module can be",
+    "added here only by someone who has checked it has no React Native import,",
+    "and the compile fails loudly rather than the test silently pulling a",
+    "native module in."
+  ],
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": false,
+    "incremental": false,
+    "noEmit": false,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "rootDir": ".",
+    "outDir": "dist-test",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "types": ["node"]
+  },
+  "references": [],
+  "include": [],
+  "files": [
+    "lib/test-setup.ts",
+    "lib/types.ts",
+    "lib/photo-uri.ts",
+    "lib/photo-uri.test.ts",
+    "lib/offline-queue.ts",
+    "lib/photo-payload-store.ts",
+    "lib/sync-telemetry-redaction.ts",
+    "lib/sync-telemetry-redaction.test.ts",
+    "lib/offline-drain.ts",
+    "lib/offline-drain.test.ts"
+  ]
+}

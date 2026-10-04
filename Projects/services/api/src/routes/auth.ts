@@ -24,6 +24,7 @@ import {
 } from "../storage/authStore";
 import { acceptSiteInvite, deleteAllUserProjectData } from "../storage/projectsStore";
 import { soloCompanyIdForEmail } from "../utils/authToken";
+import { isTestPhoneNumber, normalizePhone } from "../utils/phoneNumbers";
 import {
   isChannelConfigured,
   sendAccountVerification,
@@ -72,13 +73,6 @@ const hasDatabase = Boolean(process.env.DATABASE_URL && process.env.DATABASE_URL
 
 function isValidEmail(email: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-}
-
-function normalizePhone(phone: string) {
-  const trimmed = phone.trim();
-  const hasPlus = trimmed.startsWith("+");
-  const digits = trimmed.replace(/\D/g, "");
-  return `${hasPlus ? "+" : ""}${digits}`;
 }
 
 function makeResetToken(): string {
@@ -446,7 +440,16 @@ router.post("/auth/register/verify", async (req, res) => {
       await createCompany({ id: companyId, name: resolvedName, ownerEmail: email });
     }
 
-    await createUser(email, passwordHash, pending.phone, fullName, legacyRole, companyId, companyRole);
+    // TEST_PHONE_NUMBERS: a listed number is exempt from the uniqueness index
+    // and from nothing else. Both verification codes have already been checked
+    // above — this is reached only after a real SMS was answered — and the
+    // exemption works by storing no phone on the row rather than by relaxing
+    // the constraint, so an unlisted number's path through here is unchanged
+    // and no migration is involved. See utils/phoneNumbers.ts for why the
+    // partial index makes that possible, and for the one consequence: such a
+    // row cannot be looked up by phone.
+    const phoneToStore = isTestPhoneNumber(pending.phone) ? null : pending.phone;
+    await createUser(email, passwordHash, phoneToStore, fullName, legacyRole, companyId, companyRole);
     await deletePendingRegistration(email);
 
     // Invited join: consume the invite now that the user row exists.
