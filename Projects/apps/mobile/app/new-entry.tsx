@@ -18,6 +18,7 @@ import * as ImagePicker from "expo-image-picker";
 import * as Crypto from "expo-crypto";
 import DateTimePicker, { DateTimePickerEvent } from "@react-native-community/datetimepicker";
 import { useData, type SaveProgress } from "@/lib/data-context";
+import { ensureCameraAccess } from "@/lib/camera-access";
 import { CAPTION_MAX_LENGTH, createStoredPhoto } from "@/lib/photo-capture";
 import Colors from "@/constants/colors";
 import { AnnotationVector, HourlyNote, Photo } from "@/lib/types";
@@ -336,13 +337,11 @@ export default function NewEntryScreen() {
     if (pickingPhoto) return;
     setPickingPhoto(true);
     try {
-      if (!cameraPermission?.granted) {
-        const result = await requestCameraPermission();
-        if (!result.granted) {
-          Alert.alert("Permission Required", "Camera access is needed to take photos.");
-          setPickingPhoto(false);
-          return;
-        }
+      // Says what is wrong in plain words and offers the way out when iOS will
+      // not prompt again. AUDIT L57.
+      if (!(await ensureCameraAccess(cameraPermission, requestCameraPermission))) {
+        setPickingPhoto(false);
+        return;
       }
 
       const result = await ImagePicker.launchCameraAsync({

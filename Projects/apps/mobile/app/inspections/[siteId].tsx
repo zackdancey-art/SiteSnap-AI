@@ -20,6 +20,7 @@ import { AnnotatedImage } from "@/components/AnnotatedImage";
 import { PhotoAnnotator } from "@/components/PhotoAnnotator";
 import { getApiBaseUrl } from "@/lib/api-base-url";
 import { useData, uploadPhotos } from "@/lib/data-context";
+import { ensureCameraAccess } from "@/lib/camera-access";
 import { CAPTION_MAX_LENGTH, createStoredPhoto } from "@/lib/photo-capture";
 import {
   hydratePhotosFromMap,
@@ -627,12 +628,10 @@ export default function InspectionsScreen() {
     try {
       let asset: ImagePicker.ImagePickerAsset | undefined;
       if (source === "camera") {
-        if (!cameraPermission?.granted) {
-          const result = await requestCameraPermission();
-          if (!result.granted) {
-            Alert.alert("Permission Required", "Camera access is needed to take photos.");
-            return;
-          }
+        // Says what is wrong in plain words and offers the way out when iOS
+        // will not prompt again. AUDIT L57.
+        if (!(await ensureCameraAccess(cameraPermission, requestCameraPermission))) {
+          return;
         }
         const result = await ImagePicker.launchCameraAsync({
           mediaTypes: ["images"],
