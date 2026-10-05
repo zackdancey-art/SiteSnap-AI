@@ -336,8 +336,15 @@ export default function SiteDetailScreen() {
         </View>
       )}
 
+      {/* `flex: 1` and not the default: a RN flex child's `flex: 1` resolves
+          flexBasis to ZERO points rather than `auto`
+          (ReactCommon/yoga/yoga/node/Node.cpp, processFlexBasis), so the list
+          stops contributing its full content height to the column's base sum
+          and takes the remaining space instead. Without it the column
+          overflows and the shrink pass eats the action bar above. AUDIT L58. */}
       <FlatList
         data={entries}
+        style={styles.entryList}
         keyExtractor={(item) => item.id}
         renderItem={({ item }) => <EntryCard entry={item} />}
         contentContainerStyle={[styles.listContent, { paddingBottom: 40 }]}
@@ -535,8 +542,38 @@ const styles = StyleSheet.create({
   progressStepTextActive: {
     color: Colors.white,
   },
+  /**
+   * Why all three properties, and not just `flexGrow: 0`.
+   *
+   * `ScrollView` composes its own base style under the one passed in:
+   *
+   *   const baseStyle = horizontal ? styles.baseHorizontal : styles.baseVertical;
+   *   … style: StyleSheet.compose(baseStyle, this.props.style)
+   *   baseHorizontal: { flexGrow: 1, flexShrink: 1, flexDirection: 'row', overflow: 'scroll' }
+   *   (react-native/Libraries/Components/ScrollView/ScrollView.js, RN 0.81.5)
+   *
+   * `StyleSheet.compose` merges per PROPERTY, so `{ flexGrow: 0 }` overrode
+   * flexGrow and left `flexShrink: 1` in force — this bar was still shrinkable.
+   * Its siblings in `container` (a definite-height flex column) are the navy
+   * header, the search field and the entry list; the list is a vertical
+   * ScrollView whose flexBasis is `auto`, i.e. its whole content height. Once
+   * there are enough entries that the children's bases exceed the screen, Yoga
+   * runs the shrink pass, and the only two shrinkable children are this bar
+   * (basis ~68pt) and the list. The bar therefore absorbed 68/(68+content) of
+   * the overflow: its 44pt buttons were cut off vertically, clipped
+   * horizontally by `overflow: 'scroll'`, and the search field below sat where
+   * the bottom of the bar should have been.
+   *
+   * That is why it only appeared with data — the search bar is gated on
+   * `allEntries.length > 0` AND the overflow grows with the entry count — and
+   * why nothing was absolutely positioned or z-indexed. Same mechanism as
+   * AUDIT L27 (`components/SignaturePad.tsx`), whose `padRoot` carries the same
+   * three properties for the same reason. AUDIT L58.
+   */
   actionBarScroll: {
     flexGrow: 0,
+    flexShrink: 0,
+    flexBasis: "auto",
   },
   actionBar: {
     flexDirection: "row",
@@ -587,6 +624,9 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontFamily: "Inter_400Regular",
     color: Colors.text,
+  },
+  entryList: {
+    flex: 1,
   },
   listContent: {
     paddingHorizontal: 16,
