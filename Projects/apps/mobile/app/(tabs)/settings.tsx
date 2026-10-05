@@ -168,23 +168,35 @@ function SettingsContent() {
               onPress={() => router.push("/settings/data-privacy")}
             />
             <SettingsDivider />
-            <SettingsRow
-              icon={failedOps.length > 0 ? "alert-circle-outline" : "cloud-upload-outline"}
-              label="Offline Sync"
-              // The row says the count itself rather than only leading to it:
-              // "did not send" has to be legible without opening anything.
-              // AUDIT L30.
-              description={
-                failedOps.length > 0
-                  ? `${failedOps.length} ${failedOps.length === 1 ? "item" : "items"} did not send.`
-                  : pendingCount > 0
-                    ? `${pendingCount} ${pendingCount === 1 ? "item" : "items"} waiting for coverage.`
-                    : "Everything on this phone has been sent."
-              }
-              danger={failedOps.length > 0}
-              onPress={() => router.push("/settings/offline-sync")}
-            />
-            <SettingsDivider />
+            {/* Rendered ONLY when there is something to show. The row used to be
+                permanent and said "Everything on this phone has been sent." to
+                almost everyone who ever opened Settings — a row whose usual
+                content is that nothing is wrong is a row that teaches people to
+                stop reading it, and it buried the one state that matters.
+
+                Nothing is lost by hiding it: a failed sync still reaches the
+                user through SyncStatusBanner on the sites list
+                (app/(tabs)/index.tsx) without their going looking, and this row
+                reappears the moment anything is pending or failed. AUDIT L30. */}
+            {(failedOps.length > 0 || pendingCount > 0) && (
+              <>
+                <SettingsRow
+                  icon={failedOps.length > 0 ? "alert-circle-outline" : "cloud-upload-outline"}
+                  label="Offline Sync"
+                  // The row says the count itself rather than only leading to
+                  // it: "did not send" has to be legible without opening
+                  // anything. AUDIT L30.
+                  description={
+                    failedOps.length > 0
+                      ? `${failedOps.length} ${failedOps.length === 1 ? "item" : "items"} did not send.`
+                      : `${pendingCount} ${pendingCount === 1 ? "item" : "items"} waiting for coverage.`
+                  }
+                  danger={failedOps.length > 0}
+                  onPress={() => router.push("/settings/offline-sync")}
+                />
+                <SettingsDivider />
+              </>
+            )}
             <SettingsRow
               icon="mail-outline"
               label="Support"
