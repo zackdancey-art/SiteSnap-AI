@@ -26,9 +26,23 @@ const ASYNC_STORAGE = "@react-native-async-storage/async-storage";
 
 const store = new Map<string, string>();
 
+/**
+ * How many times the substitute's `getItem` has been called.
+ *
+ * Counted because "how many times did this read storage" is itself a
+ * correctness property on a phone, not a performance footnote: the photograph
+ * payload map holds the device's whole base64 backlog in one key, so a read of
+ * it costs megabytes and a loop of reads costs megabytes times the loop.
+ * AUDIT L56 was exactly that, and nothing could have failed over it.
+ */
+let getItemCalls = 0;
+
 /** The substitute. Same surface the two modules under test actually use. */
 export const memoryAsyncStorage = {
-  getItem: async (key: string): Promise<string | null> => (store.has(key) ? store.get(key)! : null),
+  getItem: async (key: string): Promise<string | null> => {
+    getItemCalls += 1;
+    return store.has(key) ? store.get(key)! : null;
+  },
   setItem: async (key: string, value: string): Promise<void> => {
     store.set(key, value);
   },
@@ -45,6 +59,12 @@ export const memoryAsyncStorage = {
 
 export function resetAsyncStorageForTests(): void {
   store.clear();
+  getItemCalls = 0;
+}
+
+/** Read count since the last reset. See `getItemCalls`. */
+export function asyncStorageGetItemCount(): number {
+  return getItemCalls;
 }
 
 /** Byte count held in the substitute store, per key. Used to prove cleanup. */

@@ -21,7 +21,12 @@ import { PhotoAnnotator } from "@/components/PhotoAnnotator";
 import { getApiBaseUrl } from "@/lib/api-base-url";
 import { useData, uploadPhotos } from "@/lib/data-context";
 import { CAPTION_MAX_LENGTH, createStoredPhoto } from "@/lib/photo-capture";
-import { hydratePhotos, savePhotoPayloads, stripPhotoArray } from "@/lib/photo-payload-store";
+import {
+  hydratePhotosFromMap,
+  readPhotoPayloadMap,
+  savePhotoPayloads,
+  stripPhotoArray,
+} from "@/lib/photo-payload-store";
 import { ScreenHeader } from "@/components/ScreenHeader";
 import { AnnotationVector, Photo } from "@/lib/types";
 
@@ -333,14 +338,22 @@ export default function InspectionsScreen() {
       ]);
       // Re-attach base64 from the local payload store (same source hydrateEntriesWithPhotoPayloads
       // reads) so checklist photos are displayable/exportable, matching the entry-photo flow.
-      const hydratedInspections = await Promise.all(
-        inspData.inspections.map(async (insp) => ({
-          ...insp,
-          results: await Promise.all(
-            insp.results.map(async (r) => ({ ...r, photos: await hydratePhotos(r.photos ?? []) }))
-          ),
-        }))
-      );
+      //
+      // ONE read of the payload map for the whole screen. This was previously
+      // `await hydratePhotos(...)` per checklist result inside a nested
+      // Promise.all, which is one `getItem` plus one `JSON.parse` of the
+      // device's ENTIRE base64 backlog per checklist item, all in flight at
+      // once — a site with ten inspections of twenty items each re-read and
+      // re-parsed the same tens of megabytes two hundred times concurrently,
+      // whether or not any of those items had a photograph. AUDIT L56.
+      const payloadMap = await readPhotoPayloadMap();
+      const hydratedInspections = inspData.inspections.map((insp) => ({
+        ...insp,
+        results: insp.results.map((r) => ({
+          ...r,
+          photos: hydratePhotosFromMap(r.photos ?? [], payloadMap),
+        })),
+      }));
       setInspections(hydratedInspections);
       setTemplates(tplData.templates);
     } catch (err) {
@@ -543,9 +556,12 @@ export default function InspectionsScreen() {
       // The server echoes back the stripped (base64-less) photos — re-hydrate from the local
       // payload store, same as data-context's hydrateEntriesWithPhotoPayloads, so thumbnails
       // don't disappear from the screen after every save.
-      const hydratedResults = await Promise.all(
-        inspection.results.map(async (r) => ({ ...r, photos: await hydratePhotos(r.photos ?? []) }))
-      );
+      // One read for the whole inspection, as in `load()` above. AUDIT L56.
+      const payloadMap = await readPhotoPayloadMap();
+      const hydratedResults = inspection.results.map((r) => ({
+        ...r,
+        photos: hydratePhotosFromMap(r.photos ?? [], payloadMap),
+      }));
       const hydratedInspection: Inspection = { ...inspection, results: hydratedResults };
       setShowActive((prev) => (prev && prev.id === id ? hydratedInspection : prev));
       setInspections((prev) => prev.map((i) => (i.id === id ? hydratedInspection : i)));
