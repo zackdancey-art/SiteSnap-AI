@@ -1730,3 +1730,199 @@ where a verification method goes quietly wrong. So the rule has to be stated car
 `docs/evidence/part1b/` carries before/after screenshots at 390×844, the CORP A/B control, and the
 measurements. Not yet automated, and deliberately not proposed as a CI gate until it has been run
 by hand a few more times.
+
+### L56 — The inspections screen re-read and re-parsed the device's entire photograph backlog once per checklist item, concurrently, on mount — HIGH (crash; "tapping Inspections ejects me from the app", and it worsens with every photograph taken)
+
+`app/inspections/[siteId].tsx` → `load()` called `await hydratePhotos(r.photos ?? [])` **once per
+checklist result**, inside a nested `Promise.all` so every call was in flight at once.
+`hydratePhotos` reads `sitesnap.photoPayloads` — **one** AsyncStorage key holding the base64 of
+every un-uploaded photograph on the device — and `JSON.parse`s it whole.
+
+So the cost is `getItem` + `JSON.parse` over the device's entire backlog, **per checklist item**,
+whether or not that item has a photograph. A site with ten inspections of twenty items each is two
+hundred concurrent copies of a multi-megabyte string, held twice over (raw and parsed), during one
+screen mount. `patchActive()` had the same shape.
+
+**What it is not**, each ruled out rather than assumed:
+
+- **Not a JS exception.** The root `ErrorBoundary` in `app/_layout.tsx` renders a full-screen
+  "Something went wrong" carrying the message. The user saw no such screen — they were put back
+  where they came from, or out of the app. That is the signature of a process the OS killed, not of
+  React unwinding.
+- **Not a null dereference on a field old inspection records lack.** The only unguarded read on the
+  mount path is `insp.results`, and it is inside `load()`'s own `try/catch`, which degrades to
+  `EmptyState`. Every other read is optional-chained or `?? []`.
+- **Not the caption field commit `21407c1` added.** That code is confined to the `showActive`
+  branch, which renders only after a card is tapped — the eject happens before anything is tapped.
+
+**Therefore it is pre-existing, not introduced by the Part 1 update**, which contradicts the
+premise it was investigated under. It is a function of *total checklist items × device backlog
+size*, so it affects **any** inspection with a checklist and is not triggered by old record shapes.
+
+**Fix:** `readPhotoPayloadMap()` is exported and the pure `hydratePhotosFromMap(photos, map)` added;
+both call sites read once per screen and map N times. Commit `bb1878c`.
+
+**The read count is now asserted as a correctness property**
+(`lib/photo-payload-store.test.ts`, via `asyncStorageGetItemCount()` in `lib/test-setup.ts`),
+because nothing in the codebase could previously have failed over this: the output was always
+correct and only the *number of reads* was wrong. Red-on-revert verified — reinstating a read
+inside `hydratePhotosFromMap` produced `not ok … expected: 1, actual: 25`.
+
+**Disposition:** Fixed. **The termination reason itself remains unobtained**: the mobile Sentry DSN
+is empty (**L31**) and `Sentry.init` is gated on it, so `sitesnap-mobile` has zero issues over 90
+days. Only the device's own crash log (Settings → Privacy & Security → Analytics & Improvements →
+Analytics Data → `SiteSnapAI-*.ips`) can name it, and that needs the phone's owner.
+
+### L57 — A single "Don't Allow" on the camera was a permanent dead end: the app re-asked forever and iOS never prompted again — MEDIUM (feature loss; irreversible without the user independently discovering iOS Settings)
+
+Both `app/new-entry.tsx` and `app/inspections/[siteId].tsx` carried the same four lines: on a
+refused permission, `Alert.alert("Permission Required", "Camera access is needed to take photos.")`
+and return. iOS shows the camera prompt **once per install**; after one refusal
+`requestCameraPermissionsAsync()` resolves denied with `canAskAgain: false` **without prompting**.
+So every subsequent tap produced the identical alert and the camera was gone for the life of the
+install. A builder who taps "no" once should not have to work out how to undo it.
+
+**Ruled out, with evidence, as the cause of the reported refusal:** the binary is *not* missing
+`NSCameraUsageDescription`. Build 4's real `.ipa` `Info.plist` (`CFBundleVersion 4`, build id
+`466a694f-b8e8-4ae2-be44-2a4dda291968`) carries it: "SiteSnap uses your camera to capture
+construction site photos." **No native rebuild was required**, and the earlier advice that one
+might be was wrong in the right direction — it was checked against the binary, not the config.
+
+**Fix:** `lib/camera-permission.ts` (pure, tested) decides what a refusal *means* from
+`canAskAgain`; `lib/camera-access.ts` says it and, when the phone will not ask again, offers
+`Linking.openSettings()`. Both screens call `ensureCameraAccess()`. Commit `74d4389`.
+
+**Two unasked findings from reading the binary:** the purpose string shown is the **`expo-image-picker`
+plugin's**, not `ios.infoPlist`'s — plugin precedence; both are present and honest, but only one is
+ever displayed. And `NSLocationAlwaysAndWhenInUseUsageDescription` holds a generic injected default
+("Allow SiteSnapAI to access your location") for a permission the app never requests — see **L60**.
+
+**Disposition:** Fixed. `Linking.openSettings()` is used deliberately rather than hand-rolling the
+`app-settings:` URL scheme, which Apple has rejected apps for.
+
+### L58 — The site detail action bar was shrunk away by the entry list below it, so New Entry / Diary / Timesheets became partly unreachable once a site had enough entries — HIGH (feature loss; data-dependent, so it reaches a phone and not a review)
+
+Reported as "the tab row is painted over by the search field below it — labels clipped
+horizontally and cut off vertically". Nothing is absolutely positioned and nothing has a
+`z-index`, so a stacking-order investigation would have found nothing. It is not painting. It is
+the flex shrink pass.
+
+**Mechanism, from the installed React Native 0.81.5 source:**
+
+1. `ScrollView` composes its own base style **under** the passed one with `StyleSheet.compose`
+   (`ScrollView.js:1752,1760`), which merges **per property**. `actionBarScroll: { flexGrow: 0 }`
+   therefore overrode `flexGrow` and left `baseHorizontal`'s **`flexShrink: 1`** in force.
+2. The `FlatList` below kept `baseVertical`'s `flexGrow: 1, flexShrink: 1` with `flexBasis: auto`
+   — its full content height as its base size.
+3. Inside `container` (`flex: 1`, a definite-height column), once the children's bases exceeded the
+   screen Yoga ran the shrink pass. The only two shrinkable children were the bar (basis ≈ 68pt)
+   and the list, so the bar absorbed `68/(68+content)` of the overflow — losing height in
+   proportion to how much diary the site has — and `overflow: 'scroll'` clipped the labels.
+
+It needs data because the search field is gated on `allEntries.length > 0` **and** the overflow
+grows with the entry count.
+
+**Fix:** `actionBarScroll` pins `flexGrow: 0, flexShrink: 0, flexBasis: "auto"`, so the bar is
+never a shrink target; the `FlatList` takes `flex: 1`, which Yoga resolves to `flexBasis: 0`
+points rather than `auto` (`yoga/node/Node.cpp:329-339`, `processFlexBasis`, with
+`useWebDefaults()` false), so the list stops contributing its content height to the column's base
+sum and takes the remainder. Commit `3b9f431`.
+
+**Same class as L27** (`SignaturePad.padRoot`). Third round in which this class of defect reached
+the user, which is the subject of **L61**.
+
+**Disposition:** Fixed. **Not verified visually** — see **L61**. The mechanism is established from
+source; the rendered result on a phone with six entries is unconfirmed and is on the device
+checklist.
+
+### L59 — `settings/offline-sync` showed two back affordances, because it was the only `ScreenHeader` screen never registered in the root navigator — LOW (polish; one screen)
+
+A native "‹ Back" bar **and** the screen's own "‹ Offline Sync" header below it. It was the single
+screen rendering `ScreenHeader` with no `<Stack.Screen>` entry in `app/_layout.tsx`, so it fell
+through to the root `screenOptions`, which sets colours but never `headerShown: false`. Identical
+omission to the `terms-of-service` bug already commented in that file; different symptom only
+because that screen renders no header of its own and so showed its raw route name as the title
+instead.
+
+**Fix:** registered with `headerShown: false`, alongside its three `settings/*` siblings. Commit
+`3b9f431`.
+
+**Swept for the general case** rather than fixed in isolation: all eleven screens rendering
+`<ScreenHeader` were cross-checked against every `<Stack.Screen>` registration, and against
+`(tabs)/_layout.tsx` (`screenOptions.headerShown: false`, so `(tabs)/supervisor`'s own header is
+correct). Every other one is registered with `headerShown: false`; every screen registered
+`headerShown: true` renders no header of its own. **This was the only instance.**
+
+**Disposition:** Fixed.
+
+### L60 — Location tracking is unreachable dead code, yet the app ships three location purpose strings and the `expo-location` plugin — MEDIUM (App Store rejection risk; nobody asked, found while reading item 2's permission path)
+
+`lib/location-service.ts` exports `requestPermissionAndStart`, `startTracking`, `stopTracking`,
+`setLocationTrackingEnabled` and `isLocationTrackingEnabled`. **None of the first four is
+referenced anywhere outside that file.** The only external reference to the module is
+`app/_layout.tsx:15` importing `resumeTrackingIfEnabled`, called at `:266` — and that function
+reads a persisted flag that **nothing in the app can set**, because the only writer is
+`requestPermissionAndStart`, which nothing calls. `expo-location` has no other importer.
+
+So: there is no route by which a user can enable location tracking, and the boot path exists to
+resume a state that can never have been entered.
+
+Meanwhile the binary carries `NSLocationWhenInUseUsageDescription`, the `expo-location` plugin
+config, and a generic injected `NSLocationAlwaysAndWhenInUseUsageDescription`. Commit `1d78148`
+("one honest location purpose string, in the single native commit") added a purpose string for a
+capability no user can turn on. Declaring a permission the app cannot request is a documented App
+Store review rejection reason.
+
+**Not fixed here, deliberately.** The two options — delete the feature, or ship the toggle that
+reaches `requestPermissionAndStart` — are a product decision rather than a defect fix, and
+`1d78148` was a native commit, so either one changing the config needs a rebuild.
+
+**Disposition:** Open, recorded 5 October 2026. Decision required before the next native build.
+
+### L61 — Nothing in this project can look at the mobile app, and three consecutive rounds have ended with a mobile layout or crash defect reaching the user — HIGH (verification method; the mobile half of L55, still open)
+
+**L55** established the rule for the portal and discharged it: a real browser at 390 × 844 caught
+L53 and two further defects that a stylesheet measurement said did not exist. The mobile app has
+no equivalent, and **L56** (crash) and **L58** (layout) are the third round's cost.
+
+**What a harness would take.** `react-native-web` and `react-dom` are already installed, so Expo
+web is buildable in principle; Playwright is **not** in the repo and is the one new dev dependency.
+Shape: `expo start --web` against a seeded local API, Playwright driving Chromium at 390 × 844,
+screenshotting a fixed route list.
+
+**The environment-safety question, answered against the code rather than with "be careful": the
+mechanism already exists and already enforces this.** `lib/api-base-url.ts:113` refuses outright —
+it throws — when a `__DEV__` build resolves a non-local API URL, unless `EXPO_PUBLIC_ALLOW_PROD_API=1`
+is set. `expo start --web` is a `__DEV__` build, and `isLocalApiUrl()` is true only for loopback or
+plain `http://`, so `https://sitesap-ai.onrender.com` is refused by construction. **A local web run
+is already structurally incapable of reaching production**, and the stated blocker — that
+`apps/mobile/.env` loads into any bundle — is closed by that guard, not by discipline. The residual
+problem is the mirror image: with `.env` pointing at production the web run *throws at startup and
+screenshots nothing*, so the harness must set `EXPO_PUBLIC_API_URL=http://localhost:4000` in its
+own environment and run a seeded local API.
+
+**Which of this round's defects it would actually have caught — honestly, one of three.**
+
+- **L58 (the action bar): probably yes.** Checked rather than assumed. `react-native-web`'s
+  ScrollView applies `[baseHorizontal, pagingEnabledStyle, this.props.style]` as an ordered array
+  (`exports/ScrollView/index.js:574-578`), with `commonStyle = { flexGrow: 1, flexShrink: 1 }` —
+  the **same per-property merge** that let `flexShrink: 1` survive natively. And `flex: 1` is
+  emitted as CSS `flex: 1`, i.e. `1 1 0%` (`StyleSheet/compiler/createReactDOMStyle.js:99-106`),
+  matching Yoga's `processFlexBasis`. Both the defect condition and the fix should reproduce in a
+  browser. **But it needs six entries of real data to appear**, so a boot-and-screenshot run proves
+  nothing — the harness needs a seeded local API, which is most of its cost.
+- **L59 (the doubled header): no.** The duplicate is an expo-router native-stack navigation bar.
+  There is no native bar on web, so the defect does not exist there to be seen.
+- **L56 (the Inspections eject): no.** It is a native memory termination driven by megabytes of
+  base64 in AsyncStorage. On web AsyncStorage is `localStorage`-backed with a ~5 MB quota, so the
+  payload map cannot even reach the size that kills a phone, and a browser tab fails differently.
+  A web run would be slow, not fatal.
+
+**Cost.** Build: Playwright plus a seeded-local-API fixture and a route list — a day's work, most
+of it the seeding, not the screenshots. Keep: one dev dependency, roughly 60–90 seconds a run, and
+a route list that rots as routes are added. **The honest verdict is that it buys layout coverage of
+pure-flex defects on screens whose data can be seeded, and buys nothing for native-runtime defects
+— which is the half that ejects people from the app.**
+
+**Disposition:** Open, costed, **not built** — the branch was instructed to cost it rather than
+build it. Recorded 5 October 2026 for the product owner's decision.
