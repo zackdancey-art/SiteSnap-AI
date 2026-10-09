@@ -383,6 +383,32 @@ export async function inviteCompanyMembers(emails: string[], companyRole: string
   return request<{ results: CompanyInviteResult[] }>("POST", "/api/company/members/invite", { emails, companyRole });
 }
 
+/**
+ * A company invitation that has been sent and not yet accepted.
+ *
+ * Mirrors `CompanyInviteSummary` in the API's projectsStore. There is no token
+ * on it, by design: `GET /company/invites` does not return one.
+ */
+export type CompanyInviteSummary = {
+  id: string;
+  invitedEmail: string;
+  companyRole: string | null;
+  invitedBy: string;
+  createdAt: string;
+  expiresAt: string;
+  state: "pending" | "expired";
+};
+
+/**
+ * What has been sent and not yet accepted. Manager and above, matching
+ * `listCompanyMembers` — a manager who cannot see a pending invitation issues
+ * a duplicate.
+ */
+export async function listCompanyInvites(): Promise<CompanyInviteSummary[]> {
+  const data = await request<{ invites: CompanyInviteSummary[] }>("GET", "/api/company/invites");
+  return data.invites;
+}
+
 export async function updateMemberRole(email: string, companyRole: string): Promise<void> {
   await request<unknown>("PATCH", `/api/company/members/${encodeURIComponent(email)}/role`, { companyRole });
 }

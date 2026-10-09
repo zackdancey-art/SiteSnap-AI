@@ -8,12 +8,12 @@ import { SkeletonCard } from "@/components/Skeleton";
 import {
   getSavedUser, isAuthenticated,
   fetchCompanyProfile, updateCompanyProfile,
-  listCompanyMembers, inviteCompanyMembers,
+  listCompanyMembers, inviteCompanyMembers, listCompanyInvites,
   updateMemberRole, removeCompanyMember,
 } from "@/lib/api";
 import { useRole } from "@/lib/useRole";
 import { COMPANY_ROLE_LABELS } from "@/lib/roles";
-import type { CompanyProfile, CompanyMember, CompanyInviteResult } from "@/lib/api";
+import type { CompanyProfile, CompanyMember, CompanyInviteResult, CompanyInviteSummary } from "@/lib/api";
 
 // The labels come from lib/roles so this file and ProfileDropdown cannot drift
 // into two vocabularies again; the colours stay local, they are only used here.
@@ -83,6 +83,12 @@ function describeInvite(r: CompanyInviteResult): { glyph: string; color: string;
   return { glyph: "✓", color: "var(--success)", bg: "#F0FDF4", label: "Invitation sent" };
 }
 
+// Matching the format the rest of the portal uses (activity, sites).
+function inviteDate(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "—" : d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" });
+}
+
 function Panel({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
   return (
     <div className="card">
@@ -102,6 +108,7 @@ export default function TeamPage() {
 
   const [company, setCompany] = useState<CompanyProfile | null>(null);
   const [members, setMembers] = useState<CompanyMember[]>([]);
+  const [invites, setInvites] = useState<CompanyInviteSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -125,13 +132,15 @@ export default function TeamPage() {
     setLoading(true);
     setError("");
     try {
-      const [profile, memberList] = await Promise.all([
+      const [profile, memberList, inviteList] = await Promise.all([
         fetchCompanyProfile(),
         isManager ? listCompanyMembers() : Promise.resolve([] as CompanyMember[]),
+        isManager ? listCompanyInvites() : Promise.resolve([] as CompanyInviteSummary[]),
       ]);
       setCompany(profile);
       setNameInput(profile.name);
       setMembers(memberList);
+      setInvites(inviteList);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load team data.");
     } finally {
@@ -416,6 +425,70 @@ export default function TeamPage() {
                       {inviting ? "Sending…" : "Send invitations"}
                     </button>
                   </form>
+                </Panel>
+              )}
+
+              {/*
+                Pending invitations — manager and above.
+
+                Phase 1.4(d): "the sender can see what they have sent and its
+                state." GET /company/invites has existed and nothing called it,
+                so this page listed the people who had already joined and gave
+                no sign at all of an invitation that had been sent. An owner
+                chasing a crew member who had not turned up could not tell
+                whether the invitation had lapsed, had never been created, or
+                was sitting unread — and the only way to find out was to send
+                another one.
+
+                Expired rows are listed, not hidden. They are the case worth
+                seeing, and re-inviting the same address from the form above
+                re-issues the invitation with a fresh seven-day window.
+              */}
+              {isManager && (
+                <Panel
+                  title="Pending invitations"
+                  description="Invitations that have been sent and not yet accepted. Re-inviting an address from above issues a fresh link and expiry."
+                >
+                  {invites.length === 0 ? (
+                    <div style={{ padding: "18px 22px", fontSize: 13, color: "var(--text-secondary)" }}>
+                      Nothing outstanding — every invitation sent has been accepted.
+                    </div>
+                  ) : (
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                        <thead>
+                          <tr style={{ textAlign: "left", color: "var(--text-secondary)", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                            <th style={{ padding: "10px 22px", fontWeight: 700 }}>Email</th>
+                            <th style={{ padding: "10px 22px", fontWeight: 700 }}>Role</th>
+                            <th style={{ padding: "10px 22px", fontWeight: 700 }}>Invited by</th>
+                            <th style={{ padding: "10px 22px", fontWeight: 700 }}>Sent</th>
+                            <th style={{ padding: "10px 22px", fontWeight: 700 }}>State</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {invites.map((inv) => (
+                            <tr key={inv.id} style={{ borderTop: "1px solid var(--border)" }}>
+                              <td style={{ padding: "12px 22px", color: "var(--text)", fontWeight: 600 }}>{inv.invitedEmail}</td>
+                              <td style={{ padding: "12px 22px" }}>{inv.companyRole ? <RoleBadge role={inv.companyRole} /> : "—"}</td>
+                              <td style={{ padding: "12px 22px", color: "var(--text-secondary)" }}>{inv.invitedBy}</td>
+                              <td style={{ padding: "12px 22px", color: "var(--text-secondary)" }}>{inviteDate(inv.createdAt)}</td>
+                              <td style={{ padding: "12px 22px" }}>
+                                {inv.state === "pending" ? (
+                                  <span className="badge" style={{ background: "#F0F9FF", color: "#0EA5E9", fontWeight: 700 }}>
+                                    Awaiting acceptance
+                                  </span>
+                                ) : (
+                                  <span className="badge" style={{ background: "#FFF7ED", color: "var(--accent)", fontWeight: 700 }}>
+                                    Expired {inviteDate(inv.expiresAt)}
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                 </Panel>
               )}
 
