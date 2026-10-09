@@ -1,6 +1,13 @@
-# Phase 1.1 — The invitation journey, traced hop by hop
+# Phase 1 — Crew invitations: the journey traced, and what it took to fix
 
-**Date:** 2026-10-09. **Branch:** `feat/crew-invitations`. **Base:** `b29a05e`.
+**Date:** 2026-10-09 to 2026-10-10. **Branch:** `feat/crew-invitations-clean`.
+**Base:** `b29a05e`.
+
+Covers items 1.1 through 1.5. The trace came first and the fixes follow from it; the
+hop-by-hop report below is left as it was written, with a post-fix status table at
+the end of the 1.4 section. Item 1.6 — the acceptance checklist — is a separate
+document, [`PHASE-1-ACCEPTANCE-CHECKLIST.md`](PHASE-1-ACCEPTANCE-CHECKLIST.md),
+because it is a thing you work through on a handset rather than a thing to read.
 
 The task was to walk the invitation journey with evidence rather than inference, name
 the hop that fails, and only then fix. This is the report. Every claim below is either
@@ -278,6 +285,102 @@ the undiscoverable one.
   New-Zealand-only product whose `PREFIX_OPTIONS` include `+64`.
 - **`+native-intent.tsx` does not map `site-invite` or `company-invite`**, only
   `invite` and `reset-password`.
+
+## 1.3 — L36's server half: normalise on write, on read, and backfill
+
+`createSiteInvites` and `createCompanyInvite` now lower-case and trim the address
+before it is written, `findSiteInviteByToken` and the two `findInviteByEmail` lookups
+normalise before comparing, and migration **031** rewrites the rows already in the
+table. All three are required and the third is the one the phase insists on:
+normalising only new rows leaves every invitation already sent permanently broken,
+because the row holds `Alice@Example.com` and every future lookup asks for
+`alice@example.com`.
+
+031 turned out to need a guard. The two partial unique indexes in migration 018 are
+on the **raw** `invited_email`, so `Alice@Example.com` and `alice@example.com` can
+both exist today; lower-casing them in one `UPDATE` makes them collide and the
+migration aborts — taking API boot with it, since migrations run at boot. It now
+collapses each colliding group to its newest row first and then normalises
+(`aaba972`). Additive and idempotent; re-running it is a no-op.
+
+**Not smoke-tested against Postgres.** There is no local Postgres in this environment
+and no `TEST_DATABASE_URL`. The five tests added in `b178398` cover the Postgres half
+of acceptance, the upsert alias and 031's collision case, and they are **gated on
+`TEST_DATABASE_URL` — so they have never executed anywhere.** CI runs them against
+its `postgres:16` service container when the PR is opened, and that is the first time
+they will have run.
+
+## 1.4 — re-inviting the same address
+
+**Establish why it fails, rather than assuming a uniqueness constraint.** It is not a
+uniqueness constraint. The API does not fail at all.
+
+`createCompanyInvite` upserts:
+
+```sql
+ON CONFLICT (company_id, invited_email) WHERE company_id IS NOT NULL AND site_id IS NULL DO UPDATE
+  SET token=$6, expires_at=$7, company_role=$3, invited_by=$5
+RETURNING *, (xmax = 0) AS inserted
+```
+
+`DO UPDATE` overwrites `expires_at`, which is exactly what makes an **expired**
+invitation re-issuable — 1.4(b) needs no code. The in-memory path deletes the old row
+and inserts, reaching the same place. Driven live:
+
+```
+POST /api/company/members/invite  -> {"email":"finalcrew@example.com","status":"sent","delivered":true}
+POST /api/company/members/invite  -> {"email":"finalcrew@example.com","status":"resent","delivered":true}
+GET  /api/company/invites   id before -> 01a122a1-1c14-…
+GET  /api/company/invites   id after  -> 01a122a1-1df2-…
+```
+
+One row, a new id. The token is **reissued**, not reused.
+
+**The failure was on the clients — on both of them, in opposite directions.**
+
+*Mobile* declared the result as `status: "sent" | "error"` and rendered everything
+that was not `"sent"` as a red "Failed to send". A successful re-send reports
+`"resent"`, so it appeared as a failure. That is the reported symptom, exactly: "I
+cannot send a second invitation to an address I have already invited." The invitation
+was being sent every time; the screen said it was not (`9a065ed`).
+
+*The portal* did the reverse: one green box, a tick on every outcome, and the raw
+enum printed at the reader — `✓ alice@example.com — resent`,
+`✓ alice@example.com — already_member`. It also omitted `delivered` from the type, so
+an invitation whose email never went out read as "Invitation sent" (`71cec94`).
+
+**Reuse or reissue — my recommendation, the decision is yours.** The code reissues on
+both paths and both surfaces now say so in words: *"any earlier link for this address
+has stopped working."* Keep it. A link in an inbox is a bearer credential with a
+seven-day life; re-inviting is the one moment a sender has signalled that something
+about the first attempt was wrong, and extending the old token's life without
+re-dating it is the worse failure mode. The cost is real and is the reason this is
+your call: an invitee who finds the *first* email and clicks it gets a dead link.
+Both surfaces warn the sender at the moment they re-invite, which is the only point
+at which anybody can do anything about it.
+
+**(c) Someone who already has an account is a different case** and now reads as one.
+Already in *your* company returns `already_member`, rendered as "Already in your team
+— no invitation needed" in grey — a sentence, not a red failure and not a raw enum.
+Already in a *different* company is not an error at invitation time at all: the
+invitation is created and emailed, and acceptance answers 409 *"You are already a
+member of a different company."*, which both accept screens surface verbatim.
+
+**(d) The sender can see what they have sent and its state.** They could not.
+`GET /company/invites` existed, was manager-gated, returned `state: "pending" |
+"expired"` and no token — and had no caller. The Team page now lists it, expired rows
+included (`8d8f8cb`).
+
+### Hop status after the fixes
+
+| Hop | Before | Now |
+|---|---|---|
+| 1 — created | works | works |
+| 2 — email sent | **fails for company invitations** | fixed in `eca14ae`; the route now sends and reports delivery separately from creation. The *reporting* half of this hop is the 1.4 root cause above |
+| 3 — link opened | dead end by design | unchanged — it is a redirect target, see hop 4/5 |
+| 4 — mobile | **fails in three places** | fixed in `81183fa`, `37e0a26`, `0aa049b`. **Unverified — mobile cannot be screenshotted.** See the device checklist |
+| 5 — web | **no accept path at all** | fixed: `/invite` and `/signup` on the portal (`4f98172`), the crew landing case (`a583395`), and the website route for the public link (`7e8945a`) |
+| 6 — attached to the org | works in-memory, **never worked on Postgres** | fixed in `8e729ef` (L65). Covered by tests that have not yet run anywhere — see 1.3 |
 
 ## 1.5 — `TEST_PHONE_NUMBERS`: already built, and the premise needs correcting
 
