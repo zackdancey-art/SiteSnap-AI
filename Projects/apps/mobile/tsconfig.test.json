@@ -49,6 +49,8 @@
     "lib/annotation-palette.ts",
     "lib/screen-header-audit.ts",
     "lib/screen-header-audit.test.ts",
-    "lib/annotation-palette.test.ts"
+    "lib/annotation-palette.test.ts",
+    "lib/phone.ts",
+    "lib/phone.test.ts"
   ]
 }

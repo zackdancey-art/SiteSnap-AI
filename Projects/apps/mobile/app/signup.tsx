@@ -18,31 +18,17 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Colors from "@/constants/colors";
 import { apiRequest } from "@/lib/query-client";
 import { BackButton, goBackSafe } from "@/components/BackButton";
+import { composeE164, DIALLING_CODES } from "@/lib/phone";
 
 type PrefixOption = {
   label: string;
   code: string;
 };
 
-const PREFIX_OPTIONS: PrefixOption[] = [
-  { label: "United States", code: "+1" },
-  { label: "Canada", code: "+1" },
-  { label: "Australia", code: "+61" },
-  { label: "New Zealand", code: "+64" },
-  { label: "United Kingdom", code: "+44" },
-  { label: "Ireland", code: "+353" },
-  { label: "Singapore", code: "+65" },
-  { label: "India", code: "+91" },
-  { label: "South Africa", code: "+27" },
-  { label: "United Arab Emirates", code: "+971" },
-];
+const PREFIX_OPTIONS: PrefixOption[] = DIALLING_CODES;
 
 function isValidEmail(email: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-}
-
-function normalizeLocalPhone(phone: string) {
-  return phone.replace(/\D/g, "");
 }
 
 export default function SignUpScreen() {
@@ -80,7 +66,7 @@ export default function SignUpScreen() {
   const [resendCooldown, setResendCooldown] = useState(0);
 
   const normalizedPhone = useMemo(
-    () => `${phonePrefix}${normalizeLocalPhone(phoneLocal)}`,
+    () => composeE164(phonePrefix, phoneLocal),
     [phoneLocal, phonePrefix]
   );
 
@@ -133,7 +119,7 @@ export default function SignUpScreen() {
       setError("Passwords do not match.");
       return;
     }
-    if (normalizeLocalPhone(phoneLocal).length < 8) {
+    if (phoneLocal.replace(/\D/g, "").length < 8) {
       setError("Please enter a valid phone number.");
       return;
     }
