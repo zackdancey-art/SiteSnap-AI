@@ -2010,3 +2010,120 @@ naming it, so a migration that adds or drops RLS on a table fails on the commit 
 
 **Disposition:** Open, recorded 9 October 2026. Identified as mechanisable on this branch's sweep
 list and deliberately **not built** — the branch was told to list these, not build them.
+
+### L65 — `acceptSiteInvite` has never attached anybody to a company on Postgres, and reported success for doing nothing — CRITICAL (tenancy; the reason no crew account has ever existed)
+
+Found while tracing the invitation journey for Phase 1.1. On the Postgres path, `acceptSiteInvite`
+(`storage/projectsStore.ts`) stamped the invitee's company with:
+
+```sql
+UPDATE auth_users SET company_id = $2, company_role = $3
+ WHERE email = $1 AND (company_id IS NULL OR company_id = $2)
+```
+
+Both branches of that guard are unsatisfiable or useless:
+
+- `company_id IS NULL` cannot match. Migration `016_backfill_companies.sql:145-154` ends with a
+  `DO` block that `RAISE EXCEPTION`s if a single `auth_users` row still has a NULL `company_id`, so
+  the column is non-NULL by construction on any database that booted. The invited-signup path in
+  `routes/auth.ts:431-440` writes `""`, not NULL, which this guard does not cover.
+- `company_id = $2` matches only rows **already** in the target company, where the `UPDATE` is a
+  no-op.
+
+So the statement matched zero rows on every real invitation. `rowCount` was never checked, the
+function returned a success object, and `routes/projects.ts` went on to mint a fresh auth token
+asserting a `companyId` the database row did not have. The invitee was told they had joined, held a
+token saying so, and was not a member of anything.
+
+The guard also contradicted the intent stated two lines above it in the same function: the
+pre-consume peek deliberately treats a solo company as "no real company" that an explicit company
+invite may override, and then the `UPDATE` refused exactly that case.
+
+This is the root cause of the Phase 1 premise — *"nobody but me can get into this app"* — and it
+also kills the one undiscoverable workaround. Signing up normally and tapping the emailed link
+again fails in production for the same reason.
+
+**Fixed** on `feat/crew-invitations` (`c388956`): the guard now also accepts `''` and the inviting
+company's solo id, and a `rowCount !== 1` rolls the transaction back and returns
+`already_in_company` rather than reporting a success it did not perform.
+
+**How this was established, and its limit.** By reading the SQL against migration 016's assertion
+and against the `""` written by `routes/auth.ts` — *not* by executing it. This environment has no
+Postgres and no `TEST_DATABASE_URL`, so the defect and its fix are both unexecuted here. The
+in-memory path never had this bug, which is why 191 passing tests say nothing about it. A DB-gated
+test is required and is listed as owed work.
+
+**Disposition:** Fixed in code, recorded 9 October 2026, **verification owed** — needs a `test:db`
+suite proving a Postgres invitee ends up with the inviting company on their `auth_users` row.
+
+### L66 — A pathless `projectsRouter.use` gate refuses crew rank 31 routes across seven other routers — CRITICAL (authorization; the entire crew-facing product returns 403 to crew)
+
+`routes/projects.ts:115` read:
+
+```ts
+// Crew (rank 0) are blocked from the entire dashboard router — only viewer+ may proceed.
+projectsRouter.use(requireAuth, requireAtLeast("viewer"));
+```
+
+The comment describes the intent correctly and the code does something much larger. `router.use`
+with no path mounts at `/`, and `routes/index.ts` mounts the routers onto one `apiRouter` with
+`apiRouter.use(projectsRouter)` — also pathless. So this middleware runs for **every** request that
+reaches `apiRouter` at or after `projectsRouter` in the mount order, not merely for the routes
+defined on `projectsRouter`. Seven routers are mounted after it.
+
+Enumerated, and the count asserted two ways that agree: **31 routes** across `push` (3), `crew` (3),
+`incidents` (4), `inspections` (10), `deliveries` (4), `templates` (5) and `location` (2), carrying
+**zero** `requireAtLeast` or `requireCompanyRole` gates of their own — their only role protection
+today is this accident. (`companyRouter` is mounted after it too but gates all six of its own routes,
+so it is unaffected either way.)
+
+Measured, with an owner positive control on the same route in the same run:
+
+```
+# PROBE G crew role           -> {"email":"crew-g@example.com", … "companyRole":"crew"}
+# PROBE G GET  /crew/timecards  -> 403 {"error":"Insufficient permissions."}
+# PROBE G POST /location/update -> 403 {"error":"Insufficient permissions."}
+# PROBE G owner /crew/timecards -> 200
+```
+
+A crew member therefore cannot clock in or out, send a location, file an incident, run an
+inspection, log a delivery, use an entry template, or register for push notifications. They also
+cannot create a diary entry, because `POST /projects/entries` is on `projectsRouter` itself. That is
+the whole field-capture product, 403 to the only role that uses it.
+
+It has never been observed because no crew account has ever successfully existed — L65 is why.
+
+**Why this is not fixed here.** Scoping the gate to `/projects` is the correct structural fix and it
+would simultaneously grant crew rank those 31 routes, because none of them has a gate of its own.
+That is a decision about what a crew member may do in a compliance-evidence product, and it belongs
+to the owner, not to a cleanup commit. It also cannot be made route-by-route without deciding the
+crew permission model, which is the real missing artefact.
+
+**What is fixed here** (`d2b6148`) is the one path that cannot wait for that decision: accepting an
+invitation. Gating acceptance on the rank one acquires *by* accepting is circular, and it made
+failure unrecoverable — `routes/auth.ts:456-465` treats a failed acceptance during registration as
+non-fatal on the stated grounds that *"the user simply lands with no company yet and can retry the
+invite"*, and the retry was a 403:
+
+```
+# PROBE F after signup -> 201 {"email":"crew.f@example.com", … "companyId":"","companyRole":"crew"}
+# PROBE F retry accept -> 403 {"error":"Insufficient permissions."}
+```
+
+An account created from a stale or lapsed link had no route back by any surface. The fix carves out
+exactly `POST /projects/invites/accept` by an exact `req.path` comparison and changes nothing else;
+`routes/invite-accept-access.test.ts` pins it, fails red with that same 403 when the carve-out is
+removed, and asserts that neither a case variant nor a path extending it is carved out — each with
+its positive control in the same test.
+
+**A second finding inside the first, about the tests.** `routes/company-rbac.test.ts` has a crew
+case (test 3) and it passes and it did not catch any of this. Its "crew" member registers *without*
+an invite token, which `routes/auth.ts` handles by creating a solo company and making them its
+**owner**; the invitation is then accepted at rank owner(3) and the account is demoted to crew
+afterwards. So the suite only ever exercised accept-as-owner — a journey no real invitee takes —
+and the demotion hid both L65 and L66 behind a green test. Registering with the invite token is the
+difference between the test and the product.
+
+**Disposition:** Partially fixed, recorded 9 October 2026. The accept carve-out is **fixed and
+red-on-revert verified**. The pathless gate itself is **open and deliberately unfixed, pending the
+owner's decision on the crew permission model** — raised as a Phase 1 stop condition.

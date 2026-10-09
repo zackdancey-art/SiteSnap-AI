@@ -134,14 +134,16 @@ const ACCEPT_INVITE_PATH = "/projects/invites/accept";
 // only for this router's own routes — and seven routers are mounted AFTER this
 // one in routes/index.ts (push, crew, incidents, inspections, deliveries,
 // templates, location), none of which has any role gate of its own. So a crew
-// member was 403'd out of all 29 of their routes by a line written to protect
+// member was 403'd out of all 31 of their routes by a line written to protect
 // the dashboard: no clocking in, no incident, no inspection, no delivery, no
 // location ping. Measured, with an owner positive control on the same route in
-// the same run.
+// the same run. 31 = push 3, crew 3, incidents 4, inspections 10, deliveries 4,
+// templates 5, location 2 — counted two ways that agree, and carrying zero role
+// gates of their own, so this accident is their only role protection today.
 //
 // That leak is NOT fixed here, deliberately. Scoping this `use` to "/projects"
-// is the correct structural fix and it would simultaneously grant crew 29
-// routes across seven routers, which is a decision about what a crew member may
+// is the correct structural fix and it would simultaneously grant crew those 31
+// routes, which is a decision about what a crew member may
 // do in a compliance-evidence product — the user's to make, not one to take
 // unattended. The carve-out below changes the behaviour of exactly one path and
 // nothing else. See docs/PHASE-1-REVIEW.md.
