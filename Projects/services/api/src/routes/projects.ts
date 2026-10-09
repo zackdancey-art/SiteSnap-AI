@@ -112,8 +112,45 @@ const TemplatePatchSchema = TemplateSchema.omit({ siteId: true }).partial();
 
 export const projectsRouter: Router = Router();
 
-// Crew (rank 0) are blocked from the entire dashboard router — only viewer+ may proceed.
-projectsRouter.use(requireAuth, requireAtLeast("viewer"));
+/**
+ * The one path on this router a crew member must be able to reach.
+ *
+ * Accepting an invitation is how somebody STOPS being an outsider, so gating it
+ * on the rank they only acquire by accepting is circular. Worse, it made the
+ * failure unrecoverable: routes/auth.ts creates the account and then treats a
+ * failed acceptSiteInvite as non-fatal, on the stated grounds that "the user
+ * simply lands with no company yet and can retry the invite" — and the retry
+ * was a 403. An account orphaned that way had no route back by any means.
+ */
+const ACCEPT_INVITE_PATH = "/projects/invites/accept";
+
+// Crew (rank 0) are blocked from this router's dashboard routes — only viewer+
+// may proceed — with the single carve-out above.
+//
+// AUDIT L66, and read this before touching the shape of these two lines. The
+// gate used to be one pathless `projectsRouter.use(requireAuth,
+// requireAtLeast("viewer"))`. A pathless `use` on a router mounted with
+// `apiRouter.use(projectsRouter)` runs for EVERY request that reaches it, not
+// only for this router's own routes — and seven routers are mounted AFTER this
+// one in routes/index.ts (push, crew, incidents, inspections, deliveries,
+// templates, location), none of which has any role gate of its own. So a crew
+// member was 403'd out of all 29 of their routes by a line written to protect
+// the dashboard: no clocking in, no incident, no inspection, no delivery, no
+// location ping. Measured, with an owner positive control on the same route in
+// the same run.
+//
+// That leak is NOT fixed here, deliberately. Scoping this `use` to "/projects"
+// is the correct structural fix and it would simultaneously grant crew 29
+// routes across seven routers, which is a decision about what a crew member may
+// do in a compliance-evidence product — the user's to make, not one to take
+// unattended. The carve-out below changes the behaviour of exactly one path and
+// nothing else. See docs/PHASE-1-REVIEW.md.
+projectsRouter.use(requireAuth);
+const viewerOrAbove = requireAtLeast("viewer");
+projectsRouter.use((req, res, next) => {
+  if (req.path === ACCEPT_INVITE_PATH) return next();
+  return viewerOrAbove(req, res, next);
+});
 
 function getActor(req: AuthenticatedRequest) {
   return {
