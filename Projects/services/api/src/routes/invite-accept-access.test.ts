@@ -243,3 +243,69 @@ test("the carve-out matches one exact path and nothing adjacent to it", async ()
     `control: the exact accept path must be reachable: ${exact.status} ${JSON.stringify(exact.body)}`
   );
 });
+
+test("after acceptance the pre-acceptance token is still unprivileged, and /auth/refresh is what lifts it", async () => {
+  const ownerToken = await registerUser("owner3@l66.test", "Owner", { companyName: "L66 Co 3" });
+  const orphanToken = await registerOrphanedInvitee("orphan3@l66.test", "Orphan");
+
+  // Invited as MANAGER, not crew, purely so the difference is observable. Every
+  // company-scoped route sits behind `requireAtLeast("viewer")` or higher, and
+  // crew ranks below all of them (AUDIT L66), so a crew invitee's before and
+  // after look identical from the outside and this property cannot be measured
+  // at that rank at all.
+  const inviteToken = await inviteCompanyMember(ownerToken, "orphan3@l66.test", "manager");
+  const accept = await req<{ companyId?: string; companyRole?: string; token?: string }>(
+    "POST", "/projects/invites/accept", { token: inviteToken }, orphanToken
+  );
+  assert.equal(accept.status, 200, `acceptance must succeed: ${JSON.stringify(accept.body)}`);
+  assert.equal(accept.body.companyRole, "manager", "acceptance must stamp the invited role");
+  assert.ok(accept.body.companyId, "acceptance must stamp a company");
+  const freshToken = accept.body.token;
+  assert.ok(freshToken, "acceptance must reissue a token");
+  assert.notEqual(freshToken, orphanToken, "the reissued token must not be the one presented");
+
+  // THE DEFECT, stated as an assertion: authorisation reads the token's claims,
+  // never the user row, so the token the invitee was holding when they accepted
+  // is still scoped to no company and crew rank. A client that keeps it sees an
+  // empty app and cannot tell why. Nothing recovers from this on its own — the
+  // refusal is 403, and the refresh-and-retry inside the mobile client's apiJson
+  // only triggers on 401.
+  const stale = await req<{ error?: string }>("GET", "/company/profile", undefined, orphanToken);
+  assert.equal(
+    stale.status, 403,
+    `the pre-acceptance token must still be refused: ${stale.status} ${JSON.stringify(stale.body)}`
+  );
+
+  // POSITIVE CONTROL, same route, same run: the route is reachable with the
+  // right claims. Without this the 403 above is equally consistent with
+  // /company/profile being broken, removed, or refusing every caller alive.
+  const withFresh = await req("GET", "/company/profile", undefined, freshToken);
+  assert.equal(
+    withFresh.status, 200,
+    `control: the reissued token must reach the same route: ${withFresh.status} ${JSON.stringify(withFresh.body)}`
+  );
+
+  // Why the staleness is invisible to the obvious check: /auth/me answers from
+  // the user ROW, so it reports the new company even through the stale token.
+  // The profile screen looks correct while every authorising route disagrees.
+  // Anyone diagnosing this by calling /auth/me will conclude there is no bug.
+  const me = await req<{ user: { companyId: string } }>("GET", "/auth/me", undefined, orphanToken);
+  assert.equal(me.status, 200);
+  assert.equal(
+    me.body.user.companyId, accept.body.companyId,
+    "/auth/me reads the row, so it must report the joined company even on the stale token"
+  );
+
+  // THE MECHANISM THE MOBILE CLIENT NOW RELIES ON: /auth/refresh takes the
+  // stale token — it is valid, merely under-privileged — re-reads the row, and
+  // mints claims carrying the company. data-context's acceptInvite calls this
+  // immediately after accepting, before reading any data.
+  const refreshed = await req<{ token?: string }>("POST", "/auth/refresh", undefined, orphanToken);
+  assert.equal(refreshed.status, 200, `refresh must accept the stale token: ${JSON.stringify(refreshed.body)}`);
+  assert.ok(refreshed.body.token, "refresh must return a token");
+  const afterRefresh = await req("GET", "/company/profile", undefined, refreshed.body.token);
+  assert.equal(
+    afterRefresh.status, 200,
+    `the refreshed token must carry the new company: ${afterRefresh.status} ${JSON.stringify(afterRefresh.body)}`
+  );
+});
