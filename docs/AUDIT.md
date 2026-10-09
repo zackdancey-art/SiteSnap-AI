@@ -2127,3 +2127,131 @@ difference between the test and the product.
 **Disposition:** Partially fixed, recorded 9 October 2026. The accept carve-out is **fixed and
 red-on-revert verified**. The pathless gate itself is **open and deliberately unfixed, pending the
 owner's decision on the crew permission model** — raised as a Phase 1 stop condition.
+
+---
+
+### L67 — The mobile invite screen reported a successful re-send as a failure, which is the entire "I cannot re-invite an address" complaint — HIGH (correctness; the reported symptom, and the API was never at fault)
+
+`POST /company/members/invite` returns one of four outcomes per address — `sent`, `resent`,
+`already_member`, `error` — and separately reports `delivered`, because creating the invitation row
+and emailing it are two steps that fail independently.
+
+`data-context.tsx` declared the result as:
+
+```ts
+status: "sent" | "error";
+```
+
+and `company-invite.tsx` rendered anything that was not `"sent"` as a red **"Failed to send"**. So a
+re-invitation — which the route reports as `"resent"`, having successfully written a new row with a
+new token and emailed it — appeared on the sender's phone as an error. So did `already_member`,
+which is not a failure either. `delivered` was not in the type at all, so an invitation whose email
+bounced read as sent.
+
+The symptom reported was "I cannot send a second invitation to an address I have already invited."
+The second invitation was being sent every time. The screen said it was not.
+
+This was found by tracing the route's actual return values rather than by reproducing the symptom,
+and it is worth noting **why the obvious hypothesis was wrong**: a duplicate-invitation failure
+looks exactly like a uniqueness-constraint violation, and `site_invites` does carry two partial
+unique indexes on `invited_email`. It would have been easy to "fix" the constraint. The constraint
+is load-bearing and correct — `createCompanyInvite` upserts through it with `ON CONFLICT … DO
+UPDATE`, which is precisely what makes an expired invitation re-issuable. Nothing on the server
+needed changing.
+
+**Disposition:** Fixed, 10 October 2026. The type now names all four outcomes and declares
+`delivered`; the screen derives its glyph, colour and sentence from the whole result. Unverified on
+the device — the mobile surface cannot be screenshotted — and listed as such in
+`docs/PHASE-1-ACCEPTANCE-CHECKLIST.md` step 7.
+
+---
+
+### L68 — The portal gave a green tick to every invitation outcome, including the ones where no email was sent — MEDIUM (correctness; the same defect as L67, inverted)
+
+The Team page rendered every result from the same route inside one green box:
+
+```tsx
+<div key={r.email}>✓ {r.email} — {r.status === "sent" ? "Invitation sent" : r.status}</div>
+```
+
+Three defects, in rising order of consequence. It printed the raw enum at the reader, so re-inviting
+showed `✓ alice@example.com — resent` and an existing member showed
+`✓ alice@example.com — already_member`. It gave a tick and a green background to outcomes that are
+not successes. And `lib/api.ts` typed the result `{ email: string; status: string }`, omitting
+`delivered` entirely — so an invitation the API had explicitly reported as *not emailed* rendered as
+"Invitation sent".
+
+The third is the one with a consequence: the sender believes a link is sitting in an inbox and waits
+for someone who was never contacted.
+
+**Both surfaces were wrong about the same response in opposite directions** — mobile called successes
+failures, the portal called failures successes. Each was written against a guess at the route's
+return shape rather than against the route, which is why neither matched it and why the two
+mismatches do not resemble each other.
+
+**Disposition:** Fixed, 10 October 2026, in `fix(portal): tell the truth about each invitation's
+outcome`. Verified by screenshot at 1440×1100 against a rebuilt `next start` binary: four outcomes,
+four distinct sentences, 0 raw enum strings on the page with a live positive control on the matcher.
+
+---
+
+### L69 — `GET /company/invites` was built, gated, and never called, so a sender could not see a single invitation they had sent — MEDIUM (completeness; the sender's only recovery was to send another one)
+
+The route exists on the API, is manager-gated, returns `state: "pending" | "expired"` and
+deliberately withholds the token. No client called it. The portal's Team page listed **members** —
+people who had already accepted — and gave no indication that an invitation existed at all.
+
+The consequence is not cosmetic. An expired invitation and a never-sent invitation are
+indistinguishable from the sender's side, and `listSiteInvites` makes this worse on the site half by
+filtering `expires_at > NOW()`, so a lapsed invitation vanishes rather than showing as lapsed. An
+owner chasing someone who had not appeared had no way to tell what had happened, and the only
+available action was to send a duplicate — which, before L67/L68, then reported itself ambiguously.
+
+**Disposition:** Fixed for company invitations, 10 October 2026: the Team page now lists them,
+expired rows included rather than filtered. The site-invite half (`listSiteInvites` hiding expired
+rows, and returning the raw bearer token to its caller) is **open** and recorded in
+`docs/PHASE-1-INVITATION-TRACE.md` under smaller findings.
+
+---
+
+### L70 — Migration 031 would have aborted API boot on any database holding two casings of one invited address — HIGH (availability; a migration that fails at boot takes the service with it)
+
+031 normalises `site_invites.invited_email` to lower case so that L46's read-side normalisation can
+find rows written before it. Written as a single `UPDATE`, it collides with migration 018's two
+partial unique indexes — which are on the **raw** `invited_email`, and therefore permit
+`Alice@Example.com` and `alice@example.com` to coexist today. Lower-casing both makes them the same
+row, the unique index rejects it, and the migration aborts.
+
+Migrations run at **API boot** (`storage/migrate.ts`), so this is not a failed migration; it is a
+service that does not start, on exactly the databases that have the condition the migration exists
+to repair.
+
+Found by reading 018's index definitions while writing 031's test, not by running it — there is no
+Postgres in this environment, which is the same gap that let L65 live in production while dev was
+green.
+
+**Disposition:** Fixed before the migration ever ran anywhere, 10 October 2026. 031 now collapses
+each colliding group to its newest row before normalising. Additive and idempotent; re-running is a
+no-op. **Not smoke-tested against Postgres** — its test is `TEST_DATABASE_URL`-gated and executes
+for the first time in CI.
+
+---
+
+### L71 — The file-backed dev store does not persist companies, so restarting the dev API orphans every account created before the restart — LOW (dev ergonomics; wasted a verification run and will waste yours)
+
+`FileBackedStore` persists `sites`, `entries`, `diaries`, `templates`, `siteInvites` and
+`siteMembers`. Companies are held in memory only. Auth users **do** persist, in
+`data/auth-store.json`.
+
+So after an API restart a user still exists, still logs in, still carries a `companyId` in their
+token — and `GET /api/company/profile` answers **404 "Company not found."** for an id that nothing
+will ever resolve again. On the portal this surfaces as a Team page that loads nothing with no
+useful error, because the page's `Promise.all` rejects on the profile call.
+
+Dev and test only; production is Postgres and unaffected. Recorded because the failure presents as
+an application bug rather than as missing state, and it cost a verification run this phase before
+the cause was found.
+
+**Disposition:** Open, recorded 10 October 2026. Not fixed — the workaround (register a fresh owner
+after each API restart) is cheap, and persisting companies in the fallback store is a change to the
+dev/test data path that nothing in this phase needs.
