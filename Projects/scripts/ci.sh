@@ -105,6 +105,12 @@ node ./scripts/assert-babel-preset-expo.mjs
 step "Structural: rules-of-hooks is actually enforced on the React packages"
 ./scripts/assert-hooks-lint-active.sh
 
+# `ubuntu-latest` starts migrating to Ubuntu 26.04 on 19 October 2026. Pinning
+# the existing workflows was a hand sweep; this is what stops the next workflow
+# floating again.
+step "Structural: workflow runners are pinned and action majors are current"
+./scripts/assert-workflow-runners-pinned.sh
+
 # The Privacy Policy and the Terms each exist in three copies: the canonical
 # markdown in docs/legal/, a data module the mobile app renders, and a page on
 # the marketing site. AUDIT A6 is what happens without this check — the copies

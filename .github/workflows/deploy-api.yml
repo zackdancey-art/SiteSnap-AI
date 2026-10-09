@@ -11,22 +11,25 @@ on:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    # Pinned for the reason given in ci.yml: `ubuntu-latest` starts moving to
+    # Ubuntu 26.04 on 19 October 2026 and would change this runner's OS with no
+    # commit to point at. Raise both together, deliberately.
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: Projects
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10
 
@@ -35,7 +38,7 @@ jobs:
         run: echo "store=$(pnpm store path)" >> $GITHUB_OUTPUT
 
       - name: Cache pnpm store
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ steps.pnpm-cache.outputs.store }}
           key: ${{ runner.os }}-pnpm-${{ hashFiles('Projects/pnpm-lock.yaml') }}
