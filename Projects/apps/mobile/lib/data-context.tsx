@@ -74,9 +74,34 @@ interface DataContextType {
   removeSiteMember: (siteId: string, memberEmail: string) => Promise<void>;
 }
 
+/**
+ * One result per address from POST /company/members/invite.
+ *
+ * THE ROUTE HAS FOUR OUTCOMES, NOT TWO. This interface used to declare
+ * `"sent" | "error"`, and `app/company-invite.tsx` renders anything that is not
+ * `"sent"` with a red alert icon and the words "Failed to send" — so a
+ * successful RE-send, which the route reports as `"resent"`, appeared on this
+ * screen as a failure, and so did `"already_member"`, which is not a failure
+ * either. That is the whole of the reported "I cannot send a second invitation
+ * to an address I have already invited": the second invitation is created and
+ * emailed, and the screen says it was not.
+ *
+ * `delivered` is the second half of the same problem. The route creates the
+ * invitation row first and emails it second, and reports those two steps
+ * separately: `status: "sent"` with `delivered: false` means the invitation
+ * exists and the email did not go out. Dropping the field from this type made
+ * that case indistinguishable from a delivered one.
+ *
+ * The route also returns the bearer `token` when delivery failed. It is
+ * deliberately NOT declared here: it grants company membership, and nothing on
+ * this screen should be able to render it by accident.
+ */
 export interface CompanyInviteResult {
   email: string;
-  status: "sent" | "error";
+  status: "sent" | "resent" | "already_member" | "error";
+  /** Absent on `already_member` and `error` — neither sends an email. */
+  delivered?: boolean;
+  deliveryError?: string;
 }
 
 const DataContext = createContext<DataContextType | null>(null);
