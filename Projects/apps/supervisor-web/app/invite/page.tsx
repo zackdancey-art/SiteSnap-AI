@@ -39,7 +39,7 @@ function InviteForm() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [accepted, setAccepted] = useState<{ siteName: string | null } | null>(null);
+  const [accepted, setAccepted] = useState<{ siteName: string | null; companyRole?: string } | null>(null);
 
   const handleSignInAndAccept = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -50,8 +50,15 @@ function InviteForm() {
       // the call that sets it.
       await login(email.trim().toLowerCase(), password);
       const result = await acceptInvite(token);
-      setAccepted({ siteName: result.siteName });
-      setTimeout(() => router.replace("/dashboard"), 2000);
+      setAccepted({ siteName: result.siteName, companyRole: result.companyRole });
+      // Crew ranks BELOW viewer (middleware/auth.ts ROLE_RANK: crew 0, viewer 1)
+      // and every company route on the dashboard sits behind at least viewer, so
+      // sending a crew member to /dashboard lands them on a screen where each
+      // request answers 403 and nothing explains why. They are accepted and
+      // attached either way - their tools are on the phone, so say that instead.
+      if (result.companyRole !== "crew") {
+        setTimeout(() => router.replace("/dashboard"), 2000);
+      }
     } catch (err: unknown) {
       // Deliberately not a redirect. Signing in may have succeeded while
       // acceptance failed — an expired or already-used invitation — and in that
@@ -93,11 +100,21 @@ function InviteForm() {
             <h2 style={{ fontSize: 18, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>
               Invitation accepted
             </h2>
-            <p style={{ fontSize: 14, color: "var(--text-secondary)" }}>
-              {accepted.siteName
-                ? `You now have access to ${accepted.siteName}. Taking you to the portal…`
-                : "You have joined the team. Taking you to the portal…"}
-            </p>
+            {accepted.companyRole === "crew" ? (
+              <p style={{ fontSize: 14, color: "var(--text-secondary)" }}>
+                {accepted.siteName
+                  ? `You have been added to ${accepted.siteName}. `
+                  : "You have joined the team. "}
+                Day-to-day work — diaries, photos, timesheets and deliveries — happens in the
+                SiteSnap app on your iPhone. Sign in there with this same email address.
+              </p>
+            ) : (
+              <p style={{ fontSize: 14, color: "var(--text-secondary)" }}>
+                {accepted.siteName
+                  ? `You now have access to ${accepted.siteName}. Taking you to the portal…`
+                  : "You have joined the team. Taking you to the portal…"}
+              </p>
+            )}
           </div>
         ) : mode === "choose" ? (
           <div className="auth-form">
