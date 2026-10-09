@@ -98,6 +98,19 @@ step "Structural: ci.yml defines no gate of its own"
 step "Structural: mobile Babel preset matches the SDK"
 node ./scripts/assert-babel-preset-expo.mjs
 
+# rules-of-hooks is enforced through path-globbed `overrides` entries, every
+# part of which can stop matching without anything failing — there are
+# currently zero violations, so losing the rule costs zero errors. This proves
+# the rule actually fires by making it fire.
+step "Structural: rules-of-hooks is actually enforced on the React packages"
+./scripts/assert-hooks-lint-active.sh
+
+# `ubuntu-latest` starts migrating to Ubuntu 26.04 on 19 October 2026. Pinning
+# the existing workflows was a hand sweep; this is what stops the next workflow
+# floating again.
+step "Structural: workflow runners are pinned and action majors are current"
+./scripts/assert-workflow-runners-pinned.sh
+
 # The Privacy Policy and the Terms each exist in three copies: the canonical
 # markdown in docs/legal/, a data module the mobile app renders, and a page on
 # the marketing site. AUDIT A6 is what happens without this check — the copies

@@ -43,6 +43,12 @@
     "lib/camera-permission.ts",
     "lib/camera-permission.test.ts",
     "lib/photo-capture-time.ts",
-    "lib/photo-capture-time.test.ts"
+    "lib/photo-capture-time.test.ts",
+    "constants/colors.ts",
+    "lib/colour-distance.ts",
+    "lib/annotation-palette.ts",
+    "lib/screen-header-audit.ts",
+    "lib/screen-header-audit.test.ts",
+    "lib/annotation-palette.test.ts"
   ]
 }

@@ -1926,3 +1926,87 @@ pure-flex defects on screens whose data can be seeded, and buys nothing for nati
 
 **Disposition:** Open, costed, **not built** — the branch was instructed to cost it rather than
 build it. Recorded 5 October 2026 for the product owner's decision.
+
+### L62 — `rules-of-hooks` buys nothing against the missing-dependency class, which is the class L42–L44 belong to — LOW (process; a closed finding that is less closed than its note says)
+
+`eslint-plugin-react-hooks` is now installed and `react-hooks/rules-of-hooks` enforced on
+`apps/mobile` and `apps/supervisor-web`. L44's note says the plugin "would have flagged this".
+That is true of the plugin and **false of the configuration this repo now has**, and the
+difference matters because the note reads as though the gap were closed.
+
+L44's defect — an effect reading its in-flight guard while declaring only `[tab, photos]` — is an
+`exhaustive-deps` finding, not a `rules-of-hooks` one. `exhaustive-deps` reported **18** warnings
+across the two packages and is deliberately **off**: a dependency array is not a lint fix, because
+on these screens adding a dependency changes when a network request fires, and eighteen of those
+rewritten at once is eighteen untested behaviour changes.
+
+Checked rather than reasoned (9 October 2026): L44's original shape was reconstructed and linted
+under the shipped configuration, which reported nothing, and under the same configuration with
+`exhaustive-deps` switched back on, which reported
+`React Hook useEffect has a missing dependency: 'signingPhotos'`.
+
+So the conditional-hook class is now mechanically prevented and the missing-dependency class is
+still found only by reading. L42–L44 are all the same effect and all the second class. The
+remaining 18 warnings are the inventory of where that class already lives.
+
+**Disposition:** Open as a known coverage boundary, recorded 9 October 2026. Closing it means
+working through the 18 screen by screen with the request count observed — its own piece of work,
+not a lint autofix.
+
+### L63 — The exported diary and inspection HTML carries its own undocumented 14-colour palette, five of them frozen copies of design tokens — LOW (drift; the artefact is the compliance evidence)
+
+`lib/export-utils.ts` generates the HTML that becomes the exported diary PDF — the document this
+product exists to produce, and the copy a client or regulator actually reads. It **does not import
+`@/constants/colors` at all**. It contains 28 hex literals, 14 distinct:
+
+- **Five duplicate a real token by value** — `#0F2B46` (`primary`/`text`), `#FFFFFF` (`white`),
+  `#FCD34D` (`warningBorder`), `#FEF3C7` (`warningBg`), `#92400E` (`warningText`). These are the
+  drift risk: change the token and the app moves while every future export keeps the old value,
+  with nothing reporting the disagreement.
+- **Nine exist nowhere in the token file** — `#EEF2F7`, `#143A5B`, `#F6F8FB`, `#DDE5EF`, `#6F8095`,
+  `#E3EAF2`, `#31455D`, `#E6EDF5`, `#EDF1F7`. A second navy-and-grey scale, governed by nothing,
+  reviewed by nobody, and invisible to any decision made about the app's palette.
+
+The same pattern is smaller elsewhere: `app/inspections/[siteId].tsx` has 7 literals (3 token
+duplicates plus `#6F8095` again), `app/crew/[siteId].tsx` 2, `app/_layout.tsx` 1.
+
+This is the shape of A6 and L36 — the legal-text drift — in a place nobody looked: several copies
+of one thing, each internally consistent, with no check comparing them. It was found while costing
+a "no raw hex outside the token file" check for this branch's sweep list, not by looking for it.
+
+Worth noting the first measurement of this was wrong and the error is instructive: a grep for
+`"#......"` (requiring the quote) reported 4 files and 1 stray, because the export templates write
+colour inside CSS strings as `color:#6F8095` with no quote. The quote-independent count is 8 files.
+A check written on the first pattern would have passed while missing the entire finding.
+
+**Disposition:** Open, recorded 9 October 2026. Not fixed here — this branch is about tests, and
+changing export colours changes already-exported evidence (the same consideration that has the
+annotation stroke-casing decision still open).
+
+### L64 — CLAUDE.md's procedure for enumerating RLS-forced tables reports 11 of 15, because migration 025 applies four through a dynamic `DO` loop — LOW (documentation; understates a security boundary)
+
+CLAUDE.md §3 tells an agent to find which tables are RLS-forced with
+`grep -l "FORCE ROW LEVEL SECURITY" …/migrations/*.sql`. That returns *files*, and anyone who goes
+on to read table names out of them next to the `FORCE` keyword gets **11**:
+`entry_templates`, `incidents`, `inspection_signatures`, `project_diaries`, `project_entries`,
+`project_sites`, `project_templates`, `push_tokens`, `site_invites`, `uploads`, `worker_locations`.
+
+Migration `025_rls_remaining_tenant_tables.sql` applies RLS to four more inside a `DO` block via
+`EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t)` over an array literal, so the table
+names never appear adjacent to the keyword: `site_members`, `material_deliveries`,
+`crew_timecards`, `inspections`. The real figure is **15**.
+
+Undercounting here is the dangerous direction. An agent that believes `crew_timecards` is not
+RLS-forced has no reason to route its queries through `withTenant`, and the failure mode is the
+fail-closed one CLAUDE.md §3 warns about — zero rows on read, a `WITH CHECK` violation on insert,
+and no error at the call site.
+
+A more careful grep is the wrong fix: it would be defeated again by the next migration that
+expresses RLS dynamically, which is now the established pattern for applying it to several tables
+at once. CLAUDE.md already gives the authoritative query —
+`SELECT relname FROM pg_class WHERE relforcerowsecurity` — and the `test:db` path already boots the
+migrations against a real `postgres:16`. The fix is a DB-gated test pinning that set at 15 and
+naming it, so a migration that adds or drops RLS on a table fails on the commit that does it.
+
+**Disposition:** Open, recorded 9 October 2026. Identified as mechanisable on this branch's sweep
+list and deliberately **not built** — the branch was told to list these, not build them.

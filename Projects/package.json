@@ -30,6 +30,7 @@
     "babel-plugin-module-resolver": "^5.0.2",
     "eslint": "^8.46.0",
     "eslint-plugin-import": "^2.27.5",
+    "eslint-plugin-react-hooks": "^5.2.0",
     "typescript": "^5.9.3"
   },
   "pnpm": {

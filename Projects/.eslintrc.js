@@ -6,6 +6,46 @@
 // This is finding H5. Keep as .js (not .json) so `__dirname` is available.
 const tsconfigRootDir = __dirname;
 
+// ── eslint-plugin-react-hooks: scoped to the two React packages ───────────
+//
+// NOT enabled at the root, and the reason is a measurement rather than a
+// preference. Switched on globally, `react-hooks/rules-of-hooks` reported 99
+// violations and every single one was in `services/api`: the plugin treats any
+// call to a function named `use*` as a React hook, and the storage layer is
+// built on `useDatabase()` and `useS3Storage()` -- plain predicates that answer
+// "is Postgres configured" and "is S3 configured". There is no React in the API.
+//
+// So the 99 were noise, and suppressing them one by one would have been 99
+// eslint-disable comments protecting nothing. Scoping the plugin to the
+// packages that actually render React is the honest configuration: it is the
+// code the rule is about, and a real violation there is not drowned.
+//
+// `exhaustive-deps` is deliberately OFF. It reported 18 across both packages,
+// and a dependency array is not a lint fix: adding `load` to an effect's deps
+// changes when that effect re-runs, which on these screens is a network
+// request. Eighteen of those rewritten in a test branch is eighteen untested
+// behaviour changes. They are worth doing as their own piece of work, screen by
+// screen, with someone watching the request count. Left on as a warning it
+// would also fail the pre-commit hook, which runs lint with --max-warnings=0.
+//
+// CONSEQUENCE, STATED PLAINLY: this configuration would NOT have caught AUDIT
+// L44 -- the portal signing effect that read its in-flight guard while
+// declaring only `[tab, photos]`. L44's own note says the plugin "would have
+// flagged this", and that is true of the PLUGIN but not of this CONFIG: the
+// shape is an exhaustive-deps warning, and exhaustive-deps is the rule turned
+// off above. Checked, not reasoned -- L44's original shape linted under this
+// config reports nothing, and reports the missing `signingPhotos` dependency
+// as soon as exhaustive-deps is switched back on. So rules-of-hooks buys the
+// conditional-hook class and buys nothing against the missing-dependency
+// class, which is the class L42-L44 actually belong to. See AUDIT L62.
+const reactHooks = {
+  plugins: ["react-hooks"],
+  rules: {
+    "react-hooks/rules-of-hooks": "error",
+    "react-hooks/exhaustive-deps": "off",
+  },
+};
+
 module.exports = {
   root: true,
   parser: "@typescript-eslint/parser",
@@ -38,15 +78,19 @@ module.exports = {
     },
     {
       files: ["apps/mobile/**/*.{ts,tsx}"],
+      plugins: reactHooks.plugins,
       rules: {
         "no-restricted-imports": ["error", { patterns: ["services/*", "services/**"] }],
+        ...reactHooks.rules,
       },
       parserOptions: { tsconfigRootDir, project: ["./apps/mobile/tsconfig.json"] },
     },
     {
       files: ["apps/supervisor-web/**/*.{ts,tsx}"],
+      plugins: reactHooks.plugins,
       rules: {
         "no-restricted-imports": ["error", { patterns: ["services/*", "services/**"] }],
+        ...reactHooks.rules,
       },
       parserOptions: { tsconfigRootDir, project: ["./apps/supervisor-web/tsconfig.json"] },
     },
