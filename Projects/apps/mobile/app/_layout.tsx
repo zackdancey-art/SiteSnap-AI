@@ -255,6 +255,13 @@ function RootLayoutNav() {
       <Stack.Screen name="settings/account" options={{ headerShown: false }} />
       <Stack.Screen name="settings/data-privacy" options={{ headerShown: false }} />
       <Stack.Screen name="settings/about" options={{ headerShown: false }} />
+      {/* settings/offline-sync was the one screen rendering ScreenHeader that
+          was never registered here, so it fell through to the root
+          screenOptions — which set colours but never `headerShown: false` —
+          and showed BOTH a native "‹ Back" bar and its own "‹ Offline Sync"
+          header below it. Two back affordances, one screen. Same omission as
+          terms-of-service above, different symptom. AUDIT L59. */}
+      <Stack.Screen name="settings/offline-sync" options={{ headerShown: false }} />
     </Stack>
     </>
   );

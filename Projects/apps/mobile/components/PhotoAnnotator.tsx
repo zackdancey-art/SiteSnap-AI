@@ -17,10 +17,59 @@ type PhotoAnnotatorProps = {
 const VIEWBOX_WIDTH = 1000;
 const STROKE_WIDTH = 6;
 
+/**
+ * The mark colours, and why these four and not the previous three.
+ *
+ * WHAT WAS WRONG WITH THE OLD SET
+ *
+ * Red and Amber were raw hex literals that happened to equal `Colors.error` and
+ * `Colors.warning` — two more places for the palette to drift out of step with
+ * the design tokens. They are the tokens now.
+ *
+ * Navy was `Colors.primary` (#0F2B46), and it is the worst colour in the whole
+ * token set for this job. Measured against a mid-shadow background (#2E2E2E) it
+ * scores a WCAG contrast ratio of 1.06 and a CIE76 colour difference of 20 —
+ * i.e. all but invisible in shade, which is exactly where a site defect gets
+ * photographed. It is dropped rather than kept for continuity. Existing strokes
+ * that already carry it still render; nothing rewrites stored annotations.
+ *
+ * HOW THE FOUR WERE CHOSEN
+ *
+ * Every token in `constants/colors.ts` was scored two ways against three
+ * reference backgrounds — concrete #9A9A9A, sky #87BEE8, mid-shadow #2E2E2E —
+ * taking the WORST of the three in each case: WCAG relative-luminance contrast
+ * ratio, and CIE76 dE in Lab. Then a pairwise dE matrix for whether two marks on
+ * one photograph can be told apart.
+ *
+ * Worst-case dE against the three backgrounds: amber 79, red 76, orange 75,
+ * green 74, accentLight 65, infoText 52, white 36, info blue 30, navy 20.
+ *
+ * Pairwise dE decides the rest. The warm family collapses: amber<->orange is 23
+ * and accentLight<->amber 19, so `Colors.accent` and `Colors.accentLight` cannot
+ * join amber without two swatches that read as the same mark. Red<->amber is 57,
+ * green is 92 or more from every warm colour, and infoText is 101+ from all
+ * three. That is the set below, and adding any fifth token breaks a pair.
+ *
+ * THE CAVEAT ON BLUE, stated rather than hidden: infoText's worst case is 52,
+ * and it is carried almost entirely by b*. Its L* is about 23 against
+ * mid-shadow's 19, so on a deep-shadow photograph it is the weakest of the four.
+ * It is in because four distinguishable marks is worth more than three, not
+ * because it is as good as the other three.
+ *
+ * WHAT NO HUE CHOICE CAN FIX: not one token in the set reaches 3:1 contrast
+ * against all three backgrounds — the best is white at 1.99. Legibility over an
+ * arbitrary photograph is a property of RENDERING, not of hue: it wants a casing
+ * (a dark outline under the stroke). That would have to be applied identically
+ * in all three render sites — this component, `AnnotatedImage.tsx` and
+ * `lib/export-utils.ts` — and it would change how every annotation already
+ * stored appears in exported compliance evidence. That is a decision for the
+ * product owner, so it is reported and not built.
+ */
 const PALETTE = [
-  { label: "Red", color: "#EF4444" },
-  { label: "Amber", color: "#F59E0B" },
-  { label: "Navy", color: Colors.primary },
+  { label: "Red", color: Colors.error },
+  { label: "Amber", color: Colors.warning },
+  { label: "Green", color: Colors.success },
+  { label: "Blue", color: Colors.infoText },
 ];
 
 export function PhotoAnnotator({ photo, onSave, onCancel }: PhotoAnnotatorProps) {
@@ -42,7 +91,10 @@ export function PhotoAnnotator({ photo, onSave, onCancel }: PhotoAnnotatorProps)
   const [vbHeight, setVbHeight] = useState(VIEWBOX_WIDTH);
   const [strokes, setStrokes] = useState<AnnotationStroke[]>([]);
   const strokesRef = useRef<AnnotationStroke[]>([]);
-  const [color, setColor] = useState(Colors.accent);
+  // The default has to BE a palette member. It was `Colors.accent`, which was
+  // in no swatch: the annotator opened with nothing selected, and once you
+  // picked any colour you could never get the one you started with back.
+  const [color, setColor] = useState(PALETTE[0].color);
 
   const scaleRef = useRef({ x: 1, y: 1 });
 
@@ -163,6 +215,12 @@ export function PhotoAnnotator({ photo, onSave, onCancel }: PhotoAnnotatorProps)
         {PALETTE.map((p) => (
           <Pressable
             key={p.color}
+            // The swatches are bare colour with no text, so without these a
+            // screen reader announced four identical unlabelled buttons.
+            // `label` was already carried in PALETTE and previously unused.
+            accessibilityRole="button"
+            accessibilityLabel={`${p.label} mark colour`}
+            accessibilityState={{ selected: color === p.color }}
             style={[styles.swatch, { backgroundColor: p.color }, color === p.color && styles.swatchActive]}
             onPress={() => setColor(p.color)}
             hitSlop={6}

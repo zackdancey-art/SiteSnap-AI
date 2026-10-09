@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { ScreenHeader } from "@/components/ScreenHeader";
-import { SettingsBody, SettingsBodyStrong, SettingsCard, SettingsSection } from "@/components/SettingsSection";
+import { SettingsCard, SettingsSection } from "@/components/SettingsSection";
 import { useData } from "@/lib/data-context";
 import type { QueuedOp } from "@/lib/offline-queue";
 import Colors from "@/constants/colors";
@@ -21,6 +21,25 @@ import Colors from "@/constants/colors";
  * holds the only copy of work somebody did on a site, and throwing that away is
  * a retention decision for the person who owns the records rather than a button
  * on a settings screen.
+ *
+ * WHY IT IS NOW A LIST AND NOT A PAGE
+ *
+ * It was three sections and a paragraph headed "What this screen is for", and
+ * for almost everyone who opened it every section said nothing was wrong. A
+ * screen that has to explain its own existence is the wrong screen, and stock
+ * reassurance ("Nothing has failed to send") is clutter dressed as a feature.
+ *
+ * So: each section appears only when it has rows. The failed row already says
+ * what happened in one line — what it was, when, and what the server said — so
+ * the paragraph explaining failures in the abstract is gone; the row is the
+ * explanation. With nothing pending and nothing failed the screen is one line,
+ * and the Settings entry that leads here is not rendered at all
+ * (app/(tabs)/settings.tsx), so that state is only reachable by emptying the
+ * list while standing on it.
+ *
+ * The capability AUDIT L30 was about is untouched: a refused op is still
+ * retained with its reason, still listed here, and still announced by
+ * SyncStatusBanner on the sites list without anyone going looking for it.
  */
 export default function OfflineSyncScreen() {
   const { pendingCount, failedOps, retryFailedSync } = useData();
@@ -42,45 +61,15 @@ export default function OfflineSyncScreen() {
     <View style={styles.container}>
       <ScreenHeader title="Offline Sync" paddingBottom={16} homeFallback="/(tabs)/settings" />
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        <SettingsSection title="Waiting to send">
-          <SettingsCard>
-            <View style={styles.statusRow}>
-              <View style={[styles.statusIcon, { backgroundColor: Colors.infoBg }]}>
-                <Ionicons name="cloud-upload-outline" size={20} color={Colors.info} />
-              </View>
-              <Text style={styles.statusText}>
-                {pendingCount === 0
-                  ? "Everything on this phone has been sent."
-                  : `${pendingCount} ${pendingCount === 1 ? "item is" : "items are"} waiting for coverage.`}
-              </Text>
-            </View>
-          </SettingsCard>
-        </SettingsSection>
-
-        <SettingsSection
-          title="Did not send"
-          description={
-            failedOps.length === 0
-              ? undefined
-              : "These were refused by the server, so retrying on its own will not help. They are kept on this phone until you retry them."
-          }
-        >
-          <SettingsCard>
-            {failedOps.length === 0 ? (
-              <View style={styles.statusRow}>
-                <View style={[styles.statusIcon, { backgroundColor: Colors.successBg }]}>
-                  <Ionicons name="checkmark-circle-outline" size={20} color={Colors.successText} />
-                </View>
-                <Text style={styles.statusText}>Nothing has failed to send.</Text>
-              </View>
-            ) : (
-              failedOps.map((op, index) => (
+        {/* Failed first: it is the only thing here that needs a decision. */}
+        {failedOps.length > 0 && (
+          <SettingsSection title="Did not send">
+            <SettingsCard>
+              {failedOps.map((op, index) => (
                 <FailedRow key={op.id} op={op} first={index === 0} />
-              ))
-            )}
-          </SettingsCard>
+              ))}
+            </SettingsCard>
 
-          {failedOps.length > 0 && (
             <Pressable
               onPress={() => onRetry()}
               disabled={retrying}
@@ -91,20 +80,39 @@ export default function OfflineSyncScreen() {
                 {retrying ? "Retrying…" : `Retry ${failedOps.length === 1 ? "this item" : "all items"}`}
               </Text>
             </Pressable>
-          )}
-        </SettingsSection>
+          </SettingsSection>
+        )}
 
-        <SettingsSection title="What this screen is for">
-          <SettingsCard>
-            <SettingsBody>
-              <SettingsBodyStrong>Why it is kept rather than retried. </SettingsBodyStrong>
-              An item lands here when the server answered and refused it — a rule it
-              did not satisfy, or a site you no longer have access to. Sending it
-              again unchanged gets the same answer, so the app stops trying and waits
-              for you. Fix whatever it names, then retry.
-            </SettingsBody>
-          </SettingsCard>
-        </SettingsSection>
+        {pendingCount > 0 && (
+          <SettingsSection title="Waiting to send">
+            <SettingsCard>
+              <View style={styles.statusRow}>
+                <View style={[styles.statusIcon, { backgroundColor: Colors.infoBg }]}>
+                  <Ionicons name="cloud-upload-outline" size={20} color={Colors.info} />
+                </View>
+                <Text style={styles.statusText}>
+                  {`${pendingCount} ${pendingCount === 1 ? "item is" : "items are"} waiting for coverage.`}
+                </Text>
+              </View>
+            </SettingsCard>
+          </SettingsSection>
+        )}
+
+        {/* Only reachable by emptying the list while standing on it — the
+            Settings entry that leads here is not rendered when both are zero.
+            One line, so the screen is never blank. */}
+        {failedOps.length === 0 && pendingCount === 0 && (
+          <SettingsSection>
+            <SettingsCard>
+              <View style={styles.statusRow}>
+                <View style={[styles.statusIcon, { backgroundColor: Colors.successBg }]}>
+                  <Ionicons name="checkmark-circle-outline" size={20} color={Colors.successText} />
+                </View>
+                <Text style={styles.statusText}>Everything on this phone has been sent.</Text>
+              </View>
+            </SettingsCard>
+          </SettingsSection>
+        )}
       </ScrollView>
     </View>
   );

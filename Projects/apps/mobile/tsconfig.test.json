@@ -35,10 +35,13 @@
     "lib/photo-uri.test.ts",
     "lib/offline-queue.ts",
     "lib/photo-payload-store.ts",
+    "lib/photo-payload-store.test.ts",
     "lib/sync-telemetry-redaction.ts",
     "lib/sync-telemetry-redaction.test.ts",
     "lib/offline-drain.ts",
     "lib/offline-drain.test.ts",
+    "lib/camera-permission.ts",
+    "lib/camera-permission.test.ts",
     "lib/photo-capture-time.ts",
     "lib/photo-capture-time.test.ts"
   ]
