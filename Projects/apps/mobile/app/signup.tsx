@@ -13,7 +13,7 @@ import {
   View,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { router } from "expo-router";
+import { router, useLocalSearchParams } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Colors from "@/constants/colors";
 import { apiRequest } from "@/lib/query-client";
@@ -47,6 +47,18 @@ function normalizeLocalPhone(phone: string) {
 
 export default function SignUpScreen() {
   const insets = useSafeAreaInsets();
+  /**
+   * The invitation this signup is fulfilling, if any.
+   *
+   * The API has always accepted an `inviteToken` on /auth/register/verify —
+   * routes/auth.ts reads it, skips creating a solo company, and attaches the new
+   * account to the inviting one. No client ever sent it: the string
+   * "inviteToken" appeared nowhere under apps/. So every invited signup created
+   * a brand-new company with the invitee as its owner, and the invitation they
+   * were acting on was left untouched in the database.
+   */
+  const { inviteToken } = useLocalSearchParams<{ inviteToken?: string }>();
+  const invite = typeof inviteToken === "string" && inviteToken.trim() ? inviteToken.trim() : null;
   // Three stages, not two: the SMS is only minted once the email code is
   // accepted (API migration 029), so "check your email" and "check your phone"
   // are genuinely separate waits and cannot share a screen.
@@ -244,6 +256,9 @@ export default function SignUpScreen() {
       const res = await apiRequest("POST", "/api/auth/register/verify", {
         email: email.trim().toLowerCase(),
         smsCode: smsCode.trim(),
+        // Only sent when present: an empty string here would make the API take
+        // the invited-join branch and create the account with no company.
+        ...(invite ? { inviteToken: invite } : {}),
       });
       const data = (await res.json()) as { error?: string; restart?: boolean; stage?: string };
       if (res.ok) {
