@@ -47,7 +47,24 @@
 -- unacceptable, which is what being superseded means, and they expire on their
 -- own 7-day schedule.
 --
--- IDEMPOTENT: a second run finds nothing to normalise and reports zero.
+-- IDEMPOTENT — and rank alone was NOT enough to make it so.
+--
+-- A run that leaves superseded duplicates behind leaves rows that still satisfy
+-- `invited_email <> lower(btrim(invited_email))`. On a second run each of those
+-- is the ONLY candidate left in its group, so it ranks 1 and the UPDATE tries to
+-- fold it onto the address the first run already gave its sibling — a unique
+-- index violation, and because migrate.ts wraps each file in one transaction,
+-- a migration that aborts. A migration whose second run throws is not
+-- idempotent, whatever the first run reported.
+--
+-- So the candidate set also excludes any row whose folded address is ALREADY
+-- occupied by a different row in the same uniqueness group (`target_taken`).
+-- That makes the exclusion a property of the data rather than of the ordering,
+-- which is what idempotency needs: on the second run the sibling is sitting at
+-- the target address, target_taken is true, nothing is attempted, and the two
+-- assertions below both hold at zero work done. It also covers the case rank
+-- never could — a mixed-case row whose lower-cased twin was ALWAYS normalised
+-- and so was never a candidate at all.
 
 ALTER TABLE site_invites NO FORCE ROW LEVEL SECURITY;
 
@@ -58,33 +75,47 @@ DECLARE
   normalised INTEGER;
   remaining  INTEGER;
 BEGIN
-  -- Rank every row that needs folding within its uniqueness group. The two
-  -- partial indexes have different keys, so the partition is (site_id) for a
-  -- site invite and (company_id) for a company invite; `site_id IS NULL`
-  -- separates the two index populations and is kept in the partition to make
-  -- that explicit rather than implied by the COALESCE.
+  -- Rank every row that needs folding within its uniqueness group, and record
+  -- whether its folded address is already occupied. The two partial indexes
+  -- have different keys, so the group is (site_id) for a site invite and
+  -- (company_id) for a company invite; `site_id IS NULL` separates the two
+  -- index populations and is kept in the key to make that explicit rather than
+  -- implied by the COALESCE. The COALESCE's third arm ('') is unreachable: no
+  -- writer produces a row with both site_id and company_id NULL — site invites
+  -- have carried a site_id since 008 and company invites a company_id since
+  -- 018 — and such a row would be in neither partial index anyway, so it could
+  -- not collide with anything.
   CREATE TEMP TABLE _l46_fold ON COMMIT DROP AS
-  SELECT id,
+  SELECT si.id,
          ROW_NUMBER() OVER (
-           PARTITION BY (site_id IS NULL),
-                        COALESCE(site_id, company_id, ''),
-                        lower(btrim(invited_email))
-           ORDER BY expires_at DESC, created_at DESC, id DESC
-         ) AS rank
-    FROM site_invites
-   WHERE invited_email <> lower(btrim(invited_email));
+           PARTITION BY (si.site_id IS NULL),
+                        COALESCE(si.site_id, si.company_id, ''),
+                        lower(btrim(si.invited_email))
+           ORDER BY si.expires_at DESC, si.created_at DESC, si.id DESC
+         ) AS rank,
+         EXISTS (
+           SELECT 1
+             FROM site_invites o
+            WHERE o.id <> si.id
+              AND (o.site_id IS NULL) = (si.site_id IS NULL)
+              AND COALESCE(o.site_id, o.company_id, '') = COALESCE(si.site_id, si.company_id, '')
+              AND o.invited_email = lower(btrim(si.invited_email))
+         ) AS target_taken
+    FROM site_invites si
+   WHERE si.invited_email <> lower(btrim(si.invited_email));
 
   SELECT COUNT(*) INTO candidates FROM _l46_fold;
-  SELECT COUNT(*) INTO superseded FROM _l46_fold WHERE rank > 1;
+  SELECT COUNT(*) INTO superseded FROM _l46_fold WHERE rank > 1 OR target_taken;
 
   UPDATE site_invites si
      SET invited_email = lower(btrim(si.invited_email))
     FROM _l46_fold f
    WHERE f.id = si.id
-     AND f.rank = 1;
+     AND f.rank = 1
+     AND NOT f.target_taken;
   GET DIAGNOSTICS normalised = ROW_COUNT;
 
-  RAISE NOTICE '031: % site_invites rows carried a non-normalised invited_email; % normalised, % left as superseded duplicates.',
+  RAISE NOTICE '031: % site_invites rows carried a non-normalised invited_email; % normalised, % left as superseded duplicates (lower-ranked in their group, or their folded address already taken).',
     candidates, normalised, superseded;
 
   -- Assert the work actually happened. Every candidate must now be either
