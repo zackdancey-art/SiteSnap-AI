@@ -1541,13 +1541,48 @@ export async function acceptSiteInvite(
     }
 
     // Stamp company membership within the same transaction (soft relationship).
+    //
+    // AUDIT L65. The guard here was `(company_id IS NULL OR company_id = $2)`,
+    // and BOTH of its branches are dead in production:
+    //
+    //   - `company_id IS NULL` cannot be true. Migration 016 ends with a DO
+    //     block that RAISE EXCEPTIONs if any auth_users row still has a NULL
+    //     company_id, so after 016 none does — and the invited-signup path
+    //     writes the EMPTY STRING, not NULL (routes/auth.ts sets companyId = ""
+    //     and createUser passes it straight into the INSERT).
+    //   - `company_id = $2` matches only a user already in the target company,
+    //     i.e. it is a no-op.
+    //
+    // So the UPDATE matched zero rows for every case that matters: a brand-new
+    // invited signup (''), and an existing solo-company user. acceptSiteInvite
+    // then returned success and the route minted a fresh auth token from the
+    // INVITE's company — a token claiming a company the database row did not
+    // have, which the next login silently reverted. On Postgres this meant
+    // invitation acceptance had never attached anybody to a company at all.
+    //
+    // The condition below is the SQL equivalent of applyCompanyMembership's
+    // `if (!currentCompany || currentCompany !== invite.companyId)`, which is
+    // what the in-memory path has always done — the two paths disagreed and the
+    // one that runs in production was the wrong one. A solo company is treated
+    // as "no real company" and may be overridden, which is exactly what the
+    // cross-company peek above already assumes when it computes isSoloCompany.
+    //
+    // rowCount is then asserted rather than ignored. The peek above has already
+    // rejected a genuine cross-company user, so a zero here means the row moved
+    // between the peek and this write; rolling back is correct, and it keeps the
+    // silent-success failure mode from ever coming back.
     if (invite.company_id) {
-      await client.query(
+      const stamped = await client.query(
         `UPDATE auth_users
            SET company_id = $2, company_role = $3
-         WHERE email = $1 AND (company_id IS NULL OR company_id = $2)`,
-        [actorEmail, invite.company_id, invite.company_role ?? "crew"]
+         WHERE email = $1
+           AND (company_id IS NULL OR company_id = '' OR company_id = $2 OR company_id = $4)`,
+        [actorEmail, invite.company_id, invite.company_role ?? "crew", soloCompanyIdForEmail(actorEmail)]
       );
+      if (stamped.rowCount !== 1) {
+        await client.query("ROLLBACK");
+        return "already_in_company";
+      }
     }
 
     let siteName: string | null = null;
