@@ -354,8 +354,33 @@ export async function listCompanyMembers(): Promise<CompanyMember[]> {
   return data.members;
 }
 
-export async function inviteCompanyMembers(emails: string[], companyRole: string): Promise<{ results: { email: string; status: string }[] }> {
-  return request<{ results: { email: string; status: string }[] }>("POST", "/api/company/members/invite", { emails, companyRole });
+/**
+ * One result per address from POST /company/members/invite.
+ *
+ * The route reports four outcomes and two separate steps, and this type used to
+ * flatten both: `status` was typed `string`, which let the Team page print the
+ * raw enum at the reader, and `delivered` was not declared at all.
+ *
+ * `delivered` is the step that matters. The route creates the invitation row
+ * first and emails it second, and says so separately — `status: "sent"` with
+ * `delivered: false` means the invitation exists and no email went out. With
+ * the field dropped, the page showed a green tick either way, so an invitation
+ * nobody could have received read as sent.
+ *
+ * The route also returns the bearer `token` when delivery failed. It is
+ * deliberately NOT declared here: it grants company membership, and nothing on
+ * this surface should be able to render it by accident.
+ */
+export type CompanyInviteResult = {
+  email: string;
+  status: "sent" | "resent" | "already_member" | "error";
+  /** Absent on `already_member` and `error` — neither sends an email. */
+  delivered?: boolean;
+  deliveryError?: string;
+};
+
+export async function inviteCompanyMembers(emails: string[], companyRole: string): Promise<{ results: CompanyInviteResult[] }> {
+  return request<{ results: CompanyInviteResult[] }>("POST", "/api/company/members/invite", { emails, companyRole });
 }
 
 export async function updateMemberRole(email: string, companyRole: string): Promise<void> {

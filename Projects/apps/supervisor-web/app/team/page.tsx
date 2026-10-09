@@ -13,7 +13,7 @@ import {
 } from "@/lib/api";
 import { useRole } from "@/lib/useRole";
 import { COMPANY_ROLE_LABELS } from "@/lib/roles";
-import type { CompanyProfile, CompanyMember } from "@/lib/api";
+import type { CompanyProfile, CompanyMember, CompanyInviteResult } from "@/lib/api";
 
 // The labels come from lib/roles so this file and ProfileDropdown cannot drift
 // into two vocabularies again; the colours stay local, they are only used here.
@@ -31,6 +31,56 @@ function RoleBadge({ role }: { role: string }) {
       {cfg.label}
     </span>
   );
+}
+
+/**
+ * One description per invitation outcome, derived from the WHOLE result.
+ *
+ * What was here before rendered every result inside one green box as
+ * `✓ {email} — {status === "sent" ? "Invitation sent" : status}`. Three things
+ * were wrong with that, in rising order of consequence:
+ *
+ *  - it printed the raw enum, so re-inviting someone showed
+ *    "✓ alice@example.com — resent" and an existing team member showed
+ *    "✓ alice@example.com — already_member";
+ *  - it gave every outcome a tick and a green background, including the ones
+ *    that are not successes;
+ *  - it ignored `delivered`, which the route reports separately from `status`
+ *    — so an invitation whose email failed to send read as "Invitation sent".
+ *
+ * Colours come from the existing tokens and the tints already used in this
+ * file; the message itself is `var(--text)` on every tint, because the accent
+ * orange on a cream tint does not carry enough contrast to be read.
+ */
+function describeInvite(r: CompanyInviteResult): { glyph: string; color: string; bg: string; label: string } {
+  if (r.status === "error") {
+    return { glyph: "✕", color: "var(--error)", bg: "#FEE2E2", label: "Could not create the invitation" };
+  }
+  if (r.status === "already_member") {
+    return { glyph: "—", color: "var(--text-secondary)", bg: "#F1F5F9", label: "Already in your team — no invitation needed" };
+  }
+  if (r.delivered === false) {
+    // The re-send case has to keep its warning about the old link. Falling
+    // through to one shared undelivered message would drop it, and the old
+    // link is dead either way — the email failing does not bring it back.
+    return {
+      glyph: "!",
+      color: "var(--warning)",
+      bg: "#FFF7ED",
+      label: r.status === "resent"
+        ? "Invitation re-issued, but the email could not be sent — any earlier link for this address has stopped working"
+        : "Invitation created, but the email could not be sent",
+    };
+  }
+  if (r.status === "resent") {
+    return {
+      glyph: "✓",
+      color: "var(--success)",
+      bg: "#F0FDF4",
+      label: "Invitation re-sent — any earlier link for this address has stopped working",
+    };
+  }
+  return { glyph: "✓", color: "var(--success)", bg: "#F0FDF4", label: "Invitation sent" };
 }
 
 function Panel({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
@@ -64,7 +114,7 @@ export default function TeamPage() {
   const [inviteEmails, setInviteEmails] = useState("");
   const [inviteRole, setInviteRole] = useState<"manager" | "viewer" | "crew">("viewer");
   const [inviting, setInviting] = useState(false);
-  const [inviteResults, setInviteResults] = useState<{ email: string; status: string }[]>([]);
+  const [inviteResults, setInviteResults] = useState<CompanyInviteResult[]>([]);
   const [inviteError, setInviteError] = useState("");
 
   // Per-member state
@@ -289,10 +339,33 @@ export default function TeamPage() {
                       <div style={{ background: "#FEE2E2", color: "#991B1B", borderRadius: 8, padding: "8px 12px", fontSize: 13 }}>{inviteError}</div>
                     )}
                     {inviteResults.length > 0 && (
-                      <div style={{ background: "#F0FDF4", color: "#166534", borderRadius: 8, padding: "10px 14px", fontSize: 13 }}>
-                        {inviteResults.map((r) => (
-                          <div key={r.email}>✓ {r.email} — {r.status === "sent" ? "Invitation sent" : r.status}</div>
-                        ))}
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        {inviteResults.map((r) => {
+                          const d = describeInvite(r);
+                          return (
+                            <div
+                              key={r.email}
+                              style={{
+                                background: d.bg,
+                                color: "var(--text)",
+                                borderLeft: `3px solid ${d.color}`,
+                                borderRadius: 8,
+                                padding: "10px 14px",
+                                fontSize: 13,
+                                display: "flex",
+                                gap: 10,
+                                alignItems: "flex-start",
+                              }}
+                            >
+                              <span aria-hidden="true" style={{ color: d.color, fontWeight: 700, lineHeight: "1.4" }}>{d.glyph}</span>
+                              <span style={{ lineHeight: 1.4 }}>
+                                <strong style={{ fontWeight: 600 }}>{r.email}</strong>
+                                <br />
+                                {d.label}
+                              </span>
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                     <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
