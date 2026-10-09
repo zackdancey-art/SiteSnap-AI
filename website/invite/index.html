@@ -101,24 +101,42 @@
       <h1>You&rsquo;ve been invited to SiteSnap</h1>
       <p class="intro">
         Someone has invited you to help keep the site record on a job &mdash; daily
-        diaries, photos, timesheets and deliveries. To accept, you need the SiteSnap
-        app on your iPhone.
+        diaries, photos, timesheets and deliveries. You can accept right here in your
+        browser, or in the SiteSnap app on your iPhone.
+      </p>
+    </div>
+
+    <div class="card" id="web-accept-card" hidden>
+      <h2>Accept in your browser</h2>
+      <p>
+        You do not need the app. This works on any device &mdash; a computer, an
+        Android phone, or an iPhone without SiteSnap installed. You will be asked to
+        sign in, or to create an account with <strong>the same email address the
+        invitation was sent to</strong>.
+      </p>
+      <a class="btn btn-primary" id="web-accept-link" href="#">Accept invitation</a>
+      <p class="note">
+        If you are joining as site crew, you can do this now and still do your
+        day-to-day work in the app later.
       </p>
     </div>
 
     <div class="card">
-      <h2>If you are seeing this page, the app isn&rsquo;t on this device</h2>
+      <h2>Reading this on a phone with SiteSnap installed?</h2>
       <p>
         Invitation links open the SiteSnap app directly when it is installed. This
         page is what you get instead &mdash; so either SiteSnap isn&rsquo;t installed
         on this iPhone yet, or you&rsquo;re reading your email on a computer or an
         Android phone.
       </p>
-      <p class="note">SiteSnap is an iPhone app. There is no Android or web version yet.</p>
+      <p class="note">
+        The SiteSnap <strong>app</strong> is iPhone only; there is no Android app yet.
+        The <strong>manager portal</strong> runs in any browser.
+      </p>
     </div>
 
     <div class="card">
-      <h2>How to accept</h2>
+      <h2>Getting the app, for work on site</h2>
       <!-- SiteSnap is not yet publicly listed on the App Store. Verified, not
            assumed: https://apps.apple.com/app/id6813701040 returns 404 and the
            iTunes lookup API returns resultCount 0 for both the default store and
@@ -126,7 +144,8 @@
            dead link today, which is worse than no button, so the copy below
            tells people the truth instead.
 
-           WHEN THE APP GOES LIVE, replace the <ol> below with:
+           WHEN THE APP GOES LIVE, replace the <ol> below (not the paragraph
+           above it) with:
              <ol>
                <li>Install <strong>SiteSnap AI</strong> from the App Store.</li>
                <li>Open this email on your iPhone again and tap <strong>Accept Invitation</strong>.</li>
@@ -134,6 +153,11 @@
              </ol>
              <a class="btn btn-primary" href="https://apps.apple.com/nz/app/id6813701040">Get SiteSnap on the App Store</a>
            and re-check the two URLs above first. -->
+      <p>
+        Diaries, photos, timesheets and deliveries are captured in the app. If you
+        will be doing that work, you need it on your iPhone &mdash; but you do not
+        have to wait for it to accept the invitation.
+      </p>
       <ol>
         <li>
           SiteSnap is in <strong>limited release</strong> and isn&rsquo;t on the public
@@ -187,9 +211,11 @@
       <div class="card">
         <h2>JavaScript is turned off</h2>
         <p>
-          That&rsquo;s fine &mdash; the steps above are all you need. If SiteSnap is
-          already installed on this iPhone, open the invitation email on the phone and
-          tap <strong>Accept Invitation</strong>; the app will open directly.
+          The two buttons on this page are built by JavaScript from the invitation
+          code in the address, so they are not available. Go back to the invitation
+          email and tap <strong>Accept Invitation</strong> there instead &mdash; that
+          link works without JavaScript, and on an iPhone with SiteSnap installed it
+          opens the app directly.
         </p>
       </div>
     </noscript>
@@ -225,6 +251,21 @@
   }
 
   if (token) {
+    // The browser route. Hard-coded rather than derived from this page's own
+    // host: the portal is a different deployment on a different hostname, and
+    // this is a static file with no build step to substitute one in. It is a
+    // public hostname, not a secret.
+    //
+    // The token travels in the query string exactly as it already does in the
+    // invitation email, and the no-referrer meta above means no Referer header
+    // carries it anywhere. The portal's /invite route consumes it.
+    var webLink = document.getElementById("web-accept-link");
+    webLink.setAttribute(
+      "href",
+      "https://app.getsitesnapai.com/invite?token=" + encodeURIComponent(token)
+    );
+    document.getElementById("web-accept-card").hidden = false;
+
     var link = document.getElementById("open-app-link");
     // The custom scheme still works and is still handled: the app's
     // app/+native-intent.tsx matches sitesnap://invite?token= and
