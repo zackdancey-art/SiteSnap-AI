@@ -1322,11 +1322,27 @@ export async function createSiteInvites(
 }
 
 // Company-only invite (no site). Adds a user to the company with a company_role.
+/**
+ * The outcome of a company invitation, so the sender can be told which of three
+ * different things happened rather than "sent" for all of them.
+ *
+ * `already_member` is the one that matters. Somebody who already holds an
+ * account in this company is not an error and must not be presented as one —
+ * the sender has simply forgotten, or two owners have both invited the same
+ * person, and a red failure there reads as a broken system. It is reported as a
+ * distinct, successful outcome and no invitation is created, because handing an
+ * existing member a join token achieves nothing.
+ */
+export type CompanyInviteOutcome =
+  | { status: "sent"; record: SiteInviteRecord }
+  | { status: "resent"; record: SiteInviteRecord }
+  | { status: "already_member" };
+
 export async function createCompanyInvite(
   actor: Actor,
   emailRaw: string,
   companyRole: CompanyRole
-): Promise<SiteInviteRecord | typeof INVITE_OWNER_REJECTED> {
+): Promise<CompanyInviteOutcome | typeof INVITE_OWNER_REJECTED> {
   if (companyRole === "owner") return INVITE_OWNER_REJECTED;
   await ensureMemoryLoaded();
   // AUDIT L46: see createSiteInvites. Both unique indexes from migration 018
@@ -1348,26 +1364,127 @@ export async function createCompanyInvite(
     expiresAt,
     createdAt: new Date().toISOString(),
   };
+  // Already in this company? Say so instead of issuing a pointless token.
+  // Checked before the write on both store paths so the two agree.
+  const existingUser = await findUserByEmail(email);
+  if (existingUser && existingUser.companyId === actor.companyId) {
+    return { status: "already_member" };
+  }
+
   if (!useDatabase()) {
-    // Replace any existing company invite for this email.
+    // Replace any existing company invite for this email. Deleting the old row
+    // is what makes this a REISSUE: the previous token stops working, so a link
+    // already sitting in someone's inbox dies. See the note in routes/company.ts.
+    let replaced = false;
     for (const [t, inv] of memory.siteInvites.entries()) {
       if (inv.siteId === null && inv.companyId === actor.companyId && inv.invitedEmail === email) {
         memory.siteInvites.delete(t);
+        replaced = true;
       }
     }
     memory.siteInvites.set(token, record);
     await persistMemory();
-    return record;
+    return { status: replaced ? "resent" : "sent", record };
   }
-  const r = await withTenant(actor, (client) => client.query(
+  // `xmax = 0` is true only for a row this statement INSERTed; an ON CONFLICT
+  // update leaves the deleting transaction id behind, so it is non-zero. The
+  // comparison is done in SQL and aliased, because xmax is a system column and
+  // node-postgres hands it back as a string.
+  //
+  // The DO UPDATE overwrites `expires_at`, which is what makes an EXPIRED
+  // invitation re-issuable: the lapsed row is revived with a fresh 7-day window
+  // rather than blocking the re-invitation on the unique index.
+  const r = await withTenant(actor, (client) => client.query<{ inserted: boolean }>(
     `INSERT INTO site_invites (id, site_id, company_id, company_role, invited_email, invited_by, role, token, expires_at)
      VALUES ($1,NULL,$2,$3,$4,$5,'worker',$6,$7)
      ON CONFLICT (company_id, invited_email) WHERE company_id IS NOT NULL AND site_id IS NULL DO UPDATE
        SET token=$6, expires_at=$7, company_role=$3, invited_by=$5
-     RETURNING *`,
+     RETURNING *, (xmax = 0) AS inserted`,
     [record.id, actor.companyId, companyRole, email, actor.email, token, expiresAt]
   ));
-  return mapInvite(r.rows[0]);
+  const row = r.rows[0] as unknown as Parameters<typeof mapInvite>[0] & { inserted: boolean };
+  return { status: row.inserted ? "sent" : "resent", record: mapInvite(row) };
+}
+
+/**
+ * Company invitations the sender has issued, with their state — including the
+ * expired ones.
+ *
+ * `listSiteInvites` filters `expires_at > NOW()`, which means a lapsed
+ * invitation is indistinguishable from never having sent one. For the person
+ * chasing up a crew member who has not joined, those are opposite situations
+ * and the second one is the whole question they are asking. So this deliberately
+ * returns everything and labels it, and the caller decides what to show.
+ *
+ * Note what is NOT returned: `token`. It is a bearer credential — anyone holding
+ * it can join the company as the invited role — and a list endpoint is the wrong
+ * place to hand it out. `listSiteInvites` does return it, which is a separate
+ * finding, not something to copy here.
+ */
+export type CompanyInviteSummary = {
+  id: string;
+  invitedEmail: string;
+  companyRole: CompanyRole | null;
+  invitedBy: string;
+  createdAt: string;
+  expiresAt: string;
+  state: "pending" | "expired";
+};
+
+function summariseInvite(record: SiteInviteRecord, now: number): CompanyInviteSummary {
+  return {
+    id: record.id,
+    invitedEmail: record.invitedEmail,
+    companyRole: record.companyRole,
+    invitedBy: record.invitedBy,
+    createdAt: record.createdAt,
+    expiresAt: record.expiresAt,
+    state: new Date(record.expiresAt).getTime() > now ? "pending" : "expired",
+  };
+}
+
+/**
+ * Back-date a company invitation's expiry so the lapsed-invitation paths are
+ * testable without waiting seven days or stubbing the clock.
+ *
+ * In-memory only, and that is the honest limit of it: two requirements — that a
+ * lapsed invitation stays VISIBLE to its sender, and that it can be re-issued —
+ * are about rows that have aged, and nothing else in the harness can produce
+ * one. Returns the number of rows it changed so a test can assert it actually
+ * found the invitation rather than silently matching nothing.
+ */
+export async function expireCompanyInvitesForTests(email: string): Promise<number> {
+  if (useDatabase()) throw new Error("expireCompanyInvitesForTests is in-memory only");
+  await ensureMemoryLoaded();
+  const target = normalizeEmail(email);
+  const past = new Date(Date.now() - 60_000).toISOString();
+  let changed = 0;
+  for (const [t, inv] of memory.siteInvites.entries()) {
+    if (inv.siteId === null && sameEmail(inv.invitedEmail, target)) {
+      memory.siteInvites.set(t, { ...inv, expiresAt: past });
+      changed += 1;
+    }
+  }
+  await persistMemory();
+  return changed;
+}
+
+export async function listCompanyInvites(actor: Actor): Promise<CompanyInviteSummary[]> {
+  const now = Date.now();
+  if (!useDatabase()) {
+    await ensureMemoryLoaded();
+    return Array.from(memory.siteInvites.values())
+      .filter((i) => i.siteId === null && i.companyId === actor.companyId)
+      .map((i) => summariseInvite(i, now))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+  const r = await withTenant(actor, (client) => client.query(
+    `SELECT * FROM site_invites
+      WHERE site_id IS NULL AND company_id = $1
+      ORDER BY created_at DESC`,
+    [actor.companyId]
+  ));
+  return r.rows.map((row) => summariseInvite(mapInvite(row), now));
 }
 
 export async function listSiteInvites(

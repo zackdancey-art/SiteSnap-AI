@@ -9,7 +9,8 @@ import {
   setUserCompany,
   setUserCompanyRole,
 } from "../storage/authStore";
-import { createCompanyInvite } from "../storage/projectsStore";
+import { createCompanyInvite, listCompanyInvites } from "../storage/projectsStore";
+import { sendCompanyInvite } from "../services/notificationService";
 import { normalizeEmail } from "../utils/emailAddresses";
 
 export const companyRouter: Router = Router();
@@ -97,14 +98,79 @@ companyRouter.post("/company/members/invite", requireCompanyRole("owner"), async
     if (inviteResults.some((r) => r === "owner_role_not_assignable")) {
       return res.status(400).json({ error: "Owner role cannot be assigned via invite." });
     }
-    const results = inviteResults.map((r, i) => ({
-      email: parsed.data.emails[i],
-      ...(typeof r === "string" ? { status: "error" } : { status: "sent", token: r.token }),
-    }));
+
+    // The company name, for the email. A company that cannot be read falls back
+    // to a neutral phrase rather than failing the invitation — the invitation is
+    // the valuable thing here, not the greeting.
+    const company = await getCompany(actor.companyId);
+    const companyName = company?.name?.trim() || "your team";
+    const inviterName = (req as unknown as AuthenticatedRequest).auth.fullName?.trim() || actor.email;
+
+    const results = await Promise.all(
+      inviteResults.map(async (r, i) => {
+        const email = parsed.data.emails[i];
+        if (typeof r === "string") return { email, status: "error" as const };
+        if (r.status === "already_member") {
+          // Not an error. See CompanyInviteOutcome in projectsStore.ts.
+          return { email, status: "already_member" as const };
+        }
+
+        const delivery = await sendCompanyInvite({
+          to: email,
+          inviterName,
+          companyName,
+          companyRole: parsed.data.companyRole,
+          token: r.record.token,
+        });
+
+        // The token is returned ONLY when the email did not go out — the same
+        // convention routes/auth.ts uses for `devCodes`. In production with a
+        // mail provider configured, delivery succeeds and the bearer token stays
+        // on the server, where it belongs; without one (local dev, and the test
+        // harness, which has no inbox) it is the only way to proceed at all.
+        // Returning it unconditionally, as this route used to, puts a
+        // credential that grants company membership into every response and
+        // into any log that records one.
+        return {
+          email,
+          status: r.status,
+          delivered: delivery.ok,
+          ...(delivery.ok ? {} : { token: r.record.token, deliveryError: delivery.error }),
+        };
+      })
+    );
     return res.status(201).json({ results });
   } catch (err) {
     console.error("[company] invite failed", err);
     return res.status(500).json({ error: "Failed to send invitations." });
+  }
+});
+
+// ── Pending invitations ───────────────────────────────────────────────────────
+
+/**
+ * What the sender has sent, and its state.
+ *
+ * Before this there was no way to find out. `GET /company/members` lists people
+ * who have already joined, and an invitation that has not been accepted appears
+ * nowhere on either surface — so an owner chasing a crew member who has not
+ * turned up could not tell whether the invitation had lapsed, had never been
+ * created, or was sitting unread. Expired rows are included and labelled for
+ * exactly that reason; they are the case worth seeing.
+ *
+ * Gated at manager, matching GET /company/members rather than the owner gate on
+ * the invite route: seeing who has been asked to join is the same class of
+ * information as seeing who is in the company, and a manager who cannot see a
+ * pending invitation will issue a duplicate.
+ */
+companyRouter.get("/company/invites", requireAtLeast("manager"), async (req, res) => {
+  try {
+    const actor = getActor(req as unknown as AuthenticatedRequest);
+    const invites = await listCompanyInvites(actor);
+    return res.json({ invites });
+  } catch (err) {
+    console.error("[company] list invites failed", err);
+    return res.status(500).json({ error: "Failed to retrieve invitations." });
   }
 });
 
