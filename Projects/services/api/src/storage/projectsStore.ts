@@ -1293,17 +1293,27 @@ export async function createSiteInvites(
         results.push({ email, status: "already_member" });
         continue;
       }
-      const upsert = await withTenant(actor, (client) => client.query(
+      // `(xmax = 0) AS inserted` is the standard way to tell an INSERT from an
+      // ON CONFLICT DO UPDATE: on a fresh insert xmax is 0, on an update it is
+      // the locking transaction id. The computed value must be read by its
+      // ALIAS. This previously said `RETURNING *, (xmax = 0) AS inserted` and
+      // then read `rows[0].xmax` — but `RETURNING *` does not expand system
+      // columns, so rows[0].xmax was always `undefined`, `undefined === "0"`
+      // was always false, and EVERY invitation on the Postgres path reported
+      // itself as "resent", including brand-new ones. The query had computed
+      // the right answer all along and the code read the wrong field. The
+      // in-memory path was unaffected, which is why this never showed up in a
+      // local run. `*` is dropped because nothing consumed it.
+      const upsert = await withTenant(actor, (client) => client.query<{ inserted: boolean }>(
         `INSERT INTO site_invites (id, site_id, company_id, company_role, invited_email, invited_by, role, token, expires_at)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
          ON CONFLICT (site_id, invited_email) WHERE site_id IS NOT NULL DO UPDATE
            SET token=$8, expires_at=$9, role=$7, invited_by=$6,
                company_id=$3, company_role=$4
-         RETURNING *, (xmax = 0) AS inserted`,
+         RETURNING (xmax = 0) AS inserted`,
         [uuidv7(), siteId, inviteCompanyId, inviteCompanyRole, email, actor.email, role, token, expiresAt]
       ));
-      const wasNew = (upsert as unknown as { rows: Array<{ xmax: string }> }).rows[0].xmax === "0";
-      results.push({ email, status: wasNew ? "sent" : "resent" });
+      results.push({ email, status: upsert.rows[0].inserted ? "sent" : "resent" });
     }
   }
 
