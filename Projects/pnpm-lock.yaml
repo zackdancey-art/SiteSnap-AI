@@ -172,6 +172,9 @@ importers:
       dotenv:
         specifier: ^16.4.5
         version: 16.4.7
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
 
   apps/supervisor-web:
     dependencies:
