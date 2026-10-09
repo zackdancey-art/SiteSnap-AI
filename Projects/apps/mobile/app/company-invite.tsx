@@ -72,10 +72,15 @@ export default function CompanyInviteScreen() {
       };
     }
     if (r.delivered === false) {
+      // The re-send case keeps its warning about the old link: the old link is
+      // dead either way, and the email failing does not bring it back.
       return {
         glyph: "warning-outline",
         color: Colors.warning,
-        label: "Invitation created, but the email could not be sent",
+        label:
+          r.status === "resent"
+            ? "Invitation re-issued, but the email could not be sent — any earlier link for this address has stopped working"
+            : "Invitation created, but the email could not be sent",
       };
     }
     if (r.status === "resent") {
