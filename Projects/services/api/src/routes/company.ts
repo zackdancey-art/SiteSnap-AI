@@ -10,6 +10,7 @@ import {
   setUserCompanyRole,
 } from "../storage/authStore";
 import { createCompanyInvite } from "../storage/projectsStore";
+import { normalizeEmail } from "../utils/emailAddresses";
 
 export const companyRouter: Router = Router();
 companyRouter.use(requireAuth);
@@ -73,8 +74,11 @@ companyRouter.get("/company/members", requireAtLeast("manager"), async (req, res
 
 // ── Invite ────────────────────────────────────────────────────────────────────
 
+// AUDIT L46: see the matching comment in routes/projects.ts. This is the route
+// the portal's Team page and mobile's company-invite screen both call, and the
+// one whose input field was the single uncovered email input in the product.
 const InviteSchema = z.object({
-  emails: z.array(z.string().email()).min(1),
+  emails: z.array(z.string().email().transform(normalizeEmail)).min(1),
   companyRole: z.enum(["manager", "viewer", "crew"]),
 });
 

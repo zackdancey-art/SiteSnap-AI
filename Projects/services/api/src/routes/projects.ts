@@ -31,6 +31,7 @@ import {
 } from "../storage/projectsStore";
 import { isRateLimitedByAccount, LIMITS } from "../middleware/rateLimit";
 import { sendSiteInvite } from "../services/notificationService";
+import { normalizeEmail } from "../utils/emailAddresses";
 
 function parsePagination(query: Record<string, unknown>) {
   const limit = Math.min(Math.max(Number(query.limit) || 200, 1), 500);
@@ -289,8 +290,12 @@ projectsRouter.delete("/projects/templates/:id", async (req, res) => {
 
 // ─── Site invites ─────────────────────────────────────────────────────────────
 
+// AUDIT L46: normalised in the schema, so the echoed `results[].email` and the
+// stored `invited_email` are the same string the account will have after
+// registration lowercases it. The transform runs AFTER .email(), so an address
+// is still validated as typed; only its stored form is folded.
 const InviteSchema = z.object({
-  emails: z.array(z.string().email()).min(1).max(50),
+  emails: z.array(z.string().email().transform(normalizeEmail)).min(1).max(50),
   role: z.enum(["manager", "viewer", "crew"]).default("crew"),
 });
 

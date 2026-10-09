@@ -8,6 +8,7 @@ import { FileBackedStore } from "./fileStore";
 import { findUserByEmail, setUserCompany } from "./authStore";
 import { withTenant } from "./tenant";
 import { DiaryProvenance } from "../services/diaryProvenance";
+import { normalizeEmail, sameEmail } from "../utils/emailAddresses";
 
 type SiteStatus = "active" | "completed" | "on-hold";
 type DiaryStatus = "draft" | "approved";
@@ -1240,7 +1241,12 @@ export async function createSiteInvites(
   // owner-only company-member invite: e.g. a manager could mint a company-manager.
   if (actor.companyRole !== "owner" && inviteCompanyRole !== "crew") return INVITE_ROLE_TOO_HIGH;
 
-  for (const email of emails) {
+  // AUDIT L46: normalised here as well as in the route schemas. The schemas are
+  // the user-facing guard; this is the choke point every current and future
+  // caller passes through, including routes/auth.ts. Normalising in one place
+  // only is how the two halves of this comparison drifted apart originally.
+  for (const rawEmail of emails) {
+    const email = normalizeEmail(rawEmail);
     const token = generateInviteToken();
     if (!useDatabase()) {
       const memberKey = `${siteId}:${email}`;
@@ -1308,11 +1314,16 @@ export async function createSiteInvites(
 // Company-only invite (no site). Adds a user to the company with a company_role.
 export async function createCompanyInvite(
   actor: Actor,
-  email: string,
+  emailRaw: string,
   companyRole: CompanyRole
 ): Promise<SiteInviteRecord | typeof INVITE_OWNER_REJECTED> {
   if (companyRole === "owner") return INVITE_OWNER_REJECTED;
   await ensureMemoryLoaded();
+  // AUDIT L46: see createSiteInvites. Both unique indexes from migration 018
+  // are on the raw `invited_email`, so an unnormalised address does not merely
+  // compare wrong on acceptance — it also defeats the ON CONFLICT below, and
+  // one person invited at two casings becomes two rows and two live tokens.
+  const email = normalizeEmail(emailRaw);
   const token = generateInviteToken();
   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
   const record: SiteInviteRecord = {
@@ -1437,7 +1448,11 @@ export async function acceptSiteInvite(
     await ensureMemoryLoaded();
     const invite = memory.siteInvites.get(token);
     if (!invite) return "not_found";
-    if (invite.invitedEmail !== actorEmail) return "wrong_user";
+    // AUDIT L46: case-insensitive. The stored address is whatever the inviter
+    // typed (for rows predating migration 031); actorEmail comes from a token
+    // claim that routes/auth.ts already folded. Comparing them with !== refused
+    // the right person as `wrong_user`.
+    if (!sameEmail(invite.invitedEmail, actorEmail)) return "wrong_user";
     if (new Date(invite.expiresAt) < new Date()) return "expired";
 
     // Cross-company guard BEFORE consuming the token — a different-company user
@@ -1496,7 +1511,7 @@ export async function acceptSiteInvite(
       invited_email: string; company_id: string | null; expires_at: Date;
     }>(`SELECT invited_email, company_id, expires_at FROM site_invites WHERE token=$1`, [token]);
     if (peek.rowCount && peek.rows[0].company_id) {
-      if (peek.rows[0].invited_email === actorEmail) {
+      if (sameEmail(peek.rows[0].invited_email, actorEmail)) {
         const userRow = await client.query<{ company_id: string | null }>(
           `SELECT company_id FROM auth_users WHERE email=$1`,
           [actorEmail]
@@ -1525,7 +1540,10 @@ export async function acceptSiteInvite(
       return check.rowCount === 0 ? "not_found" : "expired";
     }
     const invite = del.rows[0];
-    if (invite.invited_email !== actorEmail) {
+    // AUDIT L46, as above. The DELETE ... RETURNING has already claimed the
+    // token, so a mismatch here must ROLLBACK — which it does — to keep a
+    // wrong-recipient attempt from burning a valid invitation.
+    if (!sameEmail(invite.invited_email, actorEmail)) {
       await client.query("ROLLBACK");
       return "wrong_user";
     }
