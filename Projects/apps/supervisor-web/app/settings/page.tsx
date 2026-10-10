@@ -48,9 +48,19 @@ type SettingsSection =
   | "display" | "tracking" | "exports"
   | "api" | "privacy" | "about" | "security";
 
-const ALL_SECTIONS: { id: SettingsSection; label: string; icon: string; devOnly?: boolean }[] = [
+/**
+ * `companyLevel` marks the one section of this page that is not the signed-in
+ * person's own: it reads and writes the company profile, which GET
+ * /company/profile refuses crew.
+ *
+ * AUDIT L79. The page itself stays — crew need their password, their
+ * notifications and sign out, and every other section here is personal. What
+ * was wrong was taking the refusal of this one section as a failure of the
+ * whole page.
+ */
+const ALL_SECTIONS: { id: SettingsSection; label: string; icon: string; devOnly?: boolean; companyLevel?: boolean }[] = [
   { id: "account",       label: "Account",         icon: "👤" },
-  { id: "organisation",  label: "Organisation",     icon: "🏢" },
+  { id: "organisation",  label: "Organisation",     icon: "🏢", companyLevel: true },
   { id: "notifications", label: "Notifications",    icon: "🔔" },
   { id: "display",       label: "Display",          icon: "🎨" },
   { id: "tracking",      label: "Live Map",         icon: "📍" },
@@ -164,7 +174,8 @@ function BtnGhost({ onClick, children, danger }: { onClick: () => void; children
 export default function SettingsPage() {
   const router = useRouter();
   const user = getSavedUser();
-  const { companyRole, isOwner } = useRole();
+  const { companyRole, isOwner, canReadCompanyProfile } = useRole();
+  const sections = SECTIONS.filter((s) => !s.companyLevel || canReadCompanyProfile);
   const [activeSection, setActiveSection] = useState<SettingsSection>("account");
 
   const [apiUrl, setApiUrl]   = useState(process.env.NEXT_PUBLIC_API_URL ?? "");
@@ -221,11 +232,22 @@ export default function SettingsPage() {
       if (s.display) setDisplay((d) => ({ ...d, ...s.display }));
       if (s.export) setExportPrefs((e) => ({ ...e, ...s.export }));
     }).catch(() => { /* keep defaults if the account has none yet / offline */ });
-    fetchCompanyProfile().then((c) => setOrgName(c.name)).catch(() => {
-      const stored = localStorage.getItem("sitesnap.orgName");
-      if (stored) setOrgName(stored);
-    });
-  }, [router]);
+    // AUDIT L79. This was unconditional, and GET /company/profile is viewer+,
+    // so for a crew member it fired a request that could only be refused — and
+    // the refusal is what produced "failed to load" on a page that was
+    // otherwise working. The catch below falls back to a localStorage mirror,
+    // which made it worse rather than better: a crew member would have been
+    // shown a company name from whoever last signed in on that browser.
+    //
+    // Asking the question first is the fix. The section that needed the answer
+    // is not rendered for them either way.
+    if (canReadCompanyProfile) {
+      fetchCompanyProfile().then((c) => setOrgName(c.name)).catch(() => {
+        const stored = localStorage.getItem("sitesnap.orgName");
+        if (stored) setOrgName(stored);
+      });
+    }
+  }, [router, canReadCompanyProfile]);
 
   const saveApiUrl = async () => {
     localStorage.setItem("sitesnap.apiUrl", apiUrl);
@@ -335,7 +357,7 @@ export default function SettingsPage() {
             background: "var(--surface)", borderRadius: "var(--radius)",
             border: "1px solid var(--border)", overflow: "hidden",
           }}>
-            {SECTIONS.map((s, i) => (
+            {sections.map((s, i) => (
               <button
                 key={s.id}
                 onClick={() => setActiveSection(s.id)}
@@ -344,7 +366,7 @@ export default function SettingsPage() {
                   padding: "11px 16px", width: "100%",
                   background: activeSection === s.id ? "#F0F4FF" : "none",
                   border: "none",
-                  borderBottom: i < SECTIONS.length - 1 ? "1px solid var(--border)" : "none",
+                  borderBottom: i < sections.length - 1 ? "1px solid var(--border)" : "none",
                   borderLeft: `3px solid ${activeSection === s.id ? "var(--accent)" : "transparent"}`,
                   cursor: "pointer",
                   fontSize: 13,
@@ -425,7 +447,7 @@ export default function SettingsPage() {
             )}
 
             {/* Organisation */}
-            {activeSection === "organisation" && (
+            {activeSection === "organisation" && canReadCompanyProfile && (
               <Panel title="Organisation" description="Company details shown on exported reports and diary headers.">
                 <div style={{ padding: "18px 22px" }}>
                   <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>

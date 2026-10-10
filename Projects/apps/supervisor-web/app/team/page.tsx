@@ -104,7 +104,7 @@ function Panel({ title, description, children }: { title: string; description?: 
 export default function TeamPage() {
   const router = useRouter();
   const user = getSavedUser();
-  const { companyRole, isOwner, isManager } = useRole();
+  const { companyRole, isOwner, isManager, canReadCompanyProfile } = useRole();
 
   const [company, setCompany] = useState<CompanyProfile | null>(null);
   const [members, setMembers] = useState<CompanyMember[]>([]);
@@ -129,6 +129,11 @@ export default function TeamPage() {
   const [removing, setRemoving] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    // Nothing on this page is readable without the company profile, and crew
+    // are refused it. Asking anyway and rendering the 403 as "Failed to load
+    // team data" is AUDIT L79 — the request is the defect, not the message.
+    // The two calls beside it were already conditional; this one was not.
+    if (!canReadCompanyProfile) { setLoading(false); return; }
     setLoading(true);
     setError("");
     try {
@@ -146,7 +151,7 @@ export default function TeamPage() {
     } finally {
       setLoading(false);
     }
-  }, [isManager]);
+  }, [isManager, canReadCompanyProfile]);
 
   useEffect(() => {
     if (!isAuthenticated()) { router.replace("/"); return; }
@@ -220,6 +225,38 @@ export default function TeamPage() {
       setRemoving(null);
     }
   };
+
+  /**
+   * Removing the sidebar link is not the permission — /team is a URL anybody
+   * can type. Same shape as app/dashboard/page.tsx, and for the same reason:
+   * guessing the URL must not reach the page, and what it reaches instead has
+   * to say something true. Not "failed to load", which is what this page did
+   * before (AUDIT L79), and not an empty shell.
+   *
+   * GET /company/profile refuses crew independently at the API, so this holds
+   * even if the saved role here is wrong.
+   */
+  if (!canReadCompanyProfile) {
+    return (
+      <div className="app-shell">
+        <Sidebar userName={user?.name ?? user?.email ?? "Crew"} />
+        <div className="main">
+          <Topbar title="Team" />
+          <div className="page-body">
+            <div className="card" style={{ padding: 28, maxWidth: 560 }}>
+              <h1 style={{ fontSize: 18, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>
+                You don&apos;t have access to this
+              </h1>
+              <p style={{ fontSize: 14, color: "var(--text-secondary)", marginBottom: 0 }}>
+                Team and company details are managed by your supervisor. Your own
+                password, notifications and sign out are in Settings.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="app-shell">
