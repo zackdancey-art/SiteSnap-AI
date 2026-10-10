@@ -1,9 +1,14 @@
 # Phase 1b — Crew Permissions — review
 
-Branch `feat/crew-permissions`, five commits off `63b5fe3`. 11 October 2026.
+Branch `feat/crew-permissions`, twelve commits off `63b5fe3`. 11 October 2026.
 
 The phase exists to answer one question — *would you now hand a crew member this app on a site in
 December?* — and the honest answer is at the bottom, after the evidence that supports it.
+
+Revised after the owner's three decisions on the measurement: `POST /projects/sites` stays manager+
+as a deliberate fourth exception; diary approval becomes manager+ as a **field-level** gate; and
+L79 is closed with Team hidden from crew and Settings kept working. Sections 2, 4, 5, 6 and 7 all
+move as a result, and §7's answer changes.
 
 ---
 
@@ -74,9 +79,56 @@ Invitation, site deletion and company settings are refused by the API, not merel
 
 Covered in full in §3.
 
-### Item 5 — the table (`897fc80`, API deploy)
+### Item 5 — the table (`897fc80` and `5d845ef`, API deploy)
 
-`routes/crew-permissions-db.test.ts`, 422 lines, DB-gated. Covered in §2.
+`routes/crew-permissions-db.test.ts`, DB-gated. Covered in §2.
+
+### Item 6 — approving a diary is manager+, on the field and not the route (`d96dae0` API, `28d0d9d` mobile, `da86179` portal)
+
+The owner's second decision, and the one with a trap in it. A submitted diary is a claim; an
+approved one is the record. The portal presents an approval rate as oversight, and a rate counting
+self-approvals is a misleading number on a document kept seven years.
+
+The gate is `requireManagerToAttestDiaryStatus` in `routes/projects.ts`, applied to **both**
+`POST /projects/diaries` and `PATCH /projects/diaries/:id`. It reads the `status` field out of the
+body: absent, or `draft`, it calls `next()`; anything else goes through `requireAtLeast("manager")`.
+So crew keep notes, photographs, weather, crew count, creating a diary and correcting one — only the
+attestation is refused. A route-level gate would have satisfied any test asserting a 403 while
+turning *"crew may keep a diary"* into *"crew may not use diaries"*, which is a worse defect than
+the one being fixed; §2 covers how both rows are held.
+
+Allowlisting the one status that asserts nothing is what makes it **fail closed**: a third enum
+value added later is refused by default rather than quietly admitted. The sweep that settled there
+is no third value today, and that no other status enum in the API needs the same treatment, is in
+L81.
+
+Two consequences are flagged rather than buried. `POST` is gated as well as `PATCH`, which is beyond
+the letter of the decision — `DiarySchema.status` is required on create, so an ungated POST would
+let a refused crew member create the diary already approved and make the PATCH gate decoration. And
+because `draft` is allowlisted, crew can still move an approved diary *back* to draft; that is a
+different transition from the one named, left ungated deliberately, and written up as L86 for the
+owner.
+
+Both clients follow the gate rather than discovering it: `canApproveDiary` in
+`apps/mobile/lib/permissions.ts` and in `apps/supervisor-web/lib/useRole.ts`. On mobile the Approve
+control's condition had been `Boolean(user)` — true for anyone signed in — which means the
+*"Awaiting supervisor approval"* branch written for exactly this case had never once been reachable.
+On the portal the button is withheld from crew and viewer, because its error path swallows the 403
+(L85).
+
+### Item 7 — L79: Team is gone for crew, Settings stays and works (`39575e7`, portal deploy)
+
+The owner's third decision, and the two screens take different shapes because they are different
+things. **Team** is company administration end to end, so it goes the way the dashboard went:
+filtered from the sidebar by a `hiddenFromCrew` flag *and* refused by the page itself, so guessing
+the URL reaches a refusal card. **Settings** stays — crew need their password, their notifications
+and sign out — with only the Organisation section withheld, dropped from the section list so they
+are not offered a tab that would refuse them.
+
+The defect in L79 was never the 403. It was that the page called `/company/profile` unconditionally
+and then reported the refusal as *"failed to load"*. Both pages now ask `canReadCompanyProfile`
+first. §2 has the measurement, which is a request log rather than a screenshot, because *"the
+request is no longer fired"* is not a thing a screenshot can show.
 
 ---
 
@@ -85,9 +137,9 @@ Covered in full in §3.
 The verification standard for this phase was explicit: anything touching authorisation needs a test
 against Postgres, in the DB-gated suite, with **both** controls on the same route in the same test.
 
-The test is written to that standard. Three populations are pinned —
-`EXPECTED_READS = 15`, `EXPECTED_WRITE_STEPS = 13`, `EXPECTED_REFUSALS = 15` — so a sweep that
-quietly measures nothing fails instead of passing. The crew member is a **real invitee**: the owner
+The test is written to that standard. Four populations are pinned —
+`EXPECTED_READS = 15`, `EXPECTED_WRITE_STEPS = 13`, `EXPECTED_REFUSALS = 15`,
+`EXPECTED_FIELD_PROBES = 4` — so a sweep that quietly measures nothing fails instead of passing. The crew member is a **real invitee**: the owner
 invites at `role: "crew"`, the crew member registers with the token, accepts, and the test uses the
 fresh token the accept route issues. That matters because L66's second finding was that
 `company-rbac.test.ts` registered its "crew" member *without* an invite token, which makes them the
@@ -99,9 +151,60 @@ asserts the roles they actually carry, with the failure messages saying why:
 
 > *the crew token does not carry companyRole crew, so no 403 below proves anything about crew*
 
+**The fourth population is the diary gate, and it exists because of how this one could go wrong.**
+A gate on the status field cannot be measured by a route-level table: a row reading
+*crew, `PATCH /projects/diaries/:id`, 403* would be produced equally by the gate that was wanted and
+by the gate that locks crew out of diaries altogether. So the same route answers **both ways for the
+same role in the same test** — four probes, run as crew and again as owner:
+
+| probe | crew | owner |
+|---|---|---|
+| `PATCH /projects/diaries/:id`, content only, no `status` in the body | allowed | allowed |
+| `POST /projects/diaries` with `status: "draft"` | allowed | allowed |
+| `POST /projects/diaries` with `status: "approved"` | refused | allowed |
+| `PATCH /projects/diaries/:id` with `status: "approved"` | refused | allowed |
+
+The write sequence changed to match: its *"approve that diary"* step is now *"edit that diary"*,
+because the sequence measures what crew do daily and approving is no longer one of those things.
+
+Red-on-revert was run twice here, against the two ways of getting it wrong, and both are real
+output. Removing the gate from both routes:
+
+```
+not ok 82 - the diary gate reads the status field and not the path, so crew keep diaries
+    crew must not approve a diary: 200 ... "status":"approved" ...
+    200 !== 403
+```
+
+And the *wrong fix* — `requireAtLeast("manager")` on the route itself, which is what a route-level
+reading of the decision produces:
+
+```
+not ok 82 - the diary gate reads the status field and not the path, so crew keep diaries
+    error: 'crew must be able to save a draft diary: 403 {"error":"Insufficient permissions."}'
+```
+
+That second one is the point of the whole arrangement. A table with only the refusal row goes green
+on it.
+
+**The portal's conditional call was measured, not inferred.** A screenshot can show the Organisation
+section is absent; it cannot show that no request was fired, which is the actual content of the L79
+fix. So a request-logging stub was put on the port the portal build points at, and `/settings` was
+loaded as each role in the same build:
+
+```
+crew: GET /api/account/settings
+mgr : GET /api/account/settings
+      GET /api/company/profile
+```
+
+One call for crew — their own account, which is theirs — and the manager differs by exactly the one
+request. The rendered frames were byte-identical to the screenshots taken in the earlier pass, so
+the two runs corroborate each other.
+
 **What could not be done here, plainly.** This machine has no Postgres and no container runtime —
 checked again this session. `pnpm --filter services-api run test:db` reports **10 tests, 0 pass, 10
-skipped**. The three-row table has therefore **never been executed on this machine**. CI runs
+skipped**. The four-row table has therefore **never been executed on this machine**. CI runs
 `test:db` against a `postgres:16` service container through `Projects/scripts/ci.sh`, and a missing
 `TEST_DATABASE_URL` is a hard failure there rather than a green run full of skips, so the pull
 request is where the table is first produced. That is stated in the PR body rather than implied.
@@ -118,6 +221,11 @@ not ok 81 - the projects gate applies to its own paths and not to the routers mo
 
 That establishes the gate's shape and the in-memory half. It does not establish the Postgres table.
 The distinction is the whole of L65's lesson and it is not blurred here.
+
+The diary gate is covered the same way and for the same reason: the four probes also run in-memory,
+in `routes/invite-accept-access.test.ts`, against a crew member who was genuinely invited and
+accepted. A gate nobody has watched execute is a gate on paper, and that in-memory copy is what made
+both red-on-revert runs above possible before CI ever sees the branch.
 
 ---
 
@@ -164,21 +272,19 @@ and `authedJson` remain the only two, which was the instruction.
 
 ## 4. What I found that nobody asked for
 
-Five new AUDIT entries, L79–L83, all discovered while measuring rather than while building.
+Eight new AUDIT entries, L79–L86, all discovered while measuring rather than while building. Three
+of them are now closed by the owner's decisions; the closures are marked.
 
-- **L79** — the portal's Team and Settings screens call `/company/profile` unconditionally, so crew meet *"failed to load"* rather than a refusal. This is the L73 habit in a new place: a refusal reported as a breakage. Not fixed, because what those two screens should *show* a crew member is a product decision with three non-equivalent shapes.
+- **L79 — closed.** The portal's Team and Settings screens called `/company/profile` unconditionally, so crew met *"failed to load"* rather than a refusal — the L73 habit in a new place. Team is now hidden and refused; Settings works with the Organisation section withheld; both calls are conditional. Item 7 above.
 - **L80** — `projectsStore.canManageSite` admits a crew or viewer who personally owns a site. An owner demoted to crew still satisfies it for every site they created. The manager+ gates close the reachable half; the store predicate is unchanged because narrowing it removes rights from existing rows.
-- **L81** — any authenticated company member can approve a site diary, including its author. Crew could not reach it before only because L66 refused them the router. This is the one I would most want a second opinion on: approval is a supervisory attestation on a seven-year record, and the portal presents an "approval rate" computed from it as oversight.
+- **L81 — closed.** Any authenticated company member could approve a site diary, including its author. This was the one I most wanted a second opinion on, and the owner's answer was manager+, as a field-level gate. Item 6 above. The sweep it prompted also settled that no other status enum in the API needs the same treatment.
 - **L82** — `company.ts` carries the same pathless `use` as L66, harmless only because it is mounted last and because the middleware is `requireAuth` rather than a rank gate. Neither reason survives a reordering.
-- **L83** — `useRole()` resolves an absent `companyRole` to `viewer`. Left alone, and the new dashboard predicate deliberately reads the raw value instead, so it does not inherit a default written for another purpose.
+- **L83** — `useRole()` resolves an absent `companyRole` to `viewer`. Left alone, and the four new predicates deliberately read the raw value instead, so they do not inherit a default written for another purpose.
+- **L84 — a decision, not a defect.** `POST /projects/sites` at manager+ is a deliberate **fourth exception**, confirmed by the owner: creating a site is setup work, and until the bin exists (Phase 6) an accidental site is permanent. It is recorded in the AUDIT precisely because the next reader will find four exceptions where the decision names three and reasonably conclude one is drift. It is not drift; do not relax it without asking.
+- **L85** — the portal's diary Approve button catches its own failure into `console.error` and clears the spinner, so nothing reaches the person. Phase 1b made it unreachable for the refused roles, which is avoidance rather than a fix: an expired session or a 500 still lands in the same silent branch. It belongs with L73's remaining call sites.
+- **L86** — the diary gate allowlists `draft`, so crew can still move an approved diary back to draft (mobile's `handleRevertToDraft`, which prompts for an audit reason). A different transition from the one named, left ungated deliberately. Recorded because it is a direct consequence of the implementation's shape rather than an independent discovery. Owner's call, and the change is one asymmetry rather than a redesign.
 
-Beyond the AUDIT entries, two things are worth the owner's eye and are in the PR body:
-
-**`POST /projects/sites` was made manager+, and that is a fourth exception the decision does not
-name.** The decision lists three. My reasoning: creating a site is a setup act rather than daily
-work, and since crew cannot delete a site and the bin does not exist yet, a site a crew member
-created by accident would be permanent. That is a judgement I made and it may be the wrong one — it
-is the single item in this branch most likely to need reverting, and reverting it is one line.
+Beyond the AUDIT entries, one thing is still worth the owner's eye and is in the PR body:
 
 **The portal's login copy still reads "Owner and manager accounts only." and is still not enforced.**
 It was already untrue; after this phase it is further from true, because crew now get a working
@@ -190,7 +296,9 @@ portal behind it.
 
 - **The Postgres table was not run.** No Postgres here. CI produces it. Stated rather than papered over.
 - **Mobile was not screenshotted.** It cannot be from this environment. The device checklist in the PR body says so plainly rather than implying coverage.
-- **L79, L80, L81 were not fixed.** Each is a decision rather than a refactor, and two of them change what someone may do.
+- **L80 was not fixed.** `canManageSite`'s ownership clause is unchanged: narrowing it to role alone removes rights from any site whose creator is no longer a manager, which is data-affecting in a compliance-evidence product. The reachable half is closed by the manager+ gates.
+- **L85 and L86 were not fixed.** L85's fix is L73's shape and converting one button would leave the reports page half done. L86 extends a refusal the owner did not name, which this phase was told not to do unasked.
+- **The revert-to-draft transition was not gated.** Same point as L86, stated here because it is the one place this branch could be accused of a gap rather than a decision. It is a decision, and it is the owner's to reverse.
 - **`company.ts` was left alone.** Outside the phase's file set, and changing its pathless `use` alters 401-versus-404 behaviour on unmatched paths, which is observable.
 - **The mobile dashboard (manager+) and the portal dashboard (viewer+) were not unified.** Pre-existing asymmetry; either direction changes what a viewer can do, which is not this change's call.
 
@@ -198,11 +306,9 @@ portal behind it.
 
 ## 6. What cannot be verified without you
 
-1. **The permission table.** It runs for the first time in CI on this PR. If any row disagrees with the decision, that is the place it will show.
-2. **Every mobile claim.** The navigator change, the hidden controls and the 403 copy are unverified on a device. The checklist in the PR body is the instrument; step zero is Settings → About naming the running bundle, because results from a stale binary are not results.
-3. **`POST /projects/sites` at manager+.** A decision, not a finding.
-4. **L81, diary self-approval.** Measured as crew 200. Whether that is correct is yours.
-5. **What Team and Settings should show crew** (L79).
+1. **The permission table, now four rows.** It runs for the first time in CI on this PR. If any row disagrees with the decision, that is the place it will show. The in-memory copy of the diary probes has run here and is green, which narrows but does not close this.
+2. **Every mobile claim.** The navigator change, the hidden controls, the Approve control's new condition and the 403 copy are unverified on a device. The checklist in the PR body is the instrument; step zero is Settings → About naming the running bundle, because results from a stale binary are not results.
+3. **L86 — crew reverting an approved diary to draft.** Implemented as open, deliberately. Whether it stays open is yours.
 
 ---
 
@@ -210,24 +316,30 @@ portal behind it.
 
 > *Having measured it, would you now hand a crew member this app on a site in December?*
 
-**Not yet — but the gap is now small, specific, and three of the four items are measurement rather
-than construction.**
+**Yes, subject to two things that are now purely verification — the table going green in CI, and a
+device pass.** That is a change from the previous answer, and the reason is that the two items
+standing in the way were decisions rather than work: both have been made, and both are built.
 
 What is genuinely fixed: the thing that made the answer *no* in any season. A crew member could join
 a company and do nothing — 31 routes, the entire field product, 403. That line is gone, each route
 states its own requirement, the three exceptions are enforced server-side rather than hidden, and the
 dashboard is absent from both clients and refused by the API independently.
 
+Since then: a crew member is no longer told two of their seven screens are broken when they are not
+(L79), and a diary approval now means a supervisor said so (L81). Those were the two items on the
+previous list that were nobody's to fix but the owner's.
+
 What stands between here and yes:
 
-1. **The table has to go green in CI.** Until then, everything in §2 is a well-built instrument that has not been read. This is the one that could still change the answer, and it resolves on this PR.
-2. **The device pass has to happen.** Every mobile claim in this branch is unverified by construction. A crew member clocking in on a site is exactly the path no test here has executed.
-3. **L79 has to be decided.** Two of the seven screens a crew member is offered say *"failed to load"*. That is not a safety problem; it is the kind of thing that makes somebody stop trusting the app in week one, which in December matters more than it reads on paper.
-4. **L81 has to be decided.** Crew approving their own diaries is either the decision working as intended or a hole in a compliance record, and I cannot tell which from here.
+1. **The table has to go green in CI.** Until then, everything in §2 is a well-built instrument that has not been read. This is the one that could still change the answer, and it resolves on this PR. The in-memory half is green here, including both red-on-revert runs, so the risk is narrower than it was — but Postgres is where authorisation is actually enforced and that has still not run.
+2. **The device pass has to happen.** Every mobile claim in this branch is unverified by construction. A crew member clocking in on a site is exactly the path no test here has executed, and this branch added a control to that path (the Approve button's new condition) rather than only removing them.
 
-Two of those are yours to answer and I have put them where you will see them. The other two are
-work I have set up and cannot finish from this machine. If the table goes green and the device pass
-is clean, I would say yes.
+Both are work I have set up and cannot finish from this machine. Neither is a question I am waiting
+on an answer to — which is the real difference from the last time this section was written.
+
+One thing I would not call settled, though it does not block December: crew can still revert an
+approved diary to draft (L86). It is a decision I made in the direction of not extending a refusal
+unasked, and it is the item in this branch I would most expect the owner to change.
 
 ---
 

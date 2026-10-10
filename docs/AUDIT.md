@@ -2487,12 +2487,31 @@ defect is that a refusal is reported as a breakage, which is precisely the habit
 member sees "failed to load" on two of the seven screens they are offered and has no way to know
 whether the product is broken or they are not allowed.
 
-**Not fixed in Phase 1b**, deliberately: what Team and Settings should *show* a crew member is a
-product decision, not a refactor. Three shapes are available and they are not equivalent — hide both
-destinations from the sidebar as the dashboard now is; render the personal half of Settings and omit
-the company half; or render a refusal card in the company section as `app/dashboard/page.tsx` does.
-The third is the smallest and the most honest; the first is the most consistent with the dashboard.
-Owner's call.
+**Closed in Phase 1b**, by the owner's decision, which took a different shape for each screen
+because the two screens are not the same kind of thing.
+
+**Team is gone for crew** — the same treatment as the supervisor dashboard, and for the same reason:
+the whole screen is company administration, so there is no personal half worth rendering. It is
+filtered out of `components/Sidebar.tsx` by a `hiddenFromCrew` flag **and** refused by
+`app/team/page.tsx` on its own, so typing the URL reaches a refusal card rather than the page. The
+nav filter is presentation; the screen's own guard is the thing that holds when someone guesses.
+
+**Settings stays and works.** Crew need their password, their notifications and sign out, and all of
+that is theirs. Only the Organisation section is withheld: it is dropped from the section list, so a
+crew member is not offered a tab that would refuse them, and the panel is guarded as well.
+
+The part of this finding that was actually the defect — the unconditional call — is fixed in both
+places by `canReadCompanyProfile` in `lib/useRole.ts`, which mirrors `requireAtLeast("viewer")` on
+`GET /company/profile`. The page asks whether the route will answer *before* calling it, rather than
+calling, catching a 403 and relabelling it "failed to load". A gentler error message would not have
+been the fix, because nothing was failing.
+
+Measured rather than reasoned, since "the request is no longer fired" is not a claim a screenshot
+can make: with a request-logging stub on the portal's configured API port, loading `/settings` as
+crew produced exactly one call, `GET /api/account/settings` — their own account, which they are
+entitled to — and loading the same build as a manager produced that call **and**
+`GET /api/company/profile`. The absent request is the evidence; the two roles differ by exactly the
+one call.
 
 ### L80 — `projectsStore.canManageSite` admits a crew or viewer who personally owns a site, so "manage" means a role on some paths and ownership on others — MEDIUM (authorization; two definitions of the same word)
 
@@ -2524,9 +2543,33 @@ a record kept for seven years, and self-approval by its author is the thing an a
 to prevent. The portal's dashboard computes an "approval rate" from this field and presents it as
 oversight.
 
-Flagged rather than changed: adding a manager gate here would be a fourth exception the decision
-does not name, and silently narrowing what crew may do is the same class of error as silently
-widening it.
+**Closed in Phase 1b**, after the owner was asked and decided: approving a diary is manager+, on the
+same reasoning as timesheets — a submitted record is a claim, an approved one is the record.
+
+The gate is **on the `status` field, not on the route**, and that distinction is the whole of it.
+Crew keep every other right on a diary: notes, photographs, weather, crew count, creating one,
+correcting one. Only the transition to `approved` is refused. A gate on the route would have passed
+any test that only asserted a 403, while turning "crew may keep a diary" into "crew may not use
+diaries" — a worse defect than the one being fixed. Both rows are therefore asserted on the same
+route in the same test, in `routes/crew-permissions-db.test.ts` and again in-memory in
+`routes/invite-accept-access.test.ts`.
+
+It **fails closed by construction** rather than by inspection: `requireManagerToAttestDiaryStatus`
+allowlists `draft`, the one value that attests to nothing, and sends every other value — including
+one a later migration adds to the enum — through `requireAtLeast("manager")`. A third status is
+refused by default and has to be deliberately admitted.
+
+`POST /projects/diaries` is gated by the same middleware, which is **beyond the letter of the
+decision** and is recorded here as such. `DiarySchema.status` is required on create, so without it a
+refused crew member could create the diary already approved and the PATCH gate would be decoration.
+Both clients send `draft` on create, so no behaviour a user can see changes.
+
+Two things the sweep settled, so the next reader does not have to repeat it. Diary status is exactly
+`draft | approved` — there is no other terminal state. And no other status enum in the API needs the
+same gate: incidents (`open | closed`) and inspections (`pending | complete`) are presented nowhere
+in the portal, sites' `active | completed | on-hold` is not oversight, and timecards carry no status
+field at all, so there is no timesheet approval here to gate. See L86 for the one transition this
+gate's shape leaves open.
 
 ### L82 — `routes/company.ts` carries the same pathless `use` shape as L66, harmless today only because of mount order — LOW (latent; one reordering away from L66)
 
@@ -2557,3 +2600,59 @@ either choice survivable.
 
 Recorded because a reader who finds `?? "viewer"` while auditing permissions should find this note
 rather than conclude it is the whole story.
+
+### L84 — `POST /projects/sites` is manager+: a deliberate fourth exception, not drift — DECISION (recorded so it is not "fixed" back)
+
+Not a defect. This entry exists because the next person to read the Phase 1b decision will find four
+exceptions where the decision names three, and the honest conclusion from the code alone is that one
+of them is a mistake.
+
+The decision was: crew view and edit everything a manager can, except the supervisor dashboard, with
+three exceptions — crew cannot invite anyone, cannot delete a site, and cannot change company
+settings. Measuring it surfaced a fourth route that did not fit either side cleanly, `POST
+/projects/sites`. It was put to the owner and **confirmed as a deliberate fourth exception**:
+creating a site is setup work rather than field work, and until the sites bin exists (Phase 6) an
+accidentally created site is permanent.
+
+So the gate on that route is intended. Do not relax it to match the written "three exceptions"
+without going back to the owner — the written three are the decision as first stated, and this is
+the decision as finally made. `DELETE` on a site remains refused under exception 2, independently.
+
+### L85 — The portal's diary Approve button swallows its own failure: `catch (e) { console.error(e); }` — MEDIUM (reportability; the L73 habit in a fourth place)
+
+`app/reports/page.tsx`'s `handleApprove` sends the PATCH, and on any error logs to the console and
+clears the spinner. Nothing reaches the person. The button simply stops spinning and the row does
+not change, which is indistinguishable from a slow network, a bug, and a refusal.
+
+Phase 1b made this unreachable for the roles the API refuses — the button is no longer rendered for
+crew or viewer, via `canApproveDiary` — but that is avoidance, not a fix. Every other failure on
+that path still lands in the same silent branch: an expired session, a diary deleted by someone
+else, a 500. The gate removes the one case that was about to become common; it does not make the
+control honest.
+
+Not fixed here because the shape of the fix is the L73 one — route the error through the shared
+error channel the other screens now use — and doing that on one button in a permissions change
+would leave the reports page half converted. It belongs with the rest of L73's remaining call sites.
+
+### L86 — The diary gate allowlists `draft`, so crew can still move an approved diary back to draft — LOW (a consequence of L81's fix, surfaced for decision rather than taken unilaterally)
+
+`requireManagerToAttestDiaryStatus` permits `status: "draft"` for anybody and gates every other
+value at manager+. That is what lets crew create and correct diaries, which is the point. It also
+means the reverse transition — approved back to draft — is open to crew, and mobile offers it:
+`handleRevertToDraft` in `app/diary/[siteId].tsx`, which prompts for an audit reason and records it
+in the diary's edit log.
+
+This is a different transition from the one the owner named, so it was **deliberately left
+ungated** rather than tightened in passing: the instruction for this phase was to gate approval and
+to report anything else rather than extend the refusal unasked. It is recorded because it is a
+direct consequence of the implementation's shape, not an independent discovery — an allowlist of
+`draft` could not have produced any other result.
+
+The argument for tightening it: an approval that the approved party can unilaterally undo is a
+weaker attestation than the compliance record implies, and the edit-log entry is a record of the
+reversal, not a control on it. The argument against: a crew member who spots an error in a diary
+that was approved too early currently has a way to correct it that leaves a reasoned trail, and
+removing that leaves them with no way at all until a manager is reachable.
+
+The change, if the owner wants it, is one asymmetry rather than a redesign: allow `draft` on POST
+only, and refuse any `status` on PATCH. Owner's call.
