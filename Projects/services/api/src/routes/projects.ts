@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type RequestHandler } from "express";
 import { z } from "zod";
 import { verifyProvenance } from "../services/diaryProvenance";
 import { FIELD_ACCESS, requireAtLeast, AuthenticatedRequest } from "../middleware/auth";
@@ -147,6 +147,13 @@ export const projectsRouter: Router = Router();
  *                              — the decided exceptions: crew do not invite
  *                                anyone and do not remove a site.
  *
+ * One requirement is finer than a route, and is stated at the route instead:
+ * APPROVING a diary is manager+ while EDITING one is not, so POST and PATCH
+ * /projects/diaries gate on the `status` FIELD rather than on the path. See
+ * requireManagerToAttestDiaryStatus below — a route-level gate there would read
+ * as "diary editing is manager-only", which is a worse defect than the one it
+ * would be fixing.
+ *
  * The carve-out is gone because nothing is left to carve out of: accepting an
  * invitation is how somebody STOPS being an outsider, so gating it on the rank
  * they only acquire by accepting was circular, and with the blanket gate
@@ -254,7 +261,61 @@ projectsRouter.get("/projects/diaries", async (req, res) => {
   return res.json({ diaries, limit, offset });
 });
 
-projectsRouter.post("/projects/diaries", async (req, res) => {
+/**
+ * APPROVING a diary is manager+. EDITING one is not. — AUDIT L81.
+ *
+ * This is a FIELD-level gate, and the distinction is the whole of it. Crew keep
+ * full write access to a diary's content: notes, summary, the full report, the
+ * safety checklist, the sections, the report period. What they may not do is
+ * move it to `approved`.
+ *
+ * The reason is that the two are different acts on a seven-year compliance
+ * record. A submitted diary is a claim; an approved one is the record. The
+ * supervisor dashboard computes an "approval rate" from this field and presents
+ * it as oversight, and a rate that counts the author's own approvals is a
+ * misleading number on a document somebody may have to stand behind. Timesheets
+ * are gated the same way and for the same reason.
+ *
+ * WHY IT ALLOWLISTS `draft` RATHER THAN REFUSING `approved`
+ *
+ * An exact `status === "approved"` test is correct today and stops being correct
+ * the moment the enum grows a third value, silently and with no failing test —
+ * a new terminal state the portal treats as oversight would be the same hole
+ * under another name. So the gate permits the one status that asserts nothing
+ * (`draft`, which is where a diary already is) and sends every other value,
+ * known or not, through the manager check. It fails CLOSED on anything new.
+ *
+ * An absent `status` is the common case — a content edit — and passes straight
+ * through, which is the half that stops this becoming "diary editing is now
+ * manager-only". Both halves are asserted on the same route in the same test;
+ * see routes/crew-permissions-db.test.ts, where a gate that locked the whole
+ * route would fail the first row.
+ *
+ * It is applied to POST as well as PATCH, deliberately and beyond the letter of
+ * the decision, because `DiarySchema.status` is REQUIRED on create: without it
+ * a crew member refused the transition could simply create the diary already
+ * approved, and the PATCH gate would be decoration. Both clients send
+ * `status: "draft"` on create today (apps/mobile/app/diary/[siteId].tsx), so
+ * nothing in the product is affected. Flagged for the owner in the PR body.
+ */
+const DIARY_STATUS_ASSERTING_NOTHING = "draft";
+const managerToAttest = requireAtLeast("manager");
+
+const requireManagerToAttestDiaryStatus: RequestHandler = (req, res, next) => {
+  const body: unknown = req.body;
+  const status =
+    body !== null && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>).status
+      : undefined;
+  // No status in the body at all: a content edit, which is crew's daily work.
+  if (status === undefined) return next();
+  // Still a draft: nothing is being attested to.
+  if (status === DIARY_STATUS_ASSERTING_NOTHING) return next();
+  // `approved`, or any value the enum grows later. Fails closed.
+  return managerToAttest(req, res, next);
+};
+
+projectsRouter.post("/projects/diaries", requireManagerToAttestDiaryStatus, async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const parsed = DiarySchema.safeParse(req.body ?? {});
   if (!parsed.success) {
@@ -276,7 +337,7 @@ projectsRouter.post("/projects/diaries", async (req, res) => {
   return res.status(201).json({ diary });
 });
 
-projectsRouter.patch("/projects/diaries/:id", async (req, res) => {
+projectsRouter.patch("/projects/diaries/:id", requireManagerToAttestDiaryStatus, async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const parsed = DiaryPatchSchema.safeParse(req.body ?? {});
   if (!parsed.success) {
