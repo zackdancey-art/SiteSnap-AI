@@ -2914,3 +2914,150 @@ two hundred entries in a month where before only one person's rows counted.
 query should filter by that range in SQL rather than paginate and then filter, which removes the cap
 as a concept instead of raising the number. Raising 200 to some larger number would hide the same
 defect for longer, which is what happened the first time.
+
+---
+
+### L99 — a predicate naming a column that does not exist, and the route answered nothing at all — HIGH (found by CI on `feat/crew-permissions`; two defects, one of them systemic)
+
+Two findings. The first is a one-line typo-class bug that had been live for months. The second is the
+reason nobody noticed, and it applies to forty-one routes rather than one.
+
+#### The statement
+
+`PATCH /api/projects/sites/:id/progress` ran, in `storage/projectsStore.ts`:
+
+```sql
+UPDATE project_sites SET progress_percent = $2
+WHERE id = $1 AND company_id = $3 AND deleted_at IS NULL RETURNING *
+```
+
+`project_sites` has no `deleted_at` column. Postgres rejected the statement outright:
+
+```
+ERROR:  column "deleted_at" does not exist at character 93
+```
+
+So **every** progress update against Postgres has failed since the predicate was written — which
+`git log -S 'company_id = $3 AND deleted_at IS NULL RETURNING'` pins to commit `1141657`
+("feat(api): company + role-based access model (Parts 1-3)"), long before this branch. It is a
+pre-existing production defect, not a regression; this branch is simply the first thing ever to
+execute that route against a real database, because the in-memory suite cannot.
+
+**The suspicion that `recordScope.ts`'s SQL emitter was adding a soft-delete clause is wrong, and
+was checked rather than accepted.** `deleted_at` appears exactly once in `projectsStore.ts` and zero
+times in `recordScope.ts`, whose two emitters (`readVisibilitySql`, `editOwnershipSql`) have one
+possible output each: `owner_email = $n`. The predicate was a hand-written literal.
+
+Which tables actually have the column, since the same mistake is available anywhere:
+
+| has `deleted_at` | does not |
+|---|---|
+| `crew_timecards`, `incidents`, `inspections`, `material_deliveries` (all four at CREATE time) | `auth_invites`, `auth_password_reset_tokens`, `auth_pending_registrations`, `auth_users`, `companies`, `company_backfill_conflicts`, `entry_templates`, `inspection_signatures`, `inspection_templates`, `project_diaries`, `project_entries`, `project_sites`, `project_templates`, `push_tokens`, `site_invites`, `site_members`, `uploads`, `worker_locations` |
+
+Every other `deleted_at` reference in the API source targets one of the four that has it. This was
+the only one pointing at a table that does not.
+
+`SiteRecord.deletedAt` was a phantom field: declared on the type, never written by any code path,
+never read by `mapSite`, and guarded once in the in-memory branch (`if (!existing ||
+existing.deletedAt)`) where it could only ever be undefined. Sites are **hard** deleted in both
+stores — `memory.sites.delete(siteId)` and `DELETE FROM project_sites`. A declared field that
+nothing populates is how a predicate like this comes to look plausible in review.
+
+**Fixed** by removing all three manifestations — the type field, the dead in-memory guard, and the
+predicate — not by adding the column. No migration. Soft-delete for sites belongs to **Phase 6**
+with the bin and the 90-day purge, where it arrives as a migration plus a mapper plus a list filter,
+the way the other four record types already have it.
+
+#### The third consequence of L88
+
+L88 recorded that this one route refuses every crew member in memory and allows every crew member in
+Postgres, and that **neither behaviour was chosen**. This is its third consequence: the in-memory
+path answered `404` (visible twice in the same CI log) while Postgres hung, so the divergence hid a
+hard SQL error behind a plausible-looking status code for the entire life of the defect. The test
+that found it is the first to drive this route against Postgres at all.
+
+#### The route sent no response — and this is the systemic half
+
+The database rejected the statement at `22:41:30.648`. The test's `fetch` gave up at `22:46:31` —
+**five minutes later, on a client timeout.** The access log line reads:
+
+```
+PATCH /projects/sites/.../progress - - - - ms
+```
+
+No status, no duration, because `httpLogger` records on response finish and the response never
+finished. The mechanism, confirmed rather than assumed:
+
+1. `express@4.22.1` does not await route handlers. It forwards an error only when a handler throws
+   **synchronously** or calls `next(err)`; the promise an `async` handler returns is discarded.
+2. `routes/projects.ts`'s progress handler was `async` with a bare `await updateSiteProgress(...)`
+   and no `try`/`catch`, so the store's rejection became the handler's rejected return value.
+3. Nothing wrote to `res`. The socket stayed open.
+4. The process survived rather than crashing because `bootstrap()` registers
+   `process.on("unhandledRejection", ...)` (`server.ts:244`) which logs and captures to Sentry but —
+   unlike the `uncaughtException` handler immediately above it — **does not shut down**. Registering
+   any listener also suppresses Node's default `--unhandled-rejections=throw`.
+
+So **Sentry received an event and the person received a spinner that never resolves.** That is the
+exact failure shape this project has been closing everywhere else, reached from the server side.
+
+A sweep of all **109 route registrations** across the fourteen route files classified each `await` as
+inside or outside a `try`:
+
+| shape | count |
+|---|---|
+| `async`, no `try` at all — a store rejection hangs the request | **34** |
+| `async`, `try` present but at least one `await` outside it | **7** |
+| `async`, every `await` inside a `try` | 36 |
+| synchronous | 6 |
+| **total examined** | **109** |
+
+**Forty-one of 109 could hang.** The thirty-four bare ones: `auth.ts:563,615,621,632,708,759`;
+`projects.ts:177,182,201,207,217,223,231,241,252,258,320,342,354,360,367,377,388,406,453,462,480,489,507,519`;
+`push.ts:26,39,45`; `uploads.ts:80`. The seven partials are all the same shape and were
+spot-checked as genuine rather than inferred — `await isRateLimitedByIp(req, ...)` sitting in front
+of the `try`, Redis-backed and able to reject: `auth.ts:259,375,687,722,778,882` and
+`uploads.ts:113`.
+
+**Fixed** with `middleware/asyncRouter.ts` — `asyncSafeRouter()`, a drop-in `express.Router()`
+replacement that routes a handler's rejection to `next(err)` — applied to all fourteen route files.
+Chosen over forty-one `try`/`catch` blocks because that fixes forty-one routes and nothing about the
+forty-second; the next route anyone writes is safe by default, and a structural test refuses a bare
+`Router()` in a route file.
+
+**The Sentry constraint holds.** `Sentry.setupExpressErrorHandler(app)` sits in front of the fallback
+error middleware, so anything reaching `next(err)` is reported as a server error. That is only safe
+because **no authorisation refusal in this API is an exception** — verified exhaustively:
+`res.status(403).json(...)` at `middleware/auth.ts:118,129,147`, `middleware/recordOwnership.ts:93`
+and `routes/projects.ts:420,423,457,484,541`; `routes/auth.ts:641`; and `assertSameCompany`
+(`utils/companyScope.ts`) writes its own 404 and returns `false`. The single `throw` in middleware
+(`recordOwnership.ts:82`, an unmapped `RecordKind`) runs at factory time, not per request. So
+forwarding rejections cannot turn a refusal into a reported 500.
+
+#### What the test proves, and what it deliberately does not
+
+`routes/async-route-errors.test.ts`, three tests:
+
+- The mechanism, both routers side by side on the same handler and the same error: the bare path
+  produces no response, the wrapped path a 500 from the fallback handler.
+- The real route, with `updateSiteProgress` forced to reject: a response must **arrive at all**
+  within 2 s, with an unpatched 200 as the positive control before it and another after, so the
+  assertion cannot pass against a route that is broken, deleted or unmounted.
+- Structurally, that no route file calls bare `Router()`, plus a pin on Express major 4 so an upgrade
+  to 5 (which forwards rejections itself) has to decide whether the wrapper still earns its place.
+
+Red-on-revert measured: with `routes/projects.ts` put back to `Router()`, the suite fails in
+**2.08 s** naming the cause, where the original defect took five minutes to report a client timeout.
+
+The property under test is weaker and more fundamental than any status code, and that is the point: a
+test that awaits a status and gets **no response at all** reports a timeout, minutes later, and names
+the timeout rather than the route. Every other assertion in this suite is of the form "this route
+answers N" and none of them can fail this way.
+
+#### The related finding that is NOT fixed
+
+`bootstrap()`'s `unhandledRejection` handler does not exit. For a rejection that escapes a request
+(now much rarer) that is a reasonable choice; for one that leaves a request hanging it converted a
+fast crash-and-restart into a silent five-minute stall. Whether it should `shutdown` like its
+`uncaughtException` neighbour is a deployment decision, not a code cleanup — recorded here, not
+changed.
