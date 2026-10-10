@@ -19,6 +19,7 @@ import { AnnotatedImage } from "@/components/AnnotatedImage";
 import { PhotoAnnotator } from "@/components/PhotoAnnotator";
 import { authedJson as apiJson } from "@/lib/authed-fetch";
 import { isSessionExpired } from "@/lib/session";
+import { describeIncompleteSignature, describeSignatureSaveFailure } from "@/lib/signature-input";
 import { useData, uploadPhotos } from "@/lib/data-context";
 import { ensureCameraAccess } from "@/lib/camera-access";
 import { CAPTION_MAX_LENGTH, createStoredPhoto } from "@/lib/photo-capture";
@@ -314,6 +315,25 @@ export default function InspectionsScreen() {
   const [sigName, setSigName] = useState("");
   const [sigPath, setSigPath] = useState("");
   const [sigSaving, setSigSaving] = useState(false);
+  /**
+   * Why the last Save did not produce a signature, in the sheet, where the
+   * person is looking.
+   *
+   * The sheet used to disable Save until the name and the stroke were both
+   * present, and said nothing about either. The stroke is captured on the first
+   * touch, so after signing, the only state that could still be disabling the
+   * button was an empty "Signer name" - a placeholder-only field at the top of a
+   * scrollable region, above the canvas, with no label and no required marker.
+   * Tapping Save then did nothing at all: no error, no navigation, no record. On
+   * a compliance record that is the worst available outcome, because the person
+   * walks away believing the inspection is signed.
+   *
+   * Reported inline rather than through Alert.alert: this sheet stays open on
+   * failure, the field being complained about is a few points away, and a
+   * transient alert presented over a Modal is both easy to miss and the thing
+   * that was already failing to appear.
+   */
+  const [sigError, setSigError] = useState("");
 
   // Void-signature modal state
   const [voidTarget, setVoidTarget] = useState<Signature | null>(null);
@@ -758,22 +778,40 @@ export default function InspectionsScreen() {
   };
 
   const handleSaveSignature = async () => {
-    if (!showActive || !sigName.trim() || !sigPath) return;
+    setSigError("");
+    // The decision lives in lib/signature-input.ts, where it is tested. The old
+    // version of these lines was `if (!showActive || !sigName.trim() ||
+    // !sigPath) return;` - a silent exit behind a disabled button, which is why
+    // tapping Save produced nothing at all.
+    const incomplete = describeIncompleteSignature({
+      signerName: sigName,
+      path: sigPath,
+      hasInspection: !!showActive,
+    });
+    if (incomplete) {
+      setSigError(incomplete);
+      return;
+    }
+    // Narrowed by describeIncompleteSignature, which refuses on !hasInspection.
+    if (!showActive) return;
+    const signerName = sigName.trim();
     setSigSaving(true);
     try {
       await apiJson(`/api/inspections/${showActive.id}/signatures`, {
         method: "POST",
-        body: JSON.stringify({ role: sigRole, signerName: sigName.trim(), path: sigPath, viewBox: SIGNATURE_VIEWBOX }),
+        body: JSON.stringify({ role: sigRole, signerName, path: sigPath, viewBox: SIGNATURE_VIEWBOX }),
       });
       setShowSignModal(false);
-      setSigName(""); setSigPath(""); setSigRole("inspector");
+      setSigName(""); setSigPath(""); setSigRole("inspector"); setSigError("");
       await loadSignatures(showActive.id);
     } catch (err) {
       // A dead session is reported once, centrally, and the app is already
       // on its way to the sign-in screen. This feature must not also blame
       // itself for it - that substitution is the defect.
       if (isSessionExpired(err)) return;
-      Alert.alert("Error", "Failed to save signature.");
+      // Whatever went wrong, the sheet is still open and the signature is not
+      // saved. Say so, preferring the server's own sentence to ours.
+      setSigError(describeSignatureSaveFailure(err));
     } finally {
       setSigSaving(false);
     }
@@ -1241,7 +1279,10 @@ export default function InspectionsScreen() {
                   </View>
                 ))
               )}
-              <Pressable style={styles.addSignatureBtn} onPress={() => setShowSignModal(true)}>
+              <Pressable
+                style={styles.addSignatureBtn}
+                onPress={() => { setSigError(""); setShowSignModal(true); }}
+              >
                 <Ionicons name="create-outline" size={16} color={Colors.white} />
                 <Text style={styles.addSignatureBtnText}>Add signature</Text>
               </Pressable>
@@ -1295,12 +1336,17 @@ export default function InspectionsScreen() {
                     showsVerticalScrollIndicator={false}
                   >
                     <Text style={styles.modalTitle}>Add Signature</Text>
+                    {/* Labelled, and marked required. A placeholder disappears
+                        the moment the field is focused, so it cannot carry a
+                        requirement - and this is the field whose emptiness made
+                        Save do nothing. */}
+                    <Text style={[styles.fieldLabel, { marginTop: 12 }]}>Signer name *</Text>
                     <TextInput
                       ref={DevProbe ? probeInputRef : undefined}
-                      style={[styles.input, { marginTop: 12 }]}
+                      style={[styles.input, { marginTop: 6 }]}
                       value={sigName}
-                      onChangeText={setSigName}
-                      placeholder="Signer name"
+                      onChangeText={(text) => { setSigName(text); if (sigError) setSigError(""); }}
+                      placeholder="Full name of the person signing"
                       placeholderTextColor={Colors.textTertiary}
                     />
                     <View style={[styles.chipRow, { marginTop: 12 }]}>
@@ -1312,22 +1358,41 @@ export default function InspectionsScreen() {
                     </View>
                   </ScrollView>
                   <View style={{ marginTop: 12 }}>
-                    <SignaturePad viewBox={SIGNATURE_VIEWBOX} height={160} onChange={setSigPath} />
+                    <SignaturePad
+                      viewBox={SIGNATURE_VIEWBOX}
+                      height={160}
+                      onChange={(path) => { setSigPath(path); if (sigError) setSigError(""); }}
+                    />
                   </View>
+                  {/* Between the canvas and the buttons: in the path of the eye
+                      travelling from the Save it just tapped. Outside the
+                      ScrollView, like the pad and the actions row, so it cannot
+                      be scrolled out of sight. */}
+                  {sigError ? (
+                    <View style={styles.sigErrorBanner}>
+                      <Text style={styles.sigErrorText}>{sigError}</Text>
+                    </View>
+                  ) : null}
                   <View
                     style={{ flexDirection: "row", gap: 12, marginTop: 16 }}
                     ref={DevProbe ? DevProbe.nodeRef("actions") : undefined}
                   >
                     <Pressable
                       style={styles.cancelBtn}
-                      onPress={() => { setShowSignModal(false); setSigName(""); setSigPath(""); setSigRole("inspector"); }}
+                      onPress={() => { setShowSignModal(false); setSigName(""); setSigPath(""); setSigRole("inspector"); setSigError(""); }}
                     >
                       <Text style={styles.cancelBtnText}>Cancel</Text>
                     </Pressable>
+                    {/* `disabled` ONLY while a save is in flight, where the
+                        spinner already explains the refusal. It is deliberately
+                        not disabled for incomplete input: a disabled Pressable
+                        runs no onPress, so the tap produced no error, no
+                        navigation and no record - the defect. It still dims, so
+                        it reads as not-ready, but a tap now always answers. */}
                     <Pressable
                       style={[styles.saveBtn, { flex: 1 }, (!sigName.trim() || !sigPath || sigSaving) && { opacity: 0.5 }]}
                       onPress={handleSaveSignature}
-                      disabled={!sigName.trim() || !sigPath || sigSaving}
+                      disabled={sigSaving}
                     >
                       {sigSaving ? <ActivityIndicator color={Colors.white} /> : <Text style={styles.saveBtnText}>Save</Text>}
                     </Pressable>
@@ -1420,6 +1485,16 @@ const styles = StyleSheet.create({
     paddingLeft: 10, borderLeftWidth: 3, borderLeftColor: Colors.accent,
   },
   fieldLabel: { fontSize: 13, fontWeight: "600", color: Colors.text },
+  sigErrorBanner: {
+    marginTop: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: Colors.errorBg,
+    borderWidth: 1,
+    borderColor: Colors.errorBorder,
+  },
+  sigErrorText: { fontSize: 13, lineHeight: 19, color: Colors.errorText },
   readOnlyValue: { fontSize: 15, color: Colors.textSecondary },
   rowFields: { flexDirection: "row", gap: 12 },
   chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },

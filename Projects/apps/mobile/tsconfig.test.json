@@ -55,6 +55,8 @@
     "lib/running-bundle.ts",
     "lib/running-bundle.test.ts",
     "lib/session.ts",
-    "lib/session.test.ts"
+    "lib/session.test.ts",
+    "lib/signature-input.ts",
+    "lib/signature-input.test.ts"
   ]
 }
