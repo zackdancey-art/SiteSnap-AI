@@ -5,6 +5,7 @@ import { useData } from "@/lib/data-context";
 import { useAuth } from "@/lib/auth-context";
 import { TabScreenInsets, useTabScreenInsets } from "@/lib/useScreenInsets";
 import Colors from "@/constants/colors";
+import { canSeeSupervisorDashboard } from "@/lib/permissions";
 
 export default function SupervisorTabScreen() {
   return (
@@ -37,7 +38,11 @@ function SupervisorContent() {
   const insets = useTabScreenInsets();
   const { sites, entries, diaries } = useData();
   const { user } = useAuth();
-  const canSeeSupervisor = user?.companyRole === "owner" || user?.companyRole === "manager";
+  // Kept even though (tabs)/_layout.tsx and app/_layout.tsx now REMOVE these
+  // routes for anybody else rather than hiding their entry points. Two
+  // independent checks is the point: a guard edited away in a layout should not
+  // silently expose a screen, and the API refuses the data regardless.
+  const canSeeSupervisor = canSeeSupervisorDashboard(user?.companyRole);
 
   // The original 16pt gutter, with each inset added to the edge that needs it.
   // Bottom clears the tab bar, which does not contribute to layout, so the

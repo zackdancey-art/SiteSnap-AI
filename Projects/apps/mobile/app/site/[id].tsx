@@ -16,6 +16,7 @@ import { router, useLocalSearchParams } from "expo-router";
 import { useData } from "@/lib/data-context";
 import { useAuth } from "@/lib/auth-context";
 import Colors from "@/constants/colors";
+import { canDeleteSite, canInvite, canManageSiteMembers, describeFailure } from "@/lib/permissions";
 import { DailyEntry, SiteMember } from "@/lib/types";
 import { authedFetch } from "@/lib/authed-fetch";
 import { isSessionExpired } from "@/lib/session";
@@ -114,7 +115,11 @@ export default function SiteDetailScreen() {
     );
   }, [allEntries, search]);
 
-  const canManage = user?.companyRole === "owner" || user?.companyRole === "manager";
+  // One decision, three controls. These were a single inline expression, and
+  // the delete control below did not consult it at all — see lib/permissions.ts.
+  const canManage = canInvite(user?.companyRole);
+  const canRemoveSite = canDeleteSite(user?.companyRole);
+  const canRemoveMembers = canManageSiteMembers(user?.companyRole);
 
   useEffect(() => {
     if (!id) return;
@@ -133,7 +138,7 @@ export default function SiteDetailScreen() {
         await removeSiteMember(id, member.memberEmail);
         setMembers((prev) => prev.filter((m) => m.memberEmail !== member.memberEmail));
       } catch (err) {
-        Alert.alert("Error", err instanceof Error ? err.message : "Could not remove member.");
+        Alert.alert("Error", describeFailure(err, err instanceof Error ? err.message : "Could not remove member."));
       }
     };
     if (Platform.OS === "web") {
@@ -184,21 +189,32 @@ export default function SiteDetailScreen() {
 
   const handleDelete = () => {
     if (!id) return;
+    // Both call sites below used to be `deleteSite(id); router.back();` — the
+    // promise discarded and the screen dismissed regardless. deleteSite throws
+    // on a non-2xx, so a refusal looked exactly like a success: the site
+    // reappeared on the next load and nothing had said why. This phase makes a
+    // 403 here reachable (an owner demoted to crew holds a manager token until
+    // the next refresh, so the control is still drawn for them), which is
+    // precisely the AUDIT L73 habit of reporting a failure as something it was
+    // not, pointing the other way.
+    const doDelete = async () => {
+      try {
+        await deleteSite(id);
+        router.back();
+      } catch (err) {
+        Alert.alert(
+          "Not deleted",
+          describeFailure(err, err instanceof Error ? err.message : "Could not delete this site.")
+        );
+      }
+    };
     if (Platform.OS === "web") {
-      deleteSite(id);
-      router.back();
+      void doDelete();
       return;
     }
     Alert.alert("Delete Site", `Delete "${site.name}" and all its entries?`, [
       { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete",
-        style: "destructive",
-        onPress: () => {
-          deleteSite(id);
-          router.back();
-        },
-      },
+      { text: "Delete", style: "destructive", onPress: () => void doDelete() },
     ]);
   };
 
@@ -221,9 +237,16 @@ export default function SiteDetailScreen() {
                 <Ionicons name="person-add-outline" size={20} color="rgba(255,255,255,0.8)" />
               </Pressable>
             )}
-            <Pressable onPress={handleDelete} style={styles.headerAction}>
-              <Ionicons name="trash-outline" size={20} color="rgba(255,255,255,0.8)" />
-            </Pressable>
+            {/*
+              Gated at last. The invite control above it was wrapped in a
+              permission check and this one, two lines below, was not — so crew
+              and viewers were shown a trash icon for the company's sites.
+            */}
+            {canRemoveSite && (
+              <Pressable onPress={handleDelete} style={styles.headerAction}>
+                <Ionicons name="trash-outline" size={20} color="rgba(255,255,255,0.8)" />
+              </Pressable>
+            )}
           </View>
         </View>
 
@@ -382,7 +405,7 @@ export default function SiteDetailScreen() {
                       {m.role.charAt(0).toUpperCase() + m.role.slice(1)}
                     </Text>
                   </View>
-                  {canManage && (
+                  {canRemoveMembers && (
                     <Pressable onPress={() => handleRemoveMember(m)} hitSlop={8}>
                       <Ionicons name="person-remove-outline" size={18} color={Colors.textTertiary} />
                     </Pressable>

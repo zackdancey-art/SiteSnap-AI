@@ -5,6 +5,7 @@ import { useData } from "@/lib/data-context";
 import { useAuth } from "@/lib/auth-context";
 import Colors from "@/constants/colors";
 import { buildDiariesReportHtml, runReportExport } from "@/lib/export-utils";
+import { canSeeSupervisorDashboard } from "@/lib/permissions";
 
 /** "2 entries", "1 entry", "no entries" — a count that reads as a sentence. */
 function countPhrase(n: number, one: string, many: string) {
@@ -37,7 +38,11 @@ function recencyLabel(latest: string | null): string {
 export default function SupervisorDashboardScreen() {
   const { sites, entries, diaries } = useData();
   const { user } = useAuth();
-  const canSeeSupervisor = user?.companyRole === "owner" || user?.companyRole === "manager";
+  // Kept even though (tabs)/_layout.tsx and app/_layout.tsx now REMOVE these
+  // routes for anybody else rather than hiding their entry points. Two
+  // independent checks is the point: a guard edited away in a layout should not
+  // silently expose a screen, and the API refuses the data regardless.
+  const canSeeSupervisor = canSeeSupervisorDashboard(user?.companyRole);
 
   // Every hook runs before the restricted-view return below. The early return
   // used to sit above this one, so a user whose companyRole changed between

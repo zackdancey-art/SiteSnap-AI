@@ -9,7 +9,8 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { router } from "expo-router";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { queryClient } from "@/lib/query-client";
-import { AuthProvider } from "@/lib/auth-context";
+import { AuthProvider, useAuth } from "@/lib/auth-context";
+import { canSeeSupervisorDashboard } from "@/lib/permissions";
 import { DataProvider } from "@/lib/data-context";
 import { logResolvedApiBaseUrlOnce } from "@/lib/api-base-url";
 import { resumeTrackingIfEnabled } from "@/lib/location-service";
@@ -61,6 +62,10 @@ if (__DEV__) {
 SplashScreen.preventAutoHideAsync();
 
 function RootLayoutNav() {
+  // Read here rather than in the screen, because the guard below has to remove
+  // the route from the navigator — a screen cannot decline to exist.
+  const { user } = useAuth();
+  const canSeeSupervisor = canSeeSupervisorDashboard(user?.companyRole);
   // Dev-only: drive the Add Signature layout probe.
   //
   // This is navigation, not measurement — the probe itself lives in
@@ -236,13 +241,28 @@ function RootLayoutNav() {
           headerShown: true,
         }}
       />
-      <Stack.Screen
-        name="supervisor-dashboard"
-        options={{
-          title: "Dashboard",
-          headerShown: true,
-        }}
-      />
+      {/*
+        The other half of the supervisor dashboard's removal. The tab lives in
+        (tabs)/supervisor and is removed there; this is the full screen it
+        pushes to, and it sits on the ROOT stack, so it stays reachable by
+        router.push("/supervisor-dashboard") and by a deep link however the tab
+        is configured. The screen's own `canSeeSupervisor` check answered
+        "Access Restricted", which is a message rather than an absence.
+
+        `Stack.Protected` removes the route: for crew it does not resolve at
+        all. The screen keeps its own check as well — it is the thing that
+        renders if this guard is ever edited away, and the API refuses the data
+        independently.
+      */}
+      <Stack.Protected guard={canSeeSupervisor}>
+        <Stack.Screen
+          name="supervisor-dashboard"
+          options={{
+            title: "Dashboard",
+            headerShown: true,
+          }}
+        />
+      </Stack.Protected>
       <Stack.Screen name="invite" options={{ headerShown: false }} />
       <Stack.Screen name="site-invite" options={{ headerShown: false }} />
       <Stack.Screen name="company-invite" options={{ headerShown: false }} />

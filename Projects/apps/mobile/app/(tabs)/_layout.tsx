@@ -7,6 +7,7 @@ import React from "react";
 import Colors from "@/constants/colors";
 import { useAuth } from "@/lib/auth-context";
 import { ClassicTabBarProvider, useClassicTabBarLayout } from "@/lib/useScreenInsets";
+import { canSeeSupervisorDashboard } from "@/lib/permissions";
 
 function NativeTabLayout({ canSeeSupervisor }: { canSeeSupervisor: boolean }) {
   return (
@@ -96,7 +97,32 @@ function ClassicTabLayout({ canSeeSupervisor }: { canSeeSupervisor: boolean }) {
           ),
         }}
       />
-      {canSeeSupervisor && (
+      {/*
+        `Tabs.Protected`, NOT `{canSeeSupervisor && <Tabs.Screen …>}`.
+
+        The conditional that was here did not hide anything. expo-router builds a
+        navigator's screen list from the FILE SYSTEM and uses the `Tabs.Screen`
+        children only to order and configure it: useSortedScreens() ends with
+        `ordered.push(...entries)` — "Add any remaining children" — so a route
+        with no matching child is appended with default options rather than
+        dropped. `withLayoutContext(BottomTabNavigator, …)` passes no third
+        argument, leaving `useOnlyUserDefinedScreens` false, so for the CLASSIC
+        tab bar — Android, web, and any iOS without Liquid Glass — a crew member
+        got a tab labelled "supervisor" with no icon, leading to the Access
+        Restricted screen. Removing the configuration removed the label and the
+        icon, which is why it looked like it worked.
+
+        `Protected` is the mechanism that removes a screen: a guard that is false
+        puts the route into `protectedScreens`, which useSortedScreens filters
+        unconditionally. So there is no tab, and `/(tabs)/supervisor` does not
+        resolve either — which is the half a hidden button never gives you.
+
+        The NativeTabs branch above is left as a conditional on purpose: that
+        navigator IS built with `useOnlyUserDefinedScreens: true`
+        (NativeBottomTabsNavigator.js), so omitting a Trigger genuinely drops the
+        route there. The two branches differ because expo-router differs.
+      */}
+      <Tabs.Protected guard={canSeeSupervisor}>
         <Tabs.Screen
           name="supervisor"
           options={{
@@ -106,14 +132,14 @@ function ClassicTabLayout({ canSeeSupervisor }: { canSeeSupervisor: boolean }) {
             ),
           }}
         />
-      )}
+      </Tabs.Protected>
     </Tabs>
   );
 }
 
 export default function TabLayout() {
   const { user } = useAuth();
-  const canSeeSupervisor = user?.companyRole === "owner" || user?.companyRole === "manager";
+  const canSeeSupervisor = canSeeSupervisorDashboard(user?.companyRole);
   // Which branch is live decides which measurement the screens inside should
   // wait for, so it is published rather than re-derived per screen.
   const useNativeTabs = isLiquidGlassAvailable();
