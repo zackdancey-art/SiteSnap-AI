@@ -1,6 +1,7 @@
 import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { getApiBaseUrl } from "./api-base-url";
+import { notifySessionExpired } from "./session";
 
 const TRACKING_KEY = "sitesnap.locationTracking";
 const INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
@@ -27,7 +28,7 @@ async function sendLocation(lat: number, lng: number, accuracy?: number) {
     const userRaw = await AsyncStorage.getItem("sitesnap.user");
     const userName = userRaw ? (JSON.parse(userRaw) as { name?: string }).name : undefined;
     const base = getApiBaseUrl();
-    await fetch(`${base}/api/location/update`, {
+    const res = await fetch(`${base}/api/location/update`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -35,6 +36,12 @@ async function sendLocation(lat: number, lng: number, accuracy?: number) {
       },
       body: JSON.stringify({ latitude: lat, longitude: lng, accuracy, userName }),
     });
+    // Background tracking is the one caller with nobody watching, so it stays
+    // silent about its own failures - but it still knows the session is over,
+    // and reporting that is not its own error. This is how a phone that has
+    // been tracking for a week finds out, rather than posting to a 401 on a
+    // loop until someone happens to open a feature screen.
+    if (res.status === 401 && token) notifySessionExpired();
   } catch (err) {
     console.warn("[location-service] failed to send:", err);
   }

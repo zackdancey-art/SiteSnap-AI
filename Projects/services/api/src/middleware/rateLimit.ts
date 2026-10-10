@@ -11,6 +11,7 @@
 
 import { Request, Response, NextFunction } from "express";
 import { Sentry } from "../instrument";
+import { AUTH_ERROR_CODES } from "./auth";
 import type { AuthenticatedRequest } from "./auth";
 
 // ─── Configuration ──────────────────────────────────────────────────────────
@@ -661,7 +662,7 @@ export function rateLimitByCompany(action: string, maxRequests: number, windowMs
   return async (req: Request, res: Response, next: NextFunction) => {
     const companyId = (req as AuthenticatedRequest).auth?.companyId;
     if (!companyId) {
-      return res.status(401).json({ error: "Authentication required." });
+      return res.status(401).json({ error: "Authentication required.", code: AUTH_ERROR_CODES.NO_CREDENTIAL });
     }
     if (await isRateLimitedByKey("company", companyId, action, maxRequests, windowMs)) {
       return res.status(429).json({

@@ -13,6 +13,8 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import { router, useFocusEffect } from "expo-router";
 import { useAuth } from "@/lib/auth-context";
+import { authedFetch } from "@/lib/authed-fetch";
+import { isSessionExpired } from "@/lib/session";
 import { SettingsRow, SettingsDivider } from "@/components/SettingsRow";
 import { SettingsCard, SettingsSection } from "@/components/SettingsSection";
 import { TabScreenInsets, useTabScreenInsets } from "@/lib/useScreenInsets";
@@ -50,7 +52,7 @@ export default function SettingsScreen() {
 
 function SettingsContent() {
   const insets = useTabScreenInsets();
-  const { user, logout, token } = useAuth();
+  const { user, logout } = useAuth();
   const { pendingCount, failedOps } = useData();
   const [profile, setProfile] = useState(DEFAULT_PROFILE);
   const [deletingAccount, setDeletingAccount] = useState(false);
@@ -78,12 +80,7 @@ function SettingsContent() {
           onPress: async () => {
             setDeletingAccount(true);
             try {
-              const { resolveApiBaseUrl } = await import("@/lib/api-base-url");
-              const BASE_URL = resolveApiBaseUrl();
-              const res = await fetch(`${BASE_URL}/api/auth/account`, {
-                method: "DELETE",
-                headers: token ? { Authorization: `Bearer ${token}` } : {},
-              });
+              const res = await authedFetch("/api/auth/account", { method: "DELETE" });
               if (!res.ok) {
                 const data = (await res.json()) as { error?: string };
                 throw new Error(data.error || "Failed to delete account.");
@@ -91,6 +88,10 @@ function SettingsContent() {
               await logout();
               router.replace("/login");
             } catch (err) {
+              // The session ending mid-deletion is reported by lib/session.ts,
+              // which routes to sign-in. Saying "Failed to delete account" as
+              // well would blame the feature for the session.
+              if (isSessionExpired(err)) return;
               Alert.alert("Error", err instanceof Error ? err.message : "Failed to delete account. Please try again.");
             } finally {
               setDeletingAccount(false);

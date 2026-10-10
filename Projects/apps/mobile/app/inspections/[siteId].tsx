@@ -7,7 +7,6 @@ import {
 import { useLocalSearchParams } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import Svg, { Path } from "react-native-svg";
 import * as ImagePicker from "expo-image-picker";
 import * as Crypto from "expo-crypto";
@@ -18,7 +17,8 @@ import { EmptyState } from "@/components/EmptyState";
 import { SignaturePad } from "@/components/SignaturePad";
 import { AnnotatedImage } from "@/components/AnnotatedImage";
 import { PhotoAnnotator } from "@/components/PhotoAnnotator";
-import { getApiBaseUrl } from "@/lib/api-base-url";
+import { authedJson as apiJson } from "@/lib/authed-fetch";
+import { isSessionExpired } from "@/lib/session";
 import { useData, uploadPhotos } from "@/lib/data-context";
 import { ensureCameraAccess } from "@/lib/camera-access";
 import { CAPTION_MAX_LENGTH, createStoredPhoto } from "@/lib/photo-capture";
@@ -208,17 +208,6 @@ function buildInspectionHtml(insp: Inspection, siteName: string, client: string,
       </section>
     `,
   });
-}
-
-async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const token = await AsyncStorage.getItem("sitesnap.token");
-  const base = getApiBaseUrl();
-  const res = await fetch(`${base}${path}`, {
-    ...init,
-    headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(init?.headers ?? {}) },
-  });
-  if (!res.ok) throw new Error(`API ${res.status}`);
-  return res.json() as Promise<T>;
 }
 
 const DEFAULT_ITEMS = [
@@ -499,7 +488,11 @@ export default function InspectionsScreen() {
       setCScope(""); setCArea(""); setCTime("");
       setCInspectorName(""); setCInspectorRole(""); setCInspectorCompany("");
       await load();
-    } catch {
+    } catch (err) {
+      // A dead session is reported once, centrally, and the app is already
+      // on its way to the sign-in screen. This feature must not also blame
+      // itself for it - that substitution is the defect.
+      if (isSessionExpired(err)) return;
       Alert.alert("Error", "Failed to create inspection.");
     } finally {
       setSaving(false);
@@ -572,7 +565,11 @@ export default function InspectionsScreen() {
       if (flipped) {
         Alert.alert("Signatures voided", "Editing this inspection automatically voided its existing signatures. Please re-sign.");
       }
-    } catch {
+    } catch (err) {
+      // A dead session is reported once, centrally, and the app is already
+      // on its way to the sign-in screen. This feature must not also blame
+      // itself for it - that substitution is the defect.
+      if (isSessionExpired(err)) return;
       Alert.alert("Error", "Failed to save changes.");
     }
   };
@@ -665,6 +662,10 @@ export default function InspectionsScreen() {
       updateActiveLocal({ results: updated });
       await patchActive(showActive.id, { results: updated });
     } catch (err) {
+      // A dead session is reported once, centrally, and the app is already
+      // on its way to the sign-in screen. This feature must not also blame
+      // itself for it - that substitution is the defect.
+      if (isSessionExpired(err)) return;
       console.error("Checklist photo error:", err);
       Alert.alert("Error", "Failed to add photo.");
     } finally {
@@ -767,7 +768,11 @@ export default function InspectionsScreen() {
       setShowSignModal(false);
       setSigName(""); setSigPath(""); setSigRole("inspector");
       await loadSignatures(showActive.id);
-    } catch {
+    } catch (err) {
+      // A dead session is reported once, centrally, and the app is already
+      // on its way to the sign-in screen. This feature must not also blame
+      // itself for it - that substitution is the defect.
+      if (isSessionExpired(err)) return;
       Alert.alert("Error", "Failed to save signature.");
     } finally {
       setSigSaving(false);
@@ -785,7 +790,11 @@ export default function InspectionsScreen() {
       setVoidTarget(null);
       setVoidReason("");
       await loadSignatures(showActive.id);
-    } catch {
+    } catch (err) {
+      // A dead session is reported once, centrally, and the app is already
+      // on its way to the sign-in screen. This feature must not also blame
+      // itself for it - that substitution is the defect.
+      if (isSessionExpired(err)) return;
       Alert.alert("Error", "Failed to void signature.");
     } finally {
       setVoiding(false);

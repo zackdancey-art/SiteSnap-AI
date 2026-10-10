@@ -7,7 +7,6 @@ import { useLocalSearchParams } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import DateTimePicker, { DateTimePickerEvent } from "@react-native-community/datetimepicker";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import Colors from "@/constants/colors";
 import { formatDate } from "@/lib/format";
 import { EmptyState } from "@/components/EmptyState";
@@ -15,7 +14,8 @@ import { useData } from "@/lib/data-context";
 import { useAuth } from "@/lib/auth-context";
 import { runReportExport, buildHtmlDocument } from "@/lib/export-utils";
 import { reportMediaFailure } from "@/lib/media-telemetry";
-import { getApiBaseUrl } from "@/lib/api-base-url";
+import { authedJson as apiJson } from "@/lib/authed-fetch";
+import { isSessionExpired } from "@/lib/session";
 import { ScreenHeader } from "@/components/ScreenHeader";
 
 type Timecard = {
@@ -113,19 +113,6 @@ function weekLabel(weekStart: string) {
   end.setDate(start.getDate() + 6);
   const fmt = (d: Date) => d.toLocaleDateString("en-AU", { day: "numeric", month: "short" });
   return `${fmt(start)} – ${fmt(end)}`;
-}
-
-async function getToken() { return AsyncStorage.getItem("sitesnap.token"); }
-
-async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const token = await getToken();
-  const base = getApiBaseUrl();
-  const res = await fetch(`${base}${path}`, {
-    ...init,
-    headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(init?.headers ?? {}) },
-  });
-  if (!res.ok) throw new Error(`API ${res.status}`);
-  return res.json() as Promise<T>;
 }
 
 // Conversions between the stored "HH:MM" / "YYYY-MM-DD" strings and the Date
@@ -301,7 +288,14 @@ export default function CrewTimecards() {
       resetForm();
       setShowForm(false);
       await load();
-    } catch { Alert.alert("Error", "Failed to save timecard."); }
+    } catch (err) {
+      // A dead session is reported once, centrally, and the app is already
+      // on its way to the sign-in screen. This feature must not also blame
+      // itself for it - that substitution is the defect, and this exact
+      // string is what the device showed when the deploy expired the token.
+      if (isSessionExpired(err)) return;
+      Alert.alert("Error", "Failed to save timecard.");
+    }
     finally { setSaving(false); }
   };
 
@@ -329,6 +323,10 @@ export default function CrewTimecards() {
         label: "the timesheet",
       });
     } catch (error) {
+      // A dead session is reported once, centrally, and the app is already
+      // on its way to the sign-in screen. This feature must not also blame
+      // itself for it - that substitution is the defect.
+      if (isSessionExpired(error)) return;
       // runReportExport does not reject, so this is buildTimecardHtml failing.
       Alert.alert("Export Failed", "Could not export the timesheet.");
       reportMediaFailure({ kind: "export-failed", label: "the timesheet (document build)", format: "pdf", cause: error });

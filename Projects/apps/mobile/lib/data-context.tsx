@@ -3,6 +3,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Site, Entry, GeneratedDiary, SiteTemplate, SiteMember, InviteResult } from "@/lib/types";
 import { resolveApiBaseUrl } from "@/lib/api-base-url";
 import { useAuth, isTokenExpiringSoon } from "@/lib/auth-context";
+import { SessionExpiredError, notifySessionExpired } from "@/lib/session";
 import {
   deletePhotoPayloads,
   hydrateEntriesWithPhotoPayloads,
@@ -154,9 +155,13 @@ async function doFetch<T>(path: string, init: RequestInit | undefined, token: st
   });
   if (!res.ok) {
     if (res.status === 401) {
-      const err = new Error("Unauthorized") as Error & { status: number };
-      err.status = 401;
-      throw err;
+      // This branch has always existed, and has always thrown the word
+      // "Unauthorized" into whichever feature asked - which is how a dead
+      // session came to be reported as "couldn't save timesheet". The 401
+      // status is preserved (apiJson below still branches on it) and the
+      // message becomes the one the person should actually read.
+      if (token) notifySessionExpired();
+      throw new SessionExpiredError();
     }
     const contentType = res.headers.get("content-type") || "";
     if (contentType.includes("application/json")) {
@@ -192,7 +197,16 @@ async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     return await doFetch<T>(path, init, token);
   } catch (err) {
-    // On 401, attempt one token refresh then retry
+    // One refresh-and-retry, kept because it genuinely rescues the narrow case
+    // it was written for: a stored token the server rejects while a newer one
+    // exists. It CANNOT rescue an EXPIRED token, and that is worth stating here
+    // rather than rediscovering: `/api/auth/refresh` is itself mounted behind
+    // requireAuth (routes/auth.ts), so the request that would mint a new token
+    // is refused by the same check that refused the original. The recovery path
+    // cannot work in the one situation it exists for. doFetch has already
+    // raised the session notice by this point, so the failure is reported
+    // correctly either way; the retry is left as it was because removing it
+    // changes behaviour this commit has no evidence about.
     if (err instanceof Error && (err as Error & { status?: number }).status === 401 && _refreshTokenFn) {
       const refreshed = await _refreshTokenFn();
       if (refreshed) return doFetch<T>(path, init, refreshed);
@@ -232,6 +246,10 @@ async function uploadPhotoOnce(photo: Entry["photos"][number]) {
   });
 
   if (!res.ok) {
+    if (res.status === 401) {
+      notifySessionExpired();
+      throw new SessionExpiredError();
+    }
     const text = await res.text();
     throw new Error(text || `Photo upload failed (${res.status})`);
   }
@@ -421,7 +439,12 @@ async function batchSignPaths(paths: string[], token: string): Promise<{ failed:
       body: JSON.stringify({ paths }),
     });
     if (!res.ok) {
+      // The telemetry stays: the count and status are how this was diagnosed at
+      // all (SITESNAP-MOBILE-1, "Media signing request failed (401) for 21
+      // photo(s)"). What was missing is that nothing told the person holding
+      // the phone, who saw twenty-one unavailable thumbnails and no reason.
       reportMediaFailure({ kind: "sign-request-failed", status: res.status, count: paths.length });
+      if (res.status === 401) notifySessionExpired();
       return { failed: paths };
     }
     const data = (await res.json()) as { signed: { path: string; url: string | null }[] };

@@ -5,6 +5,8 @@ import { ScreenHeader } from "@/components/ScreenHeader";
 import { SettingsRow, SettingsDivider } from "@/components/SettingsRow";
 import { SettingsCard, SettingsSection } from "@/components/SettingsSection";
 import { useAuth } from "@/lib/auth-context";
+import { authedFetch } from "@/lib/authed-fetch";
+import { isSessionExpired } from "@/lib/session";
 import { useUnsavedChangesGuard } from "@/lib/useUnsavedChangesGuard";
 import Colors from "@/constants/colors";
 
@@ -23,7 +25,7 @@ import Colors from "@/constants/colors";
  * bypass is not a guard.
  */
 export default function AccountSettingsScreen() {
-  const { user, token } = useAuth();
+  const { user } = useAuth();
   const [changingPassword, setChangingPassword] = useState(false);
   const [pwCurrent, setPwCurrent] = useState("");
   const [pwNew, setPwNew] = useState("");
@@ -55,11 +57,8 @@ export default function AccountSettingsScreen() {
     if (pwNew.length < 8) { Alert.alert("Error", "New password must be at least 8 characters."); return; }
     if (pwNew !== pwConfirm) { Alert.alert("Error", "New passwords do not match."); return; }
     try {
-      const { resolveApiBaseUrl } = await import("@/lib/api-base-url");
-      const BASE_URL = resolveApiBaseUrl();
-      const res = await fetch(`${BASE_URL}/api/auth/change-password`, {
+      const res = await authedFetch("/api/auth/change-password", {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify({ currentPassword: pwCurrent, newPassword: pwNew }),
       });
       if (!res.ok) {
@@ -77,6 +76,9 @@ export default function AccountSettingsScreen() {
       setChangingPassword(false);
       Alert.alert("Success", "Your password has been updated.");
     } catch (err) {
+      // An expired session is already being reported, once, with the right
+      // words; adding "Failed to change password" on top of it is the defect.
+      if (isSessionExpired(err)) return;
       Alert.alert("Error", err instanceof Error ? err.message : "Failed to change password.");
     }
   };

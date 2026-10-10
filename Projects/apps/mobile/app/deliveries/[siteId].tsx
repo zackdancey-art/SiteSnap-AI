@@ -6,12 +6,12 @@ import {
 import { useLocalSearchParams } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import Colors from "@/constants/colors";
 import { formatDate } from "@/lib/format";
 import { buildHtmlDocument, runReportExport, escapeHtml } from "@/lib/export-utils";
 import { EmptyState } from "@/components/EmptyState";
-import { getApiBaseUrl } from "@/lib/api-base-url";
+import { authedJson as apiJson } from "@/lib/authed-fetch";
+import { isSessionExpired } from "@/lib/session";
 import { useData } from "@/lib/data-context";
 import { ScreenHeader } from "@/components/ScreenHeader";
 
@@ -92,21 +92,6 @@ function buildDeliveryHtml(d: Delivery, siteName: string, client: string): strin
       ${detailRows ? `<section class="section"><h2>Details</h2><table class="detail-table">${detailRows}</table></section>` : ""}
     `,
   });
-}
-
-async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const token = await AsyncStorage.getItem("sitesnap.token");
-  const base = getApiBaseUrl();
-  const res = await fetch(`${base}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(init?.headers ?? {}),
-    },
-  });
-  if (!res.ok) throw new Error(`API ${res.status}`);
-  return res.json() as Promise<T>;
 }
 
 function Field({ label, required, children }: { label: string; required?: boolean; children: React.ReactNode }) {
@@ -302,7 +287,11 @@ export default function DeliveriesScreen() {
       setShowForm(false);
       resetForm();
       await load();
-    } catch {
+    } catch (err) {
+      // A dead session is reported once, centrally, and the app is already
+      // on its way to the sign-in screen. This feature must not also blame
+      // itself for it - that substitution is the defect.
+      if (isSessionExpired(err)) return;
       Alert.alert("Error", "Failed to save delivery record. Please check your connection.");
     } finally {
       setSaving(false);

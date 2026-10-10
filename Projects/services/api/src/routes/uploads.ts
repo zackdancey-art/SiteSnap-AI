@@ -1,6 +1,6 @@
 import { Router } from "express";
 import multer from "multer";
-import { requireAuth, AuthenticatedRequest } from "../middleware/auth";
+import { requireAuth, AuthenticatedRequest, AUTH_ERROR_CODES } from "../middleware/auth";
 import { verifyAuthToken } from "../utils/authToken";
 import { getMediaStorage } from "../storage/mediaStorage";
 import { signUploadPath, verifyUploadSignature } from "../utils/signedUrl";
@@ -125,7 +125,10 @@ uploadsRouter.get("/uploads/:id/:filename", async (req, res) => {
     // company. Otherwise any authenticated user could fetch any tenant's media.
     const claims = verifyAuthToken(bearerToken);
     if (!claims) {
-      return res.status(401).json({ error: "Authentication required for media access." });
+      return res.status(401).json({
+        error: "Authentication required for media access.",
+        code: AUTH_ERROR_CODES.SESSION_EXPIRED,
+      });
     }
     if (!(await uploadBelongsToActorCompany({ companyId: claims.companyId }, id))) {
       // 404, not 403 — don't confirm the file exists to another tenant.
@@ -137,7 +140,12 @@ uploadsRouter.get("/uploads/:id/:filename", async (req, res) => {
     const sig = typeof req.query.sig === "string" ? req.query.sig : "";
     const exp = typeof req.query.exp === "string" ? req.query.exp : "";
     if (!(sig !== "" && exp !== "" && verifyUploadSignature(id, filename, sig, exp))) {
-      return res.status(401).json({ error: "Authentication required for media access." });
+      // A missing or stale signature is not a dead session: the caller never
+      // presented a token on this request, and the fix is to re-sign the URL.
+      return res.status(401).json({
+        error: "Authentication required for media access.",
+        code: AUTH_ERROR_CODES.NO_CREDENTIAL,
+      });
     }
   }
 

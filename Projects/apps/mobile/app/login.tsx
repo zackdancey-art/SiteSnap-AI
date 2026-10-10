@@ -15,6 +15,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { router, useLocalSearchParams } from "expo-router";
 import { useAuth } from "@/lib/auth-context";
+import { SESSION_EXPIRED_MESSAGE } from "@/lib/session";
 import Colors from "@/constants/colors";
 import { isInputDebugEnabled, logInputEvent } from "@/lib/input-debug";
 
@@ -34,12 +35,16 @@ export default function LoginScreen() {
    * would let a crafted link bounce a freshly-authenticated user somewhere of
    * the sender's choosing.
    */
-  const { next } = useLocalSearchParams<{ next?: string }>();
+  const { next, expired } = useLocalSearchParams<{ next?: string; expired?: string }>();
   const safeNext = typeof next === "string" && next.startsWith("/") && !next.startsWith("//") ? next : null;
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [error, setError] = useState("");
+  // Seeded from the route, so the reason survives the navigation that brought
+  // the person here. Without this the sign-in screen appears unprompted and
+  // looks like the app losing its place, which is how the deploy came to be
+  // read as the features being broken.
+  const [error, setError] = useState(expired ? SESSION_EXPIRED_MESSAGE : "");
   const [submitting, setSubmitting] = useState(false);
   const [hasUserEditedEmail, setHasUserEditedEmail] = useState(false);
   const [didAutofillEmail, setDidAutofillEmail] = useState(false);

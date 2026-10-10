@@ -53,7 +53,7 @@ cd "$(dirname "$0")/.."
 # This number is EXPECTED TO CHANGE — raise it in the same commit that adds a
 # DB-gated suite. That is the point: the change has to be deliberate and shows
 # up in review, rather than a count drifting unobserved.
-EXPECTED_DB_SUITES=7
+EXPECTED_DB_SUITES=8
 
 # How many individual TESTS are gated on REDIS_TEST_URL.
 #

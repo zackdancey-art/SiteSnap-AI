@@ -30,7 +30,7 @@ import {
   sendAccountVerification,
   sendPasswordReset,
 } from "../services/notificationService";
-import { requireAuth, AuthenticatedRequest } from "../middleware/auth";
+import { requireAuth, AuthenticatedRequest, AUTH_ERROR_CODES } from "../middleware/auth";
 import { createAuthToken } from "../utils/authToken";
 import { isDisposableEmailDomain } from "../utils/disposableDomains";
 import {
@@ -284,7 +284,10 @@ router.post("/auth/register/verify-email", async (req, res) => {
         await deletePendingRegistration(email);
         return res.status(429).json({ error: "Too many invalid verification attempts. Please register again.", restart: true });
       }
-      return res.status(401).json({ error: "Verification code is incorrect." });
+      return res.status(401).json({
+        error: "Verification code is incorrect.",
+        code: AUTH_ERROR_CODES.INVALID_VERIFICATION_CODE,
+      });
     }
 
     const smsChannel = isChannelConfigured("sms");
@@ -407,7 +410,10 @@ router.post("/auth/register/verify", async (req, res) => {
         await deletePendingRegistration(email);
         return res.status(429).json({ error: "Too many invalid verification attempts. Please register again.", restart: true });
       }
-      return res.status(401).json({ error: "Verification codes are incorrect." });
+      return res.status(401).json({
+        error: "Verification codes are incorrect.",
+        code: AUTH_ERROR_CODES.INVALID_VERIFICATION_CODE,
+      });
     }
 
     const existingUser = await findUserByEmail(email);
@@ -520,7 +526,10 @@ async function loginHandler(req: Request, res: Response) {
 
     const passwordOk = await verifyPassword(password, existing.passwordHash);
     if (!passwordOk) {
-      return res.status(401).json({ error: "Incorrect email or password." });
+      return res.status(401).json({
+        error: "Incorrect email or password.",
+        code: AUTH_ERROR_CODES.INVALID_CREDENTIALS,
+      });
     }
 
     const token = createAuthToken({
@@ -726,7 +735,15 @@ router.post("/auth/change-password", requireAuth, async (req: Request, res: Resp
     const user = await findUserByEmail(auth.email);
     if (!user) return res.status(404).json({ error: "Account not found." });
     const ok = await verifyPassword(currentPassword, user.passwordHash);
-    if (!ok) return res.status(401).json({ error: "Current password is incorrect." });
+    // INVALID_CREDENTIALS, not SESSION_EXPIRED. This is the one authenticated
+    // request whose 401 would otherwise sign a person out of the app for
+    // mistyping their own current password.
+    if (!ok) {
+      return res.status(401).json({
+        error: "Current password is incorrect.",
+        code: AUTH_ERROR_CODES.INVALID_CREDENTIALS,
+      });
+    }
     const nextHash = await hashPassword(newPassword);
     await updateUserPassword(auth.email, nextHash);
     return res.json({ ok: true });
