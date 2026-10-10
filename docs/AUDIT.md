@@ -690,6 +690,16 @@ Two leaks that were found while building it and are now closed: a server's own r
 
 **The disclosure consequence was carried, not deferred.** Section 5 of the published Privacy Policy said crash reports come from the server, and section 10 listed app crash reporting among the things not switched on. Both are now false and both were corrected in the canonical source and in both render copies, with the anti-drift check run to prove it (see L36 for the copies that check does not cover).
 
+**CORRECTION — 10 October 2026. The mobile DSN is live, and the sentences above that say otherwise are superseded.** The owner reports that `SITESNAP-MOBILE-1` has received its first event — *"Media signing request failed (401) for 21 photo(s)"*, captured from a real phone on a real site. That is this entry's own telemetry arriving, so the heading's "there is no error telemetry from the field", the "present, length 0" row in the table, and the "DSN half remains owner action" disposition are all out of date as of today: **the owner supplied the mobile DSN themselves, outside the repository, and the transport works end to end.**
+
+Three things follow, and they are why this is a correction rather than a footnote:
+
+- **Every earlier report in this audit that mobile telemetry was dead is now wrong about the present.** It was accurate when written and is retained for that reason, but no later work should cite it as current state. The check is an event in the project, not a line in a file — and no agent should look for the value, which remains a live credential that stays out of the repository.
+- **The screenshot decision stands as resolved, not as pending.** `attachScreenshot` is `false`, so a live DSN does not now begin sending photographs of capture screens to a US-hosted service. Had the DSN been supplied while that flag was still `true`, this entry's privacy consequence would have gone live with it. It did not.
+- **The first event it ever received was a real defect that nothing else would have reported.** The 401 in that title is the Phase 1 session failure in L73 — captured because `lib/media-telemetry.ts` reports a signing refusal with a count and no URLs. The owner's own four reproductions were feature-level errors that named the wrong cause; the one accurate account of what had happened came from this channel. It paid for itself on its first day.
+
+**One premise in that event worth correcting in the other direction**, because it was reasonable and it is wrong: the 21 photographs were **not** an upload queue at risk of being dropped. `batchSignPaths` signs media that is **already stored** so it can be displayed, and its caller collects only paths that `toCanonicalPath` resolves to `/api/uploads/…`. Nothing was queued and nothing was destroyed — 21 saved photographs rendered as unavailable tiles, and signing retried on the next load, which is why signing in again restored them. L30's dead-letter path is a different mechanism on a different code path (`lib/offline-queue.ts` → `markOpFailed` / `retryFailedOps`, surfaced at `app/settings/offline-sync.tsx`) and was never engaged here. The two are easy to confuse from the outside, because both say "photos" and "failed".
+
 ### L36 — The supervisor portal publishes its **own** Privacy Policy and Terms, outside the anti-drift check, still carrying the superseded text — HIGH (disclosure accuracy; **confirmed live and publicly reachable 2026-10-04**, serving the 3 July draft plus two internal drafting notes)
 
 **Found while carrying the Sentry correction of L31, by grepping for other stale crash-reporting claims.**
@@ -2289,3 +2299,161 @@ collapsed to one version) and is verified red-on-revert.
 moves to React 19, which is ADR-0004's first expiry condition and makes the single version correct
 rather than merely consistent. Until then, treat a React API that the portal's types accept as
 unproven until checked against React 18.3's actual surface.
+
+### L73 — Seven screens each wrote their own authenticated `fetch`, and the error channel between the API and the person was prose — HIGH (reliability + reportability; the shared cause behind two of the three live rollout defects)
+
+**Found while fixing three separately reported defects that turned out to be one habit.**
+
+A Phase 1 API deploy left every stored mobile token unacceptable. Every authenticated write then
+failed — timesheet, inspection, invitation, photograph signing — and the app reported each failure
+in the vocabulary of whichever feature made the call. "Failed to save timecard." for a dead session.
+Signing out and back in fixed all of it at once, which is the signature of a session problem being
+reported as four feature problems.
+
+The cause is structural, not a bug in any one screen. **Fourteen call sites attach a bearer token,
+across eleven files. Exactly one of them had any 401 handling at all** (`lib/data-context.tsx`'s
+`doFetch`). Seven screens had each written their own `apiJson`-shaped helper: they agreed on every
+mechanical part — base URL, `Content-Type`, the `Authorization` header, JSON parsing — and
+disagreed on the only part that mattered. Six turned a 401 into a feature-level error string; the
+seventh (`app/site/[id].tsx`'s progress PATCH) never looked at `res.ok` at all, so a refused write
+left the optimistic value on screen and said nothing.
+
+The second manifestation is the same habit on the reading side. `doFetch` threw
+`new Error(payload.error)` and discarded the status, the code and the body — so a caller that
+needed to tell one refusal from another had nothing to branch on but the server's sentence, and
+`app/invite.tsx` duly branched on it:
+
+```
+if (msg.includes("not_found") || msg.includes("404"))        -> "invalid or already used"
+else if (msg.includes("expired"))                            -> "expired"
+else if (msg.includes("wrong_user") || msg.includes("403"))   -> "sent to a different address"
+```
+
+None of `not_found`, `wrong_user` or a bare status appears in any response body. The first branch
+could never fire; the second caught **every** 404 by way of the word "expired" inside the one
+sentence the route answers for not-found, expired and already-used alike, so an invitation that
+never existed was reported as one that had run out; and the third — the only refusal a person can
+actually act on — could not be recognised at all.
+
+The habit is written down in the code in one place, which is how to recognise it elsewhere:
+`app/incidents/[siteId].tsx:235` carries the comment `// silent — common in dev when auth is
+fresh`. A 401 was understood as background noise.
+
+**Disposition:** **Closed** on `fix/rollout-defects`, 10 October 2026. A 401 whose code says the
+session is dead is now reported once, centrally, by `lib/session.ts`, which routes to sign-in with
+"Your session has expired. Please sign in again." — and the feature's own catch block returns
+without substituting its own explanation. All fourteen call sites are enumerated in that PR's body
+rather than summarised. Both request helpers now carry `status`, `code` and the parsed body onto the
+thrown error, and the invitation screen's decision moved into `lib/invite-refusal.ts`, where it is
+made on those fields and tested.
+
+**What is deliberately not solved.** The seven helpers were replaced by two, not one. Consolidating
+`data-context`'s `doFetch` and `lib/authed-fetch.ts` means moving the offline queue and the token
+refresh under one roof, which is a larger change than a defect fix should carry. Two helpers that
+agree is the holding position; two that drift is the finding returning.
+
+### L74 — `POST /auth/refresh` sits behind `requireAuth`, so the client's 401 recovery path cannot run in the one case it exists for — MEDIUM (dead recovery path)
+
+`lib/data-context.tsx`'s `apiJson` responds to a 401 by calling `refreshToken()`, which calls
+`POST /api/auth/refresh`. That route is mounted behind `requireAuth` (`routes/auth.ts`), and
+`requireAuth` is what just rejected the token. **An expired token therefore cannot be exchanged for
+a fresh one**: the refresh attempt answers 401 as well, and the original failure falls through to
+the feature's call site. The recovery path is reachable only when the token is still valid, which is
+when it is not needed.
+
+This is the mechanism that converted the token problem above into four feature errors. It is
+recorded separately because it is still true after that fix: the app now routes to sign-in instead
+of blaming the feature, which is the correct behaviour in the absence of a working refresh, but it
+is a sign-in rather than a refresh.
+
+**Disposition:** Open, recorded 10 October 2026. Closing it means a refresh endpoint that accepts an
+expired-but-validly-signed token within some grace window, which is a security decision about how
+long a stolen token stays useful — the owner's call, not a defect fix. Related: L76.
+
+### L75 — `POST /auth/revoke-all` mints a new token and invalidates nothing — MEDIUM (security; a control that reports success without acting)
+
+`routes/auth.ts` answers `/auth/revoke-all` by issuing the caller a fresh token. Tokens are
+stateless HMACs over a claims payload with no server-side registry and no version claim, so there is
+nothing for the route to revoke: **every token issued before the call keeps working until its own
+`exp`**, which is seven days out (see L76). The name, and any UI built on it, promises the one thing
+it does not do — the remedy after a lost phone.
+
+Found while establishing why the Phase 1 deploy invalidated sessions: this is the route that would
+have done it deliberately, and it cannot.
+
+**Disposition:** Open, recorded 10 October 2026. The cheap fix is a `tokenVersion` integer on
+`auth_users`, stamped into the claims and compared in `verifyAuthToken`; that is a migration and a
+claims change, so it is the owner's to schedule rather than something to slip into a defect branch.
+
+### L76 — The auth token's TTL is seven days, read once at module load, with no sliding refresh — MEDIUM (every user meets L73's symptom weekly)
+
+Measured against the live API, not read from a default: `AUTH_TOKEN_TTL_SECONDS` resolves to
+**604800 seconds, exactly 7.0 days**. `utils/authToken.ts` reads it **once at module load**, and
+nothing extends an existing token's `exp` on use — so a session dies on a fixed schedule from the
+moment it was issued, regardless of how actively the app is being used.
+
+The consequence is what makes this worth an entry of its own rather than a footnote to L73:
+**whatever caused the Phase 1 sessions to be rejected, a seven-day TTL means every user hits the
+same wall roughly weekly**, and until this branch the app's answer was "Failed to save timecard."
+On a compliance-evidence product the person is standing on a site holding a phone, and the thing
+that failed is the record they are being asked to keep.
+
+**Disposition:** Partly addressed on `fix/rollout-defects`, 10 October 2026. The symptom is now
+correct — a dead session routes to sign-in and says so. The weekly interruption itself is open and
+needs either a longer TTL, a sliding expiry, or a working refresh (L74). All three are owner
+decisions about the length of time a stolen token stays useful.
+
+### L77 — The inspection signature sheet's Save control answered nothing at all, twice over — HIGH (silent failure on a compliance record)
+
+Adding a signature to an inspection and tapping Save produced no error, no navigation and no saved
+record. Two independent silences, in sequence:
+
+1. The `Pressable` was `disabled` whenever the signer name or the drawn path was empty. **A disabled
+   `Pressable` runs no `onPress`**, so the tap was not refused — it was not received. The control
+   dimmed, which on a crowded sheet reads as a style rather than as a state.
+2. `handleSaveSignature` opened with `if (!showActive || !sigName.trim() || !sigPath) return;` — a
+   bare early return behind the same condition, so even a tap that did arrive produced nothing.
+
+Which input was missing is not in doubt: `SignaturePad` emits `onChange` from `Gesture.Pan()`'s
+`onBegin`, so `sigPath` is non-empty from the first touch, and `sigSaving` is false at rest. Only an
+empty signer name could still have been disabling Save — **a placeholder-only text field at the top
+of the scrollable region, above the canvas, with no label and no required marker**, on a sheet whose
+layout has already produced L27.
+
+This sits alongside L73 rather than inside it: there the wrong cause was reported, here nothing was.
+Both are the same underlying assumption — that a failure which is not displayed is not a failure.
+On a compliance record it is the worse of the two, because the person walks away believing the
+inspection is signed.
+
+**Disposition:** **Closed** on `fix/rollout-defects`, 10 October 2026. The refusal decision moved to
+`lib/signature-input.ts`, which returns a sentence for every incomplete state and `null` only for a
+complete one, and is tested to never return an empty string — `""` and `null` are the same falsy
+value at a call site, and that collapse is how a validation failure becomes silence. The control is
+now `disabled` only while a save is in flight, where the spinner already explains the refusal; it
+still dims for incomplete input, so it reads as not-ready, but a tap always answers. The field has a
+label and a required marker, and a failed save reports the server's own words.
+
+**Unverified.** Candidate 1 of the four — that the button is covered, off-screen or behind an
+overlay — could not be re-measured in this environment and is not excluded by the above. The
+instrument for it is `lib/dev-signature-probe.tsx`, whose assertions 4 and 5 are exactly that
+failure mode; it needs a device. See the device checklist in the PR body.
+
+### L78 — `routes/company.ts` compared a request-supplied email address with `===`, the third place the invitation comparison appears — LOW (latent; fails closed today)
+
+L36 and L46 normalised the invitation write side and the accept comparison. The member-management
+routes were the remaining half nobody had looked at: `PATCH /company/members/:email/role` and
+`DELETE /company/members/:email` took `req.params.email` **raw** and compared it with `===` against
+stored addresses, which registration lowercases and migration 031 folded.
+
+Net behaviour today is a 404 "Member not found." for a casing difference — so it is a usability bug,
+not an authorisation hole. The hazard is in the obvious fix: making the member lookup
+case-insensitive **on its own** would leave the self-removal guard (`targetEmail === actor.email`)
+case-sensitive, and an owner of a company with two or more owners could then pass their own address
+in a different case, fail the self-check, be found by the case-insensitive lookup, pass the
+`ownerCount <= 1` check, and remove themselves — exactly what that 400 forbids. A sole owner is
+still caught by the owner-count check, so the hole is self-removal rather than last-owner removal.
+
+**Disposition:** **Closed** on `fix/rollout-defects`, 10 October 2026, both halves in the same
+change: the param is normalised once at the top of each route and both comparisons use `sameEmail`.
+A sweep for the same pattern across the API found no other occurrence reading an address off a
+request — every remaining `email ===` compares two stored or token-derived values.
