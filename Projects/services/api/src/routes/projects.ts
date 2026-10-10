@@ -2,6 +2,7 @@ import { Router, type RequestHandler } from "express";
 import { z } from "zod";
 import { verifyProvenance } from "../services/diaryProvenance";
 import { FIELD_ACCESS, requireAtLeast, AuthenticatedRequest } from "../middleware/auth";
+import { requireOwnRecord } from "../middleware/recordOwnership";
 import { createAuthToken } from "../utils/authToken";
 import {
   acceptSiteInvite,
@@ -236,7 +237,7 @@ projectsRouter.post("/projects/entries", async (req, res) => {
   return res.status(201).json({ entry });
 });
 
-projectsRouter.patch("/projects/entries/:id", async (req, res) => {
+projectsRouter.patch("/projects/entries/:id", requireOwnRecord("entry"), async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const parsed = EntryPatchSchema.safeParse(req.body ?? {});
   if (!parsed.success) {
@@ -247,7 +248,7 @@ projectsRouter.patch("/projects/entries/:id", async (req, res) => {
   return res.json({ entry });
 });
 
-projectsRouter.delete("/projects/entries/:id", async (req, res) => {
+projectsRouter.delete("/projects/entries/:id", requireOwnRecord("entry"), async (req, res) => {
   const removed = await deleteEntry(getActor(req as unknown as AuthenticatedRequest), req.params.id);
   if (!removed) return res.status(404).json({ error: "Entry not found." });
   return res.json({ ok: true });
@@ -337,7 +338,7 @@ projectsRouter.post("/projects/diaries", requireManagerToAttestDiaryStatus, asyn
   return res.status(201).json({ diary });
 });
 
-projectsRouter.patch("/projects/diaries/:id", requireManagerToAttestDiaryStatus, async (req, res) => {
+projectsRouter.patch("/projects/diaries/:id", requireOwnRecord("diary"), requireManagerToAttestDiaryStatus, async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const parsed = DiaryPatchSchema.safeParse(req.body ?? {});
   if (!parsed.success) {
@@ -372,7 +373,7 @@ projectsRouter.post("/projects/templates", async (req, res) => {
   return res.status(201).json({ template });
 });
 
-projectsRouter.patch("/projects/templates/:id", async (req, res) => {
+projectsRouter.patch("/projects/templates/:id", requireOwnRecord("diaryTemplate"), async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const parsed = TemplatePatchSchema.safeParse(req.body ?? {});
   if (!parsed.success) {
@@ -383,7 +384,7 @@ projectsRouter.patch("/projects/templates/:id", async (req, res) => {
   return res.json({ template });
 });
 
-projectsRouter.delete("/projects/templates/:id", async (req, res) => {
+projectsRouter.delete("/projects/templates/:id", requireOwnRecord("diaryTemplate"), async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const removed = await deleteTemplate(actor, req.params.id);
   if (!removed) return res.status(404).json({ error: "Template not found." });
@@ -497,6 +498,11 @@ const AcceptInviteSchema = z.object({
   token: z.string().min(1),
 });
 
+// Deliberately NOT requireOwnRecord("site"). Progress is a shared attribute of
+// the site, not an authored record: `owner_email` on project_sites is the
+// manager who created it, and crew create none, so an ownership gate here would
+// refuse crew every progress update and delete a working field capability
+// rather than close a gap. RECORD_CLASS calls this `shared-site-attribute`.
 projectsRouter.patch("/projects/sites/:id/progress", async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const raw = req.body?.progressPercent;

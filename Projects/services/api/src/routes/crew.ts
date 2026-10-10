@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { FIELD_ACCESS, AuthenticatedRequest } from "../middleware/auth";
+import { requireOwnRecord } from "../middleware/recordOwnership";
 import { listTimecards, createTimecard, deleteTimecard } from "../storage/crewStore";
 
 export const crewRouter: Router = Router();
@@ -154,7 +155,7 @@ crewRouter.post("/crew/timecards", async (req, res) => {
   }
 });
 
-crewRouter.delete("/crew/timecards/:id", async (req, res) => {
+crewRouter.delete("/crew/timecards/:id", requireOwnRecord("timesheet"), async (req, res) => {
   try {
     const removed = await deleteTimecard(getActor(req), req.params.id);
     if (!removed) return res.status(404).json({ error: "Timecard not found." });

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { FIELD_ACCESS, AuthenticatedRequest } from "../middleware/auth";
+import { requireOwnRecord } from "../middleware/recordOwnership";
 import { listDeliveries, createDelivery, updateDelivery, deleteDelivery } from "../storage/deliveriesStore";
 import { rateLimit } from "../middleware/rateLimit";
 
@@ -51,7 +52,7 @@ deliveriesRouter.post("/deliveries", rateLimit("deliveries-post", 60, 60 * 60 * 
   }
 });
 
-deliveriesRouter.patch("/deliveries/:id", async (req, res) => {
+deliveriesRouter.patch("/deliveries/:id", requireOwnRecord("delivery"), async (req, res) => {
   try {
     const parsed = DeliveryPatchSchema.safeParse(req.body ?? {});
     if (!parsed.success) return res.status(400).json({ error: "Invalid delivery patch.", details: parsed.error.flatten() });
@@ -64,7 +65,7 @@ deliveriesRouter.patch("/deliveries/:id", async (req, res) => {
   }
 });
 
-deliveriesRouter.delete("/deliveries/:id", async (req, res) => {
+deliveriesRouter.delete("/deliveries/:id", requireOwnRecord("delivery"), async (req, res) => {
   try {
     const removed = await deleteDelivery(getActor(req as unknown as AuthenticatedRequest), req.params.id);
     if (!removed) return res.status(404).json({ error: "Delivery not found." });

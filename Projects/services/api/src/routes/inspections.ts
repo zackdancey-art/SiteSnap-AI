@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { FIELD_ACCESS, AuthenticatedRequest } from "../middleware/auth";
+import { requireOwnRecord } from "../middleware/recordOwnership";
 import {
   listTemplates, createTemplate, deleteTemplate,
   listInspections, createInspection, updateInspection, deleteInspection, getInspection,
@@ -120,7 +121,7 @@ inspectionsRouter.post("/inspection-templates", async (req, res) => {
   }
 });
 
-inspectionsRouter.delete("/inspection-templates/:id", async (req, res) => {
+inspectionsRouter.delete("/inspection-templates/:id", requireOwnRecord("inspectionTemplate"), async (req, res) => {
   try {
     const removed = await deleteTemplate(getActor(req), req.params.id);
     if (!removed) return res.status(404).json({ error: "Template not found." });
@@ -161,7 +162,7 @@ inspectionsRouter.post("/inspections", async (req, res) => {
   }
 });
 
-inspectionsRouter.patch("/inspections/:id", async (req, res) => {
+inspectionsRouter.patch("/inspections/:id", requireOwnRecord("inspection"), async (req, res) => {
   try {
     const parsed = InspectionPatchSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -176,7 +177,7 @@ inspectionsRouter.patch("/inspections/:id", async (req, res) => {
   }
 });
 
-inspectionsRouter.delete("/inspections/:id", async (req, res) => {
+inspectionsRouter.delete("/inspections/:id", requireOwnRecord("inspection"), async (req, res) => {
   try {
     const removed = await deleteInspection(getActor(req), req.params.id);
     if (!removed) return res.status(404).json({ error: "Inspection not found." });

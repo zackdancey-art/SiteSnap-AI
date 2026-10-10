@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { FIELD_ACCESS, AuthenticatedRequest } from "../middleware/auth";
+import { requireOwnRecord } from "../middleware/recordOwnership";
 import { listIncidents, createIncident, updateIncident, deleteIncident } from "../storage/incidentStore";
 import { getAllTokensForEmails } from "../storage/pushStore";
 import { sendExpoPushNotifications } from "../utils/expoPush";
@@ -118,7 +119,7 @@ incidentsRouter.post("/incidents", async (req, res) => {
   }
 });
 
-incidentsRouter.patch("/incidents/:id", async (req, res) => {
+incidentsRouter.patch("/incidents/:id", requireOwnRecord("incident"), async (req, res) => {
   try {
     const parsed = IncidentPatchSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -133,7 +134,7 @@ incidentsRouter.patch("/incidents/:id", async (req, res) => {
   }
 });
 
-incidentsRouter.delete("/incidents/:id", async (req, res) => {
+incidentsRouter.delete("/incidents/:id", requireOwnRecord("incident"), async (req, res) => {
   try {
     const removed = await deleteIncident(getActor(req), req.params.id);
     if (!removed) return res.status(404).json({ error: "Incident not found." });
