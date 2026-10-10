@@ -133,7 +133,15 @@ if (!process.env.TEST_DATABASE_URL) {
    * happen in the same commit as the route that moved.
    */
   const EXPECTED_READS = 15;
-  const EXPECTED_WRITE_STEPS = 13;
+  // 14, not 13. The sequence has contained fourteen steps since 897fc80, the
+  // commit that introduced this pin — so the number was wrong at birth rather
+  // than made wrong by a later change, and nothing had ever caught it because
+  // the sequence had never once run to completion against Postgres. Step 13,
+  // `PATCH /projects/sites/:id/progress`, named a column project_sites has not
+  // got; the statement errored, the route sent no response at all, and the run
+  // died there on a client timeout. So step 14 never executed, this assertion
+  // was never reached, and this count had never been taken. AUDIT L99.
+  const EXPECTED_WRITE_STEPS = 14;
   const EXPECTED_REFUSALS = 15;
   const EXPECTED_FIELD_PROBES = 4;
   /**

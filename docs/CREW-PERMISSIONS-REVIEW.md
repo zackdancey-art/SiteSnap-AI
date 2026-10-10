@@ -192,7 +192,7 @@ The verification standard for this phase was explicit: anything touching authori
 against Postgres, in the DB-gated suite, with **both** controls on the same route in the same test.
 
 The test is written to that standard. Six populations are pinned —
-`EXPECTED_READS = 15`, `EXPECTED_WRITE_STEPS = 13`, `EXPECTED_REFUSALS = 15`,
+`EXPECTED_READS = 15`, `EXPECTED_WRITE_STEPS = 14`, `EXPECTED_REFUSALS = 15`,
 `EXPECTED_FIELD_PROBES = 4`, `EXPECTED_PARITY_KINDS = 5`, `EXPECTED_OWNERSHIP_PROBES = 20`
 — so a sweep that quietly measures nothing fails instead of passing. The last two were added with
 the correction in §0 and are described at the end of this section; the first four measure
