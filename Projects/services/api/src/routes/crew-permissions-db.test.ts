@@ -11,21 +11,41 @@
  * suite can be green while production is broken.
  *
  * So this is the table, against the database that production uses, with all
- * four rows in the same test file against the same routes:
+ * six rows in the same test file against the same routes:
  *
  *   - crew 2xx on every operational route, read AND write
  *   - crew 403 on invitation, site deletion, company settings and the
  *     supervisor dashboard
  *   - crew 2xx AND 403 on the diary routes, depending on whether the body
  *     carries `status` — the one requirement here that is finer than a route
+ *   - crew and the owner receive THE SAME ROWS, compared by id, on every
+ *     shared record type
+ *   - crew 2xx editing a row they wrote and 403 editing one they did not,
+ *     with the owner 2xx on both
  *   - owner 2xx on all of them
  *
- * The fourth row is the one to read carefully. Approving a diary is manager+
+ * The third row is the one to read carefully. Approving a diary is manager+
  * (AUDIT L81) while editing one is not, so the gate is on a FIELD, and the only
  * thing that distinguishes a correct field gate from a route-level gate — which
  * would have taken diaries away from the people who write them — is that the
  * same route answers both ways for the same role. Those two probes are in one
  * test for that reason; neither is evidence without the other.
+ *
+ * WHY ROWS FOUR AND FIVE EXIST: A STATUS CODE MISSED THIS TWICE
+ *
+ * The first three rows measure status codes, and a status code could not see
+ * either defect the corrected decision names. A 200 returning a filtered
+ * subset is indistinguishable from a 200 returning everything, so fifteen
+ * green GETs proved reachability while crew were in fact seeing only their own
+ * entries. And every write the table measured was a crew member writing their
+ * OWN row, so nothing in it ever exercised crew touching somebody else's —
+ * which is how two stores came to have no authorship check at all on their
+ * Postgres path (AUDIT L89).
+ *
+ * So row four compares what each role RECEIVED, by id, not what the route
+ * answered; and row five writes each record type twice, once per author, and
+ * crosses them over. Timesheets are the named exception and the one row that
+ * must NOT match — pay information, not a shared site record.
  *
  * BOTH CONTROLS, ON THE SAME ROUTE, IN THE SAME TEST — DELIBERATELY
  *
@@ -35,6 +55,12 @@
  * carries both roles, and `measure()` records what each one answered so the
  * table printed at the end is the measurement rather than a restatement of
  * what the test expected.
+ *
+ * The same rule applies to the id comparisons, in both directions: two empty
+ * lists are trivially "the same rows", so the owner control asserts it saw
+ * something first; and for timesheets, where the lists must differ, the
+ * control is that the owner CAN see the crew member's — otherwise a route
+ * returning nothing to anybody would pass.
  *
  * WHY THE CREW TOKEN IS NOT JUST A REGISTERED USER
  *
@@ -110,6 +136,25 @@ if (!process.env.TEST_DATABASE_URL) {
   const EXPECTED_WRITE_STEPS = 13;
   const EXPECTED_REFUSALS = 15;
   const EXPECTED_FIELD_PROBES = 4;
+  /**
+   * The two populations the corrected decision added, and the reason the four
+   * above were not enough.
+   *
+   * EXPECTED_PARITY_KINDS counts the record types whose list route is compared
+   * BY ID between the two roles. The four populations above measure status
+   * codes, and a 200 returning a filtered subset is indistinguishable from a
+   * 200 returning everything — so EXPECTED_READS proved reachability and said
+   * nothing about what came back. These rows are the ones that can tell the
+   * difference.
+   *
+   * EXPECTED_OWNERSHIP_PROBES counts the write probes, five per authored
+   * record type. The old write sequence had each role create, edit and delete
+   * its OWN rows, so nothing in it ever exercised crew touching somebody
+   * else's — which is how the write-side gap survived a table that claimed to
+   * measure crew writes.
+   */
+  const EXPECTED_PARITY_KINDS = 5;
+  const EXPECTED_OWNERSHIP_PROBES = 20;
 
   let server: http.Server;
   let baseUrl: string;
@@ -177,7 +222,23 @@ if (!process.env.TEST_DATABASE_URL) {
    */
   const FIELD: Row[] = [];
 
+  /**
+   * The fifth population: what each role actually RECEIVED, not what the route
+   * answered. `same` is the measurement — the id sets, sorted and compared.
+   */
+  type ParityRow = { label: string; route: string; crewIds: number; ownerIds: number; same: boolean };
+  const PARITY: ParityRow[] = [];
+
+  /**
+   * The sixth: the ownership gate. Like FIELD, crew's expected answer differs
+   * from row to row, so the expectation travels with the row rather than being
+   * a blanket claim about the population.
+   */
+  type GateRow = Row & { crewAllowed: boolean };
+  const OWNERSHIP: GateRow[] = [];
+
   const ok = (status: number) => status >= 200 && status < 300;
+  const idsOf = (rows: Array<{ id: string }> | undefined) => (rows ?? []).map((r) => r.id).sort();
 
   before(async () => {
     pool = getPgPool();
@@ -434,6 +495,268 @@ if (!process.env.TEST_DATABASE_URL) {
     assert.ok(patchRows.some((r) => r.crew === 403), "crew were refused nothing on PATCH /projects/diaries/:id — there is no gate");
   });
 
+  /**
+   * Seeded by the two ownership tests below: one row of each authored kind
+   * written by the OWNER and one written by the CREW member, on the same site.
+   * Two authors is the whole point — the old table's every write was a crew
+   * member writing their own row, so it could not see either defect.
+   */
+  type Pair = { kind: string; route: string; patch: (who: string) => unknown; ownerId: string; crewId: string };
+  const PAIRS: Pair[] = [];
+
+  test("two authors, one site: the rows both roles can see are seeded", async () => {
+    const tplRes = await seed<{ template: { id: string } }>(
+      "POST", "/inspection-templates", { name: `Parity checklist ${runId}`, items: ["Edge protection"] }, ownerToken
+    );
+    const templateId = tplRes.body.template.id;
+
+    const author = async (p: string, body: unknown, token: string, key: string): Promise<string> => {
+      const res = await seed<Record<string, { id: string }>>("POST", p, body, token);
+      const id = res.body[key]?.id;
+      assert.ok(id, `seeding ${p} returned no ${key}.id: ${JSON.stringify(res.body)}`);
+      return id;
+    };
+
+    const both = async (
+      kind: string, route: string, key: string, body: (who: string) => unknown, patch: (who: string) => unknown
+    ) => {
+      const ownerId = await author(route, body("owner"), ownerToken, key);
+      const crewId = await author(route, body("crew"), crewToken, key);
+      assert.notEqual(ownerId, crewId, `the two ${kind} rows are the same row, so no comparison below means anything`);
+      PAIRS.push({ kind, route, patch, ownerId, crewId });
+    };
+
+    await both("entry", "/projects/entries", "entry",
+      (who) => ({ siteId, date: TODAY, notes: `${who} authored this entry`, weather: "Fine", crewCount: "3" }),
+      (who) => ({ notes: `${who} edited this entry` }));
+    await both("incident", "/incidents", "incident",
+      (who) => ({ siteId, date: TODAY, severity: "near-miss", description: `${who} authored this incident` }),
+      (who) => ({ correctiveAction: `${who} edited this incident` }));
+    await both("inspection", "/inspections", "inspection",
+      (who) => ({ siteId, templateId, name: `${who} inspection`, date: TODAY,
+                  results: [{ item: "Edge protection", passed: true, notes: "", na: false, photos: [] }], status: "complete" }),
+      (who) => ({ areaInspected: `${who} edited this inspection` }));
+    await both("delivery", "/deliveries", "delivery",
+      (who) => ({ siteId, date: TODAY, supplier: "Placemakers", items: ["Timber"], quantity: "20", notes: `${who} authored this docket` }),
+      (who) => ({ notes: `${who} edited this docket` }));
+
+    assert.equal(PAIRS.length, 4, "the authored-record population changed — the two tests below iterate it");
+  });
+
+  test("crew see every row in the company, not only their own — compared by id, with no site membership", async () => {
+    /**
+     * Defect 1, the read side, and the assertion shape the decision asked for.
+     *
+     * `listEntries` scoped crew to `owner_email = me OR a site_members row`,
+     * and a company-level invitation creates no site_members row — so a crew
+     * member's view of the week was their own third of it, silently. The old
+     * table could not see this: it measured a 200 on fifteen GETs, and a 200
+     * returning a filtered subset is indistinguishable from a 200 returning
+     * everything. So this compares the RETURNED IDS between the two roles.
+     *
+     * THE PRECONDITION IS STATED HERE, NOT INHERITED
+     *
+     * The crew member in this file was created by a SITE invitation, so a
+     * site_members row exists — which means a green read could have been
+     * coming from membership rather than from company scope, and the whole
+     * point of the fix would be unmeasured. Relying on the refusals test below
+     * to have removed it first would make this test depend on declaration
+     * order, so instead it removes the membership itself, proves it was there
+     * to remove (otherwise "zero rows remain" passes when the WHERE clause is
+     * wrong), proves it is gone, and puts it back afterwards so the refusals
+     * test still has a membership to revoke.
+     *
+     * site_members is FORCE RLS as of migration 025, so the read and the
+     * delete run inside a transaction with app.company_id set — on the bare
+     * pool they would match no rows and this precondition would be theatre.
+     */
+    const withTenantCtx = async <T>(fn: (c: import("pg").PoolClient) => Promise<T>): Promise<T> => {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(`SELECT set_config('app.company_id', $1, true)`, [companyId]);
+        const out = await fn(client);
+        await client.query("COMMIT");
+        return out;
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw err;
+      } finally {
+        client.release();
+      }
+    };
+
+    // member_email is deliberately NOT case-normalised (migration 031), so the
+    // comparison is case-insensitive here as it is in sameEmail.
+    const memberships = await withTenantCtx((c) =>
+      c.query<{ site_id: string; role: string; invited_by: string }>(
+        `SELECT site_id, role, invited_by FROM site_members WHERE LOWER(member_email) = LOWER($1)`, [CREW]
+      ).then((r) => r.rows)
+    );
+    assert.ok(
+      memberships.length > 0,
+      "the crew member has no site_members row to remove, so removing it proves nothing about where their visibility comes from"
+    );
+
+    const remaining = await withTenantCtx(async (c) => {
+      await c.query(`DELETE FROM site_members WHERE LOWER(member_email) = LOWER($1)`, [CREW]);
+      const left = await c.query<{ n: number }>(
+        `SELECT COUNT(*)::int AS n FROM site_members WHERE LOWER(member_email) = LOWER($1)`, [CREW]
+      );
+      return left.rows[0].n;
+    });
+    assert.equal(remaining, 0, "the crew member still has a site membership, so the reads below do not prove company-wide visibility");
+
+    try {
+      const lists: Array<[string, string, string]> = [
+        ["sites", "/projects/sites", "sites"],
+        ["diary entries", "/projects/entries", "entries"],
+        ["incidents", "/incidents", "incidents"],
+        ["inspections", "/inspections", "inspections"],
+        ["deliveries", "/deliveries", "deliveries"],
+      ];
+      assert.equal(lists.length, EXPECTED_PARITY_KINDS, "the parity population changed — see EXPECTED_PARITY_KINDS");
+
+      for (const [label, route, key] of lists) {
+        const asCrew = await seed<Record<string, Array<{ id: string }>>>("GET", route, undefined, crewToken);
+        const asOwner = await seed<Record<string, Array<{ id: string }>>>("GET", route, undefined, ownerToken);
+        const crewIds = idsOf(asCrew.body[key]);
+        const ownerIds = idsOf(asOwner.body[key]);
+        PARITY.push({ label, route: `GET ${route}`, crewIds: crewIds.length, ownerIds: ownerIds.length, same: crewIds.join() === ownerIds.join() });
+
+        // The owner control first: if the owner sees nothing, two empty lists
+        // are "the same rows" and this test would pass having measured nothing.
+        assert.ok(ownerIds.length > 0, `the owner sees no ${label}, so comparing the two lists proves nothing`);
+        assert.deepEqual(crewIds, ownerIds, `crew and the owner do not receive the same ${label}: crew ${crewIds.length}, owner ${ownerIds.length}`);
+      }
+
+      // And the specific rows, named — set equality holds if BOTH roles were
+      // wrongly narrowed in the same way, so this says what must be in there.
+      const entryIds = idsOf((await seed<{ entries: Array<{ id: string }> }>("GET", "/projects/entries", undefined, crewToken)).body.entries);
+      const entryPair = PAIRS.find((x) => x.kind === "entry");
+      assert.ok(entryPair, "the entry pair was not seeded");
+      assert.ok(entryIds.includes(entryPair.ownerId), "crew cannot see the entry the OWNER wrote — this is the read-side defect");
+      assert.ok(entryIds.includes(entryPair.crewId), "crew cannot see their own entry, which is a different and worse problem");
+
+      const siteIds = idsOf((await seed<{ sites: Array<{ id: string }> }>("GET", "/projects/sites", undefined, crewToken)).body.sites);
+      assert.ok(siteIds.includes(siteId), "crew cannot see the site they work on without a site_members row");
+    } finally {
+      // Restore the membership so the refusals test below still has one to
+      // revoke. In a `finally` so a failed assertion above does not cascade
+      // into an unrelated failure there.
+      for (const m of memberships) {
+        await withTenantCtx((c) => c.query(
+          `INSERT INTO site_members (site_id, member_email, role, invited_by, company_id)
+           VALUES ($1, $2, $3, $4, $5) ON CONFLICT (site_id, member_email) DO NOTHING`,
+          [m.site_id, CREW, m.role, m.invited_by, companyId]
+        ));
+      }
+    }
+  });
+
+  test("crew edit only what they created, and a role above crew edits anything", async () => {
+    /**
+     * Defect 2, the write side, and the one the approved permission table could
+     * not have caught: every write it measured was a crew member writing their
+     * OWN row, so nothing exercised crew touching somebody else's. Two of these
+     * stores (incidents, inspections) had no authorship check at all on their
+     * Postgres path while their in-memory twins had one — AUDIT L89, green
+     * suite, open door.
+     *
+     * FIVE PROBES PER RECORD TYPE, AND WHY EACH IS THERE
+     *
+     *   crew PATCH own          2xx  — the capability, which must survive
+     *   crew PATCH owner's      403  — the defect
+     *   crew DELETE owner's     403  — the defect, destructively
+     *   owner PATCH owner's     2xx  — the row crew just failed to DELETE is
+     *                                  still there, and the route still works
+     *   owner PATCH crew's      2xx  — "manager: edit everything", and proof
+     *                                  the gate is crew-specific rather than
+     *                                  an ownership rule for everybody
+     *
+     * The fourth is the one that is easy to leave out and is doing real work: a
+     * 403 on a DELETE is indistinguishable from a 403 on a row that was already
+     * gone, so without an edit of that same row afterwards the refusal is not
+     * measured, only the status code.
+     */
+    assert.equal(PAIRS.length, 4, "the authored-record pairs were not seeded, so nothing below is measuring a gate");
+
+    for (const { kind, route, patch, ownerId, crewId } of PAIRS) {
+      const probes: Array<{ label: string; method: string; id: string; token: string; who: "crew" | "owner"; crewAllowed: boolean }> = [
+        { label: `crew edit the ${kind} they wrote`, method: "PATCH", id: crewId, token: crewToken, who: "crew", crewAllowed: true },
+        { label: `crew edit somebody else's ${kind}`, method: "PATCH", id: ownerId, token: crewToken, who: "crew", crewAllowed: false },
+        { label: `crew delete somebody else's ${kind}`, method: "DELETE", id: ownerId, token: crewToken, who: "crew", crewAllowed: false },
+        { label: `the owner edit their own ${kind}, after crew failed to delete it`, method: "PATCH", id: ownerId, token: ownerToken, who: "owner", crewAllowed: true },
+        { label: `the owner edit the ${kind} CREW wrote`, method: "PATCH", id: crewId, token: ownerToken, who: "owner", crewAllowed: true },
+      ];
+
+      for (const { label, method, id, token, who, crewAllowed } of probes) {
+        const body = method === "PATCH" ? patch(who) : undefined;
+        const res = await req<{ error?: string }>(method, `${route}/${id}`, body, token);
+        const shown = `${method} ${route}/:id`;
+
+        if (who === "crew") {
+          OWNERSHIP.push({ label, route: shown, crew: res.status, owner: 0, crewAllowed });
+          if (crewAllowed) {
+            assert.ok(ok(res.status), `${label} (${shown}) must be allowed: ${res.status} ${JSON.stringify(res.body)}`);
+          } else {
+            assert.equal(
+              res.status, 403,
+              `${label} (${shown}) must be refused with 403: ${res.status} ${JSON.stringify(res.body)} — 404 means the store narrowed it but requireOwnRecord did not run; 200 means neither did`
+            );
+          }
+        } else {
+          OWNERSHIP.push({ label, route: shown, crew: 0, owner: res.status, crewAllowed: true });
+          assert.ok(
+            ok(res.status),
+            `${label} (${shown}) must be allowed, or the crew refusals above could be a broken route rather than a gate: ${res.status} ${JSON.stringify(res.body)}`
+          );
+        }
+      }
+    }
+
+    assert.equal(OWNERSHIP.length, EXPECTED_OWNERSHIP_PROBES, "the ownership population changed — see EXPECTED_OWNERSHIP_PROBES");
+  });
+
+  test("timesheets are the exception: crew see only their own, the owner sees everyone's", async () => {
+    /**
+     * The carve-out, named in the decision: pay information, not a shared site
+     * record. Both rules are own-only for crew — which makes this the one
+     * population where the two roles must NOT receive the same rows, and so
+     * the control has to run the other way round: the owner must see the crew
+     * member's timecard, or "crew see fewer rows" would pass just as well on a
+     * route that returned nothing to anybody.
+     *
+     * AUDIT L90: the clause this replaced ORed in site_members, so a crew
+     * member on a shared site could read a colleague's hours.
+     */
+    const card = async (token: string, who: string): Promise<string> => {
+      const res = await seed<{ timecard: { id: string } }>("POST", "/crew/timecards", {
+        siteId, workerName: who, date: TODAY, startTime: "07:00", endTime: "15:30", breakMinutes: 30, hoursRegular: 8,
+      }, token);
+      assert.ok(res.body.timecard?.id, `seeding a timecard for ${who} returned no id`);
+      return res.body.timecard.id;
+    };
+    const ownerCard = await card(ownerToken, `owner ${runId}`);
+    const crewCard = await card(crewToken, `crew ${runId}`);
+    assert.notEqual(ownerCard, crewCard, "the two timecards are the same row");
+
+    const asCrew = await seed<{ timecards: Array<{ id: string }> }>("GET", "/crew/timecards", undefined, crewToken);
+    const asOwner = await seed<{ timecards: Array<{ id: string }> }>("GET", "/crew/timecards", undefined, ownerToken);
+    const crewIds = idsOf(asCrew.body.timecards);
+    const ownerIds = idsOf(asOwner.body.timecards);
+    PARITY.push({ label: "timesheets — the carve-out, which must NOT match", route: "GET /crew/timecards", crewIds: crewIds.length, ownerIds: ownerIds.length, same: crewIds.join() === ownerIds.join() });
+
+    // The control, first: the owner sees both, so the route works and is
+    // returning more than nothing.
+    assert.ok(ownerIds.includes(ownerCard), "the owner cannot see their own timecard, so nothing below is measured");
+    assert.ok(ownerIds.includes(crewCard), "the owner cannot see the crew member's timecard — a manager reviewing the week's hours is why this record exists");
+    // Then the carve-out.
+    assert.ok(crewIds.includes(crewCard), "crew cannot see their own timecard");
+    assert.ok(!crewIds.includes(ownerCard), "crew can read somebody else's timecard — this is pay information (AUDIT L90)");
+    assert.notDeepEqual(crewIds, ownerIds, "crew and the owner receive the same timecards, so the carve-out is not applied");
+  });
+
   test("crew are refused the four exceptions, and the owner is not, on the same routes", async () => {
     /**
      * Invitation, site deletion, company settings and the supervisor
@@ -496,11 +819,15 @@ if (!process.env.TEST_DATABASE_URL) {
     }
   });
 
-  test("the measured table is complete, and all four rows hold", () => {
+  test("the measured table is complete, and all six rows hold", () => {
     assert.equal(READS.length, EXPECTED_READS, "the read half did not run");
     assert.equal(WRITES.length, EXPECTED_WRITE_STEPS, "the write half did not run");
     assert.equal(REFUSALS.length, EXPECTED_REFUSALS, "the refusal half did not run");
     assert.equal(FIELD.length, EXPECTED_FIELD_PROBES, "the field-gate half did not run");
+    // +1: the timesheet carve-out pushes its own parity row, and it is the row
+    // that must NOT match. Counting it here is what stops it being dropped.
+    assert.equal(PARITY.length, EXPECTED_PARITY_KINDS + 1, "the read-parity half did not run");
+    assert.equal(OWNERSHIP.length, EXPECTED_OWNERSHIP_PROBES, "the ownership half did not run");
 
     const lines: string[] = [];
     const emit = (heading: string, rows: Row[]) => {
@@ -514,6 +841,13 @@ if (!process.env.TEST_DATABASE_URL) {
     emit("operational writes — crew must be allowed", WRITES);
     emit("the exceptions — crew must be refused", REFUSALS);
     emit("the diary status field — crew allowed and refused on the same route", FIELD);
+    emit("the ownership gate — crew edit only what they wrote", OWNERSHIP);
+    // Printed differently because it is the only population whose measurement
+    // is not a status code. Row counts and whether the id sets matched.
+    lines.push("\n  what each role RECEIVED, by id  (crew rows / owner rows / same?)");
+    for (const r of PARITY) {
+      lines.push(`    ${String(r.crewIds).padEnd(4)} ${String(r.ownerIds).padEnd(4)} ${r.same ? "same" : "DIFFER"}  ${r.route}  — ${r.label}`);
+    }
     console.log(lines.join("\n"));
 
     // The three rows, as claims rather than as a list of individual asserts.
@@ -523,6 +857,26 @@ if (!process.env.TEST_DATABASE_URL) {
     // it. What holds across it is the owner control, and that both answers
     // occur, which is asserted in its own test.
     assert.ok([...READS, ...WRITES, ...REFUSALS, ...FIELD].every((r) => ok(r.owner)), "the owner was refused something, so some control above is not a control");
+
+    // The two new claims. OWNERSHIP rows carry their own expectation, so the
+    // claim across the population is that each row answered the way its
+    // expectation says — and that BOTH answers occur, which is what stops a
+    // blanket refusal passing as a gate.
+    assert.ok(
+      OWNERSHIP.filter((r) => r.crew !== 0).every((r) => (r.crewAllowed ? ok(r.crew) : r.crew === 403)),
+      "an ownership probe answered the wrong way for crew"
+    );
+    assert.ok(OWNERSHIP.some((r) => r.crew !== 0 && ok(r.crew)), "crew were allowed no edit at all — the gate is refusing them their own rows");
+    assert.ok(OWNERSHIP.some((r) => r.crew === 403), "crew were refused no edit at all — there is no ownership gate");
+    assert.ok(OWNERSHIP.filter((r) => r.owner !== 0).every((r) => ok(r.owner)), "the owner was refused an edit, so the crew refusals are not controlled");
+
+    // Every shared record type matched by id; the carve-out did not. Both
+    // directions asserted, because "all the same" and "all different" are each
+    // a way for this to be vacuous.
+    const shared = PARITY.filter((r) => r.route !== "GET /crew/timecards");
+    assert.ok(shared.length === EXPECTED_PARITY_KINDS, "the parity population lost a row");
+    assert.ok(shared.every((r) => r.same), "crew and the owner did not receive the same rows for a shared record type");
+    assert.ok(PARITY.some((r) => !r.same), "every population matched, including timesheets — the carve-out is not applied");
   });
 
 }
