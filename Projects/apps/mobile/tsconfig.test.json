@@ -61,6 +61,8 @@
     "lib/invite-refusal.ts",
     "lib/invite-refusal.test.ts",
     "lib/permissions.ts",
-    "lib/permissions.test.ts"
+    "lib/permissions.test.ts",
+    "lib/session-routing-audit.ts",
+    "lib/session-routing-audit.test.ts"
   ]
 }
