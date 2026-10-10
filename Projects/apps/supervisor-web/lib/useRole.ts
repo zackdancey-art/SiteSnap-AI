@@ -5,6 +5,19 @@ import { getSavedUser } from "./api";
 const RANK: Record<string, number> = { crew: 0, viewer: 1, manager: 2, owner: 3 };
 
 /**
+ * The one role this phase's decision is about.
+ *
+ * Every refusal in this file is crew-specific, so they are all written in terms
+ * of this rather than as separate rank comparisons that would have to be kept
+ * in agreement by hand. The reasoning for why an absent or unrecognised role is
+ * NOT treated as crew is below, on canSeeSupervisorDashboard, and applies to
+ * every caller here.
+ */
+export function isCrew(companyRole: string | null | undefined): boolean {
+  return companyRole === "crew";
+}
+
+/**
  * Whether the supervisor dashboard is shown to this role.
  *
  * WHAT IS REFUSED, AND WHAT IS DELIBERATELY NOT
@@ -35,7 +48,53 @@ const RANK: Record<string, number> = { crew: 0, viewer: 1, manager: 2, owner: 3 
  * doing both halves.
  */
 export function canSeeSupervisorDashboard(companyRole: string | null | undefined): boolean {
-  return companyRole !== "crew";
+  return !isCrew(companyRole);
+}
+
+/**
+ * Whether GET /company/profile will answer for this role.
+ *
+ * AUDIT L79. This is not a UI preference — it mirrors `requireAtLeast("viewer")`
+ * on that route, which puts crew (rank 0) below the line and everybody else
+ * above it. It exists because the Team and Settings pages were calling the
+ * route unconditionally and then reporting its 403 as "failed to load", so a
+ * crew member was told their settings page was broken when in fact one section
+ * of it was not theirs. Asking the question first is the fix; a nicer error
+ * message would not have been, because nothing was failing.
+ *
+ * Keep this in step with the route. If the API ever opens the profile to crew,
+ * this is the single place the portal has to be told.
+ */
+export function canReadCompanyProfile(companyRole: string | null | undefined): boolean {
+  return !isCrew(companyRole);
+}
+
+/**
+ * Whether this role may move a diary to `approved`.
+ *
+ * AUDIT L81, and the one predicate here that is NOT crew-specific: the API
+ * gates the `status` field at manager+, so a VIEWER is refused too. Written as
+ * the two refused roles by name rather than as a rank comparison, for the same
+ * reason as the rest of the file — an unrecognised role is not silently
+ * demoted, and the API refuses it regardless.
+ *
+ * WHAT THIS DOES NOT MEAN
+ *
+ * It is not permission to use the reports page, or to read a diary, or to
+ * generate one. Crew keep all of that. The only thing withheld is the
+ * attestation, because the portal presents an approval rate as oversight and a
+ * rate that counts self-approvals is a misleading number on a seven-year
+ * compliance document.
+ *
+ * It matters here rather than being left to the API because the Approve
+ * button's error path is `catch (e) { console.error(e); }` — a 403 there is
+ * swallowed and the button simply stops spinning, which is the least honest
+ * refusal of the three the portal can give. Not offering the button is.
+ */
+const REFUSED_DIARY_APPROVAL = ["crew", "viewer"];
+
+export function canApproveDiary(companyRole: string | null | undefined): boolean {
+  return !REFUSED_DIARY_APPROVAL.includes(companyRole ?? "");
 }
 
 /**
@@ -66,5 +125,8 @@ export function useRole() {
     // the reasoning for what an absent role gets here is its own — see the
     // note on canSeeSupervisorDashboard.
     canSeeSupervisorDashboard: canSeeSupervisorDashboard(user?.companyRole),
+    canReadCompanyProfile: canReadCompanyProfile(user?.companyRole),
+    canApproveDiary: canApproveDiary(user?.companyRole),
+    isCrew: isCrew(user?.companyRole),
   };
 }

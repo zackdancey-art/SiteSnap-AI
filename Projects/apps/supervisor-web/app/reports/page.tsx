@@ -7,6 +7,7 @@ import Sidebar from "@/components/Sidebar";
 import Topbar from "@/components/Topbar";
 import EmailServicePicker from "@/components/EmailServicePicker";
 import { getSavedUser, generateDiary, approveDiary } from "@/lib/api";
+import { useRole } from "@/lib/useRole";
 import type { Diary, Site } from "@/lib/api";
 import { useBootstrap } from "@/lib/useBootstrap";
 import { analytics } from "@/lib/analytics";
@@ -365,6 +366,10 @@ function ReportsPageInner() {
   const [genError, setGenError]     = useState("");
   const [genSuccess, setGenSuccess] = useState("");
   const [approving, setApproving]   = useState<string | null>(null);
+  // AUDIT L81. Approving is manager+ at the API, on the `status` field rather
+  // than on the route, so everything else on this page — reading diaries,
+  // generating one, exporting, emailing — is unchanged for crew and viewers.
+  const { canApproveDiary } = useRole();
 
   const handleGenerate = async () => {
     if (!genSiteId) { setGenError("Please select a site."); return; }
@@ -607,7 +612,7 @@ function ReportsPageInner() {
                           >
                             View →
                           </button>
-                          {diary.status !== "approved" && (
+                          {diary.status !== "approved" && canApproveDiary && (
                             <button
                               disabled={approving === diary.id}
                               style={{
