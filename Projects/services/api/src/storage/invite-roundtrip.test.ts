@@ -33,7 +33,7 @@ import path from "node:path";
 import type { Pool } from "pg";
 import { getPgPool } from "./postgres";
 import { withTenant } from "./tenant";
-import { createSiteInvites, acceptSiteInvite, initProjectSchema } from "./projectsStore";
+import { createSiteInvites, acceptSiteInvite, isAcceptInviteSuccess, initProjectSchema } from "./projectsStore";
 import type { Actor } from "./actor";
 import { soloCompanyIdForEmail } from "../utils/authToken";
 
@@ -179,7 +179,10 @@ if (!process.env.TEST_DATABASE_URL) {
     assert.equal(results.length, 1, "expected exactly one invite result");
 
     const outcome = await acceptSiteInvite(invitee, await tokenFor(invitee));
-    assert.ok(typeof outcome === "object", `accept failed: ${JSON.stringify(outcome)}`);
+    // `typeof outcome === "object"` is NOT the success check any more: the
+    // wrong-recipient refusal is an object too, so that assertion would now
+    // pass against an accept that refused this invitee by name.
+    assert.ok(isAcceptInviteSuccess(outcome), `accept failed: ${JSON.stringify(outcome)}`);
     assert.equal(outcome.companyId, CO_A);
 
     // The row itself, not the return value. The bug was precisely that the
@@ -207,7 +210,7 @@ if (!process.env.TEST_DATABASE_URL) {
     assert.ok(Array.isArray(results) && results.length === 1);
 
     const outcome = await acceptSiteInvite(invitee, await tokenFor(invitee));
-    assert.ok(typeof outcome === "object", `accept failed: ${JSON.stringify(outcome)}`);
+    assert.ok(isAcceptInviteSuccess(outcome), `accept failed: ${JSON.stringify(outcome)}`);
 
     const after_ = await companyOf(invitee);
     assert.equal(after_.companyId, CO_A, "a solo company must be overridden by a real invitation");
@@ -237,7 +240,7 @@ if (!process.env.TEST_DATABASE_URL) {
     // everyone — which is the shape of every vacuity bug found in this project.
     await pool.query(`UPDATE auth_users SET company_id = '' WHERE email = $1`, [invitee]);
     const accepted = await acceptSiteInvite(invitee, token);
-    assert.ok(typeof accepted === "object", `the surviving token should now work: ${JSON.stringify(accepted)}`);
+    assert.ok(isAcceptInviteSuccess(accepted), `the surviving token should now work: ${JSON.stringify(accepted)}`);
     assert.equal((await companyOf(invitee)).companyId, CO_A);
   });
 

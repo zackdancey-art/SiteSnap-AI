@@ -237,12 +237,22 @@ test("wrong-user token is rejected", async () => {
 
   // Different user tries to accept
   const otherToken = await registerAndLogin("other@example.com", "+447911000050", "Other");
-  const r = await req<{ error: string }>(
+  const r = await req<{ error: string; code?: string; invitedEmail?: string; signedInAs?: string }>(
     "POST", "/projects/invites/accept",
     { token },
     otherToken
   );
   assert.equal(r.status, 403, "wrong-user token must return 403");
+  // The refusal has to be actionable, not merely correct. The deployed wording
+  // was "This invitation was sent to a different email address." - which was
+  // reported as a bug, because it names neither address and does not say that
+  // the remedy is to sign out.
+  assert.equal(r.body.code, "invite_wrong_user");
+  assert.equal(r.body.invitedEmail, "target@example.com", "the refusal must name the invited address");
+  assert.equal(r.body.signedInAs, "other@example.com", "and the account it was presented by");
+  assert.match(r.body.error, /target@example\.com/);
+  assert.match(r.body.error, /other@example\.com/);
+  assert.match(r.body.error, /sign out/i, "it must say what to do");
   // Original token must still be valid (wasn't consumed)
   const targetToken = await registerAndLogin("target@example.com", "+447911000060", "Target");
   const r2 = await req<{ siteId: string }>(

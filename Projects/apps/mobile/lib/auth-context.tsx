@@ -1,7 +1,14 @@
 import React, { createContext, useContext, useState, useEffect } from "react";
 import { Alert } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { router } from "expo-router";
 import { resolveApiBaseUrl } from "@/lib/api-base-url";
+import {
+  SessionExpiredError,
+  clearSessionExpired,
+  notifySessionExpired,
+  setSessionExpiredHandler,
+} from "@/lib/session";
 
 type User = {
   email: string;
@@ -64,6 +71,42 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [token, setToken] = useState<string | null>(null);
   const [lastEmail, setLastEmail] = useState("");
   const [loading, setLoading] = useState(true);
+
+  // The single response to a refused credential, registered once.
+  //
+  // It lives here because this is the only component that can both discard the
+  // session and outlive the screen the 401 came from. The alternative - each
+  // screen handling its own 401 - is the arrangement that produced the defect:
+  // fourteen places attach a bearer token, seven of them had their own fetch
+  // helper, and a feature cannot say anything true about a dead session anyway.
+  //
+  // Clearing local state directly rather than calling logout(): logout() also
+  // calls clearSessionExpired(), which would lower the notice this handler is
+  // the response to, and the notice must stay raised until the person signs in.
+  useEffect(() => {
+    const previous = setSessionExpiredHandler(() => {
+      void (async () => {
+        try {
+          await AsyncStorage.removeItem("sitesnap.token");
+          await AsyncStorage.removeItem("sitesnap.user");
+        } catch (err) {
+          // Storage refusing to clear must not stop the navigation. Staying on
+          // a screen whose every request 401s is worse than a stale key.
+          console.warn("[auth] could not clear the stored session:", err);
+        }
+        setToken(null);
+        setUser(null);
+        setIsAuthenticated(false);
+        // `replace`, not `push`: the screens behind this one belong to a
+        // session that no longer exists, and a back gesture must not return to
+        // them. The query parameter is how login.tsx knows to say why.
+        router.replace("/login?expired=1");
+      })();
+    });
+    return () => {
+      setSessionExpiredHandler(previous);
+    };
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -148,6 +191,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setLastEmail(email);
       setUser(userObj);
       setIsAuthenticated(true);
+      // A session now exists, so the "your session has expired" notice is
+      // stale. Lowering it here is what makes the NEXT expiry reportable; a
+      // latch that is never lowered would announce the first expiry and then
+      // go quiet for the life of the install.
+      clearSessionExpired();
     } catch (err: unknown) {
       const message = getErrorMessage(err);
       // Network loss is expected in dev if API is offline; avoid red-box console errors.
@@ -169,11 +217,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       });
+      // A 401 from the refresh endpoint is the most direct evidence there is
+      // that the session is over - and it is also why refreshing cannot save
+      // an expired token: /api/auth/refresh sits behind requireAuth, so the
+      // same check that refused the original request refuses this one.
+      if (res.status === 401) notifySessionExpired();
       if (!res.ok) return null;
       const data = (await res.json()) as { token?: string; user?: { email?: string; name?: string; role?: "worker" | "supervisor" | "admin"; companyRole?: "owner" | "manager" | "viewer" | "crew" } };
       if (!data.token) return null;
       await AsyncStorage.setItem("sitesnap.token", data.token);
       setToken(data.token);
+      clearSessionExpired();
       if (data.user) {
         const nextUser: User = {
           email: data.user.email || user?.email || "",
@@ -197,6 +251,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setToken(null);
       setUser(null);
       setIsAuthenticated(false);
+      clearSessionExpired();
     } catch (err: unknown) {
       console.warn("Logout failed:", err);
     }
@@ -215,6 +270,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         body: JSON.stringify({ name: patch.name, role: patch.role }),
       });
 
+      if (res.status === 401) {
+        notifySessionExpired();
+        throw new SessionExpiredError();
+      }
       if (!res.ok) {
         let message = `Profile update failed (${res.status})`;
         const contentType = res.headers.get("content-type") || "";

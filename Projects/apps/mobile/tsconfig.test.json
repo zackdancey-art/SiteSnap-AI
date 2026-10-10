@@ -53,6 +53,12 @@
     "lib/phone.ts",
     "lib/phone.test.ts",
     "lib/running-bundle.ts",
-    "lib/running-bundle.test.ts"
+    "lib/running-bundle.test.ts",
+    "lib/session.ts",
+    "lib/session.test.ts",
+    "lib/signature-input.ts",
+    "lib/signature-input.test.ts",
+    "lib/invite-refusal.ts",
+    "lib/invite-refusal.test.ts"
   ]
 }

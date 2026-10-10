@@ -5,6 +5,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useData } from "@/lib/data-context";
 import { useAuth } from "@/lib/auth-context";
+import { describeInviteRefusal } from "@/lib/invite-refusal";
 import Colors from "@/constants/colors";
 
 type State =
@@ -13,18 +14,20 @@ type State =
   // siteId: null for one, and the types claiming `string` here is why the
   // success screen rendered "joined null" and navigated to /site/null.
   | { phase: "success"; siteName: string | null; siteId: string | null; role: string }
-  | { phase: "error"; message: string };
+  // invitedEmail is non-null only for the wrong-recipient refusal, and it is
+  // what gates the Sign out control below. See lib/invite-refusal.ts.
+  | { phase: "error"; message: string; invitedEmail: string | null };
 
 export default function InviteScreen() {
   const { token } = useLocalSearchParams<{ token?: string }>();
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, logout } = useAuth();
   const { acceptInvite } = useData();
   const insets = useSafeAreaInsets();
   const [state, setState] = useState<State>({ phase: "loading" });
 
   useEffect(() => {
     if (!token) {
-      setState({ phase: "error", message: "No invite token found in the link." });
+      setState({ phase: "error", message: "No invite token found in the link.", invitedEmail: null });
       return;
     }
     if (!isAuthenticated) {
@@ -45,16 +48,14 @@ export default function InviteScreen() {
         setState({ phase: "success", siteName: result.siteName, siteId: result.siteId, role: result.role });
       })
       .catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (msg.includes("not_found") || msg.includes("404")) {
-          setState({ phase: "error", message: "This invite link is invalid or has already been used." });
-        } else if (msg.includes("expired")) {
-          setState({ phase: "error", message: "This invite link has expired. Ask your supervisor to send a new one." });
-        } else if (msg.includes("wrong_user") || msg.includes("403")) {
-          setState({ phase: "error", message: "This invite was sent to a different email address." });
-        } else {
-          setState({ phase: "error", message: msg || "Something went wrong accepting this invite." });
-        }
+        // The branching that used to live here read the server's prose for
+        // tokens the server does not send ("not_found", "wrong_user", "403"),
+        // so it chose its wording by accident - and the one refusal a person
+        // can actually act on was the one it could not recognise. The decision
+        // now happens in lib/invite-refusal.ts, on the status and code that
+        // data-context's doFetch finally carries, where it is tested.
+        const refusal = describeInviteRefusal(err);
+        setState({ phase: "error", message: refusal.message, invitedEmail: refusal.invitedEmail });
       });
   }, [token, isAuthenticated]);
 
@@ -106,6 +107,24 @@ export default function InviteScreen() {
           </View>
           <Text style={styles.title}>Couldn't accept invite</Text>
           <Text style={styles.subtitle}>{state.message}</Text>
+          {/*
+            Sign out is offered only for the refusal it actually resolves. The
+            token is still in the route params, and the effect above keys on
+            isAuthenticated - so signing out re-runs it, finds no session, and
+            sends the invitation straight on to /signup with the token still
+            attached. The person ends up where the invitation was always meant
+            to take them, without having to find the link again.
+          */}
+          {state.invitedEmail ? (
+            <Pressable
+              style={({ pressed }) => [styles.button, pressed && { opacity: 0.85 }]}
+              onPress={() => {
+                void logout();
+              }}
+            >
+              <Text style={styles.buttonText}>Sign out and accept</Text>
+            </Pressable>
+          ) : null}
           <Pressable
             style={({ pressed }) => [styles.button, styles.buttonSecondary, pressed && { opacity: 0.85 }]}
             onPress={() => router.replace("/(tabs)/")}

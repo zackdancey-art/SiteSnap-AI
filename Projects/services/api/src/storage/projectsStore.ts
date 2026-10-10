@@ -1538,13 +1538,49 @@ export type AcceptInviteSuccess = {
   companyRole: CompanyRole | null;
 };
 
+/**
+ * The invitation was for somebody else.
+ *
+ * This carries the address the invitation was actually issued to, because the
+ * refusal is unusable without it. The old bare `"wrong_user"` string produced
+ * "This invitation was sent to a different email address.", which tells the
+ * holder of the link neither which address it was for nor that the fix is to
+ * sign out — and the single most likely way to meet this refusal is to open an
+ * invitation on a phone that is already signed in as somebody else.
+ *
+ * Disclosure, stated rather than assumed: returning the invited address tells
+ * whoever holds the token which mailbox it was sent to. The refusal is only
+ * reachable by an AUTHENTICATED caller presenting a valid, unexpired token, so
+ * it is not an anonymous address oracle, and in the ordinary case the holder of
+ * the link is the recipient. It is still a disclosure; it is deliberate.
+ */
+export type AcceptInviteWrongUser = {
+  status: "wrong_user";
+  invitedEmail: string;
+};
+
 export type AcceptInviteResult =
   | AcceptInviteSuccess
+  | AcceptInviteWrongUser
   | "expired"
   | "not_found"
-  | "wrong_user"
   | "already_used"
   | "already_in_company";
+
+/**
+ * Narrowing helpers. `AcceptInviteSuccess` and `AcceptInviteWrongUser` are both
+ * objects, so `typeof result === "object"` no longer means "accepted" — and
+ * every existing caller and test used exactly that check. These two functions
+ * exist so the distinction is made in one place instead of being open-coded,
+ * correctly or otherwise, at each of them.
+ */
+export function isAcceptInviteSuccess(result: AcceptInviteResult): result is AcceptInviteSuccess {
+  return typeof result === "object" && result !== null && !("status" in result);
+}
+
+export function isAcceptInviteWrongUser(result: AcceptInviteResult): result is AcceptInviteWrongUser {
+  return typeof result === "object" && result !== null && "status" in result && result.status === "wrong_user";
+}
 
 // Applies the company side of an invite to the accepting user. Returns
 // "already_in_company" if the user already belongs to a *different real* company.
@@ -1579,7 +1615,9 @@ export async function acceptSiteInvite(
     // typed (for rows predating migration 031); actorEmail comes from a token
     // claim that routes/auth.ts already folded. Comparing them with !== refused
     // the right person as `wrong_user`.
-    if (!sameEmail(invite.invitedEmail, actorEmail)) return "wrong_user";
+    if (!sameEmail(invite.invitedEmail, actorEmail)) {
+      return { status: "wrong_user", invitedEmail: invite.invitedEmail };
+    }
     if (new Date(invite.expiresAt) < new Date()) return "expired";
 
     // Cross-company guard BEFORE consuming the token — a different-company user
@@ -1672,7 +1710,7 @@ export async function acceptSiteInvite(
     // wrong-recipient attempt from burning a valid invitation.
     if (!sameEmail(invite.invited_email, actorEmail)) {
       await client.query("ROLLBACK");
-      return "wrong_user";
+      return { status: "wrong_user", invitedEmail: invite.invited_email };
     }
 
     // Invite validated (token claimed atomically + invited_email matches). ONLY

@@ -180,11 +180,26 @@ module.exports = {
       //                   to confirm which tenant a row was actually attributed
       //                   to. Exempted by exact filename, not by a *.test.ts
       //                   glob, so the ban still holds for every other test.
+      //   routes/auth-401-codes-db.test.ts
+      //                   same narrow need, and nothing tenanted: it holds the
+      //                   pool only to apply migrations before the app boots and
+      //                   to drain it afterwards. Every assertion it makes goes
+      //                   through the HTTP route, and the one row it creates goes
+      //                   through authStore. Also exempted by exact filename.
       files: [
         "services/api/src/storage/**/*.{ts,tsx,js,jsx}",
         "services/api/src/server.ts",
         "services/api/src/routes/health.ts",
         "services/api/src/routes/uploads-media-isolation.test.ts",
+        "services/api/src/routes/auth-401-codes-db.test.ts",
+      //   routes/invite-accept-identity-db.test.ts
+      //                   the same narrow need again: the pool is held only to
+      //                   apply migrations before the app boots and to drain it
+      //                   afterwards. Every tenanted read and write in that file
+      //                   goes through withTenant, which is the point - the row
+      //                   it rewrites lives behind FORCE ROW LEVEL SECURITY and
+      //                   a bare pool query would silently match nothing.
+        "services/api/src/routes/invite-accept-identity-db.test.ts",
       ],
       rules: {
         "no-restricted-imports": [

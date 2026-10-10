@@ -17,8 +17,8 @@ import { useData } from "@/lib/data-context";
 import { useAuth } from "@/lib/auth-context";
 import Colors from "@/constants/colors";
 import { DailyEntry, SiteMember } from "@/lib/types";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import { getApiBaseUrl } from "@/lib/api-base-url";
+import { authedFetch } from "@/lib/authed-fetch";
+import { isSessionExpired } from "@/lib/session";
 import { BackButton } from "@/components/BackButton";
 
 function EntryCard({ entry }: { entry: DailyEntry }) {
@@ -73,14 +73,18 @@ function EntryCard({ entry }: { entry: DailyEntry }) {
   );
 }
 
+/**
+ * This call discarded its Response entirely - no `res.ok`, no catch - so a
+ * refused or rejected progress update looked exactly like a successful one and
+ * the slider stayed where the person put it. Through authedFetch a 401 now
+ * raises the session notice and throws, which the caller reports.
+ */
 async function patchSiteProgress(siteId: string, pct: number) {
-  const token = await AsyncStorage.getItem("sitesnap.token");
-  const base = getApiBaseUrl();
-  await fetch(`${base}/api/projects/sites/${siteId}/progress`, {
+  const res = await authedFetch(`/api/projects/sites/${siteId}/progress`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     body: JSON.stringify({ progressPercent: pct }),
   });
+  if (!res.ok) throw new Error(`Could not save progress (${res.status}).`);
 }
 
 const PROGRESS_STEPS = [0, 25, 50, 75, 100];
@@ -149,8 +153,20 @@ export default function SiteDetailScreen() {
   const progress = localProgress ?? (site as { progressPercent?: number } | undefined)?.progressPercent ?? 0;
 
   const handleProgressStep = (pct: number) => {
+    const previous = progress;
     setLocalProgress(pct);
-    if (id) patchSiteProgress(id, pct).catch(() => {});
+    if (!id) return;
+    patchSiteProgress(id, pct).catch((err: unknown) => {
+      // Put the slider back where it was. Leaving it at the new value is what
+      // made a rejected save indistinguishable from an accepted one - the
+      // optimistic update was the whole of the feedback.
+      setLocalProgress(previous);
+      // A dead session is announced once, by lib/session.ts, which is already
+      // on its way to the sign-in screen. A second alert here would be exactly
+      // the feature-specific wording this branch exists to stop showing.
+      if (isSessionExpired(err)) return;
+      Alert.alert("Not saved", err instanceof Error ? err.message : "Could not save progress.");
+    });
   };
 
   const webTopInset = Platform.OS === "web" ? 67 : 0;

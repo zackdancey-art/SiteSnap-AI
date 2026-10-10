@@ -11,7 +11,7 @@ import {
 } from "../storage/authStore";
 import { createCompanyInvite, listCompanyInvites } from "../storage/projectsStore";
 import { sendCompanyInvite } from "../services/notificationService";
-import { normalizeEmail } from "../utils/emailAddresses";
+import { normalizeEmail, sameEmail } from "../utils/emailAddresses";
 
 export const companyRouter: Router = Router();
 companyRouter.use(requireAuth);
@@ -183,14 +183,24 @@ const RolePatchSchema = z.object({
 companyRouter.patch("/company/members/:email/role", requireCompanyRole("owner"), async (req, res) => {
   try {
     const actor = getActor(req as unknown as AuthenticatedRequest);
-    const targetEmail = req.params.email;
+    // AUDIT L36/L46, the read side. `req.params.email` is whatever is in the
+    // URL; stored addresses are lowercased (registration folds them, and
+    // migration 031 folded the rows that predated it). Comparing the two with
+    // `===` refuses the right member for a casing difference alone.
+    //
+    // Today that fails CLOSED -- the `find` below misses and the 404 fires --
+    // so this is a usability bug rather than an authorisation hole. It is fixed
+    // here anyway because normalising only the write side is exactly the split
+    // that produced L36, and because `setUserCompanyRole` further down takes
+    // this same value and does its own `WHERE email = $1`.
+    const targetEmail = normalizeEmail(req.params.email);
     const parsed = RolePatchSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
       return res.status(400).json({ error: "Invalid role.", details: parsed.error.flatten() });
     }
     // Last-owner protection: if the target is currently an owner, check count first.
     const members = await listCompanyMembers(actor.companyId);
-    const target = members.find((m) => m.email === targetEmail);
+    const target = members.find((m) => sameEmail(m.email, targetEmail));
     if (!target || target.companyId !== actor.companyId) {
       return res.status(404).json({ error: "Member not found." });
     }
@@ -214,12 +224,21 @@ companyRouter.patch("/company/members/:email/role", requireCompanyRole("owner"),
 companyRouter.delete("/company/members/:email", requireCompanyRole("owner"), async (req, res) => {
   try {
     const actor = getActor(req as unknown as AuthenticatedRequest);
-    const targetEmail = req.params.email;
-    if (targetEmail === actor.email) {
+    // Normalised for the same reason as the role route above -- and here the
+    // order matters. Making the member lookup case-insensitive WITHOUT folding
+    // this comparison in the same change would open a bypass of the guard
+    // immediately below: an owner stored as `owner@x`, passing `Owner@x`, would
+    // fail the self-check, then be FOUND by the case-insensitive lookup, and in
+    // a company with two or more owners pass `ownerCount <= 1` as well and
+    // remove themselves -- exactly what the 400 forbids. (A sole owner is still
+    // stopped by the owner-count check, so the hole that would have been opened
+    // is self-removal, not last-owner removal.) Both halves move together.
+    const targetEmail = normalizeEmail(req.params.email);
+    if (sameEmail(targetEmail, actor.email)) {
       return res.status(400).json({ error: "You cannot remove yourself. Transfer ownership first." });
     }
     const members = await listCompanyMembers(actor.companyId);
-    const target = members.find((m) => m.email === targetEmail);
+    const target = members.find((m) => sameEmail(m.email, targetEmail));
     if (!target || target.companyId !== actor.companyId) {
       return res.status(404).json({ error: "Member not found." });
     }
