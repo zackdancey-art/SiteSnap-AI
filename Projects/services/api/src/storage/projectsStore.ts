@@ -26,7 +26,14 @@ export type SiteRecord = {
   status: SiteStatus;
   createdAt: string;
   progressPercent?: number;
-  deletedAt?: string | null;
+  // NO `deletedAt`. A site is HARD deleted in both stores — `deleteSite` does
+  // `memory.sites.delete(...)` and `DELETE FROM project_sites`, and
+  // `project_sites` has no `deleted_at` column in any migration. The field used
+  // to be declared here and was never written by anything, which is how a
+  // `deleted_at IS NULL` predicate came to sit in `updateSiteProgress` against
+  // a column that does not exist. Soft-delete for sites is Phase 6, with the
+  // bin and the 90-day purge; it arrives with a migration, a mapper and a list
+  // filter, the way the other four record types have it. See AUDIT L99.
 };
 
 export type EntryRecord = {
@@ -1768,7 +1775,7 @@ export async function updateSiteProgress(actor: Actor, siteId: string, progressP
   if (!useDatabase()) {
     await ensureMemoryLoaded();
     const existing = memory.sites.get(siteId);
-    if (!existing || existing.deletedAt) return null;
+    if (!existing) return null;
     // AUDIT L88. This path used to narrow crew to sites they OWN, which crew
     // never do — they cannot create one — so the in-memory store refused every
     // crew progress update while the Postgres store below allowed them all.
@@ -1783,8 +1790,12 @@ export async function updateSiteProgress(actor: Actor, siteId: string, progressP
   }
   const result = await withTenant(actor, (client) =>
     client.query<SiteRow & { progress_percent: number }>(
+      // No `deleted_at IS NULL` here: project_sites has no such column, so this
+      // statement used to fail with `column "deleted_at" does not exist` on
+      // EVERY call against Postgres. AUDIT L99. Removing the predicate is the
+      // fix rather than adding the column — soft-delete is Phase 6.
       `UPDATE project_sites SET progress_percent = $2
-       WHERE id = $1 AND company_id = $3 AND deleted_at IS NULL RETURNING *`,
+       WHERE id = $1 AND company_id = $3 RETURNING *`,
       [siteId, pct, actor.companyId]
     )
   );
