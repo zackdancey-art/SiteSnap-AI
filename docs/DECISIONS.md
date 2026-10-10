@@ -584,3 +584,135 @@ behaviour is not infrastructure trivia sitting underneath the feature — here i
 *is* the feature's correctness, and it was decided by a 301 that nobody would have
 thought to look at. Reasoning about the layer you care about, from a measurement of
 a different layer, is how both of this week's near-misses happened.
+
+---
+
+## ADR-0004 — One `@types/react` for the whole workspace, pinned to mobile's major
+
+**Date:** 2026-10-10
+**Status:** Accepted, with an expiry condition (below)
+**Finding:** [AUDIT L72](AUDIT.md)
+**Scope:** `Projects/package.json` (`pnpm.overrides`), and therefore the types
+`apps/supervisor-web` compiles against
+
+### The problem
+
+The workspace carried two `@types/react` majors **on purpose**: `apps/mobile` on
+19.1.17 (React 19.1.0, react-native 0.81.5) and `apps/supervisor-web` on 18.3.31
+(React 18.3, Next 14). Both are honest statements of what those apps run, and the
+lockfile described the pair correctly — one entry per importer, no ambiguity.
+
+The mobile typecheck still broke, **on CI only**:
+
+```
+apps/mobile typecheck: lib/useScreenInsets.tsx(181,45): error TS2322:
+Type 'React.ReactNode' is not assignable to type
+'…/node_modules/.pnpm/@types+react@18.3.31/…/@types/react/index').ReactNode'.
+  Type 'bigint' is not assignable to type 'ReactNode'.
+```
+
+Nothing in the lockfile predicts this, and that is the whole point:
+
+`react-native-safe-area-context` declares exactly two peers, `react` and
+`react-native` — **not** `@types/react`. So pnpm writes no `@types/react`
+symlink into that package's directory in the virtual store. The association with
+19.1.17 that `pnpm why` prints is inherited through `react-native`'s peer suffix,
+which is *a key in the lockfile, not a directory on disk*. TypeScript does not
+read the lockfile. Compiling that package's `.d.ts`, it resolves
+`import { ReactNode } from "react"` by a plain filesystem walk, finds no
+`@types/react` beside the package, and falls through to the one shared slot above
+it: `node_modules/.pnpm/node_modules/@types/react` — pnpm's **hidden hoist**.
+
+That slot holds **one** version, and which of the two eligible versions lands in
+it is an install-time hoisting decision the lockfile does not pin. On
+macOS/pnpm 10.30.3 it resolved to 19.1.17 and the typecheck passed; on the
+`ubuntu-24.04` runner it resolved to 18.3.31 and `apps/mobile` failed. `bigint`
+entered `ReactNode` in React 19's types, so a 19-typed child reaching an
+18-typed `children` prop is how the duplicate announces itself. Line 181 is
+`<SafeAreaProvider style={{ flex: 1 }}>{children}</SafeAreaProvider>` — the
+wrapper every screen in the `(tabs)` group mounts.
+
+So the defect was never in `useScreenInsets.tsx`. A cast, an `any` or
+`skipLibCheck` at line 181 would have silenced one arm of a coin-flip and left
+the coin in the air for the next package in the same position.
+
+### Options considered
+
+| | Option | Cost | Risk |
+|---|---|---|---|
+| **(a)** | `pnpm.overrides` pins `@types/react` to one version workspace-wide | One line; relinks `supervisor-web`'s types | `supervisor-web` compiles React 18.3 code against React 19 types |
+| **(b)** | `pnpm.packageExtensions` adds an `@types/react` peer to `react-native-safe-area-context` so the link is materialised beside it | One entry per offending package | Fixes one consumer. **The hoist slot stays ambiguous**, so the next package whose peers omit `@types/react` fails the same way, on CI only |
+| **(c)** | `hoist-pattern` / `node-linker` in a root `.npmrc` | Full reinstall **and a native rebuild to verify** | Forbidden ground: see below |
+
+### Decision: (a), plus a CI guard
+
+**(c) was ruled out before it was weighed.** A committed `.npmrc` is uploaded with
+the project, so EAS's own `pnpm install` reads it — it changes the **cloud**
+install layout, not just this machine's, and its real gate is a green native
+build. [ADR-0001](#adr-0001--keep-pnpms-isolated-node-linker-declare-the-offending-packages-by-hand)
+already declined that trade for this workspace, and its stated risk (hoisting
+makes *undeclared* packages resolvable, hiding a missing declaration until
+something installs differently) is the disease this repo keeps catching. It is
+also a native-config change, which belongs to one deliberate build rather than
+to a CI fix.
+
+**(b) is the more honest fix on types and the weaker fix on the bug.** It would
+let `supervisor-web` keep React 18 types that match its runtime. But it treats
+the symptom's location rather than its cause: the hidden hoist slot still has two
+candidates, so the identical failure is still available to any other package
+whose own peers omit `@types/react`, and it would again present as a typecheck
+that passes locally and fails on the runner. That is precisely the shape of bug
+this fix is supposed to remove.
+
+**(a) removes the nondeterminism by construction** — one version in the store
+means one eligible candidate for the slot, so there is nothing left to decide per
+install. Measured, not assumed: after the override the lockfile holds **zero**
+references to 18.3.31, the store holds exactly one `@types+react@` directory, and
+the full gate (lint, typecheck across all four packages, 61 mobile tests, 198 API
+tests) passes on a clean `--frozen-lockfile` install.
+
+**The cost, stated plainly.** `apps/supervisor-web` declares `react: ^18.3.0` and
+runs React 18.3.1, but now compiles against 19.1.17 types. It typechecks clean
+today because the portal uses no React-19-only API. It would also typecheck clean
+if someone *added* one — `use()`, `useActionState`, ref-as-prop — and that would
+fail at runtime, not at the gate. This is a real trap and it is recorded as
+**[AUDIT L72](AUDIT.md)** rather than left in a commit message. The direction of
+the pin was not a choice: mobile genuinely runs React 19.1.0 on react-native
+0.81.5, so pinning the other way breaks the app that cannot move.
+
+**The addition that fixes (a)'s weakness**, exactly as ADR-0001 did for its own:
+`Projects/scripts/assert-single-react-types.mjs` runs as a structural step of
+`scripts/ci.sh`, before Typecheck. It enumerates every copy of `@types/react` in
+the installed tree — the virtual store, the hidden hoist slot, and each workspace
+package's own link — and fails unless all of them are one version, reporting how
+many locations it checked. It also fails on an **empty** enumeration, so a future
+layout change cannot turn it into a permanent clean pass.
+
+It was verified red-on-revert, and the pair is worth recording because the guard
+proved **stronger than the typecheck** it protects. On the reverted two-version
+tree this machine's hoist slot happened to pick 19.1.17 again, so:
+
+```
+mobile typecheck (two versions installed)   EXIT=0      <- the green that misled
+assert-single-react-types (same tree)       EXIT=1      <- found 2 versions
+assert-single-react-types (override in)     EXIT=0      <- 1 version, 4 locations
+```
+
+The guard fails on the *ambiguity*, not on the outcome of the flip. A typecheck
+could never have caught this condition here, because here it wins the flip.
+
+### What would change the answer
+
+**Either of two things, and both are improvements on this state:**
+
+1. **`apps/supervisor-web` moves to React 19.** Then one version is simply
+   correct for both apps, L72 closes, the override becomes redundant
+   belt-and-braces, and the guard keeps its value unchanged.
+2. **The portal needs React 18 types back** — a Next 14 upgrade path, or a
+   dependency that hard-requires `@types/react@^18`. Then (a) is no longer
+   tenable and the answer becomes (b) *plus* a way to pin the hoist slot, which
+   pnpm does not currently offer directly; expect to re-open (c) and pay for the
+   native verification.
+
+Do **not** answer a future `TS2322` about `ReactNode` and `bigint` by editing the
+call site. That error is this condition reporting itself.

@@ -2255,3 +2255,37 @@ the cause was found.
 **Disposition:** Open, recorded 10 October 2026. Not fixed — the workaround (register a fresh owner
 after each API restart) is cheap, and persisting companies in the fallback store is a change to the
 dev/test data path that nothing in this phase needs.
+
+### L72 — Collapsing the workspace to one `@types/react` leaves the portal compiling React 18.3 code against React 19 types — MEDIUM (latent correctness; a 19-only API would typecheck clean and fail at runtime)
+
+Accepted as the cost of [ADR-0004](DECISIONS.md), which is where the reasoning lives. Recorded here
+because the cost is a trap that outlives the fix, and nothing in `apps/supervisor-web` hints at it.
+
+The workspace carried two `@types/react` majors by design — `apps/mobile` on 19.1.17, the portal on
+18.3.31. That pair is fine in the lockfile and fatal on disk: `react-native-safe-area-context`
+declares no `@types/react` peer, so TypeScript resolves React's types for it through pnpm's single
+hidden hoist slot (`node_modules/.pnpm/node_modules/@types/react`), and which of the two versions
+fills that slot is decided per install rather than by the lockfile. The mobile typecheck therefore
+passed on macOS and failed on the `ubuntu-24.04` runner with `TS2322` at
+`lib/useScreenInsets.tsx:181` — `bigint` is not assignable to React 18's `ReactNode`. One version in
+the tree removes the flip; mobile runs React 19.1.0 on react-native 0.81.5, so the one version has
+to be 19.
+
+What that leaves: `apps/supervisor-web` declares `react: ^18.3.0`, installs and runs **React
+18.3.1**, and now compiles against **@types/react 19.1.17**. It typechecks clean today, verified on
+a clean `--frozen-lockfile` install — the portal uses no React-19-only API. The trap is that it
+would *also* typecheck clean if someone added one. `use()`, `useActionState`, or passing `ref` as a
+plain prop are all valid in 19's types and absent from React 18.3.1 at runtime, so the gate would
+stay green and the portal would break in the browser. `@types/react-dom` remains at 18.3.7, which
+narrows the exposure on the DOM side but not on the React side.
+
+No current occurrence: this is a hazard the fix introduces, not a bug it leaves behind. There is no
+guard for it, and a useful one is not obvious — the honest check is "the portal's React types match
+its React runtime", which is exactly what ADR-0004 trades away on purpose.
+`Projects/scripts/assert-single-react-types.mjs` guards the *other* half (that the tree stays
+collapsed to one version) and is verified red-on-revert.
+
+**Disposition:** Open and accepted, recorded 10 October 2026. Closes when `apps/supervisor-web`
+moves to React 19, which is ADR-0004's first expiry condition and makes the single version correct
+rather than merely consistent. Until then, treat a React API that the portal's types accept as
+unproven until checked against React 18.3's actual surface.
