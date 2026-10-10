@@ -86,9 +86,15 @@ export async function authedJson<T>(path: string, init?: RequestInit): Promise<T
     // replace a meaningful status with a JSON syntax error.
     let serverMessage: string | undefined;
     let serverCode: string | undefined;
+    let serverBody: Record<string, unknown> | undefined;
     try {
       const data = (await res.json()) as { error?: string; message?: string; code?: unknown };
       serverMessage = data?.error || data?.message;
+      // The whole parsed body, for the refusals that carry structured detail a
+      // sentence cannot (the accept route's invitedEmail/signedInAs pair).
+      // data-context's doFetch carries the same field; the two helpers agreeing
+      // is the point, since seven screens disagreeing is what produced item 1.
+      serverBody = data && typeof data === "object" ? (data as Record<string, unknown>) : undefined;
       // Carried onto the thrown error so isSessionExpired() downstream can tell
       // a dead session from a refused credential. Without this the code stops
       // here and every 401 reads as an expiry again.
@@ -99,9 +105,11 @@ export async function authedJson<T>(path: string, init?: RequestInit): Promise<T
     const err = new Error(serverMessage || `API ${res.status}`) as Error & {
       status?: number;
       code?: string;
+      body?: Record<string, unknown>;
     };
     err.status = res.status;
     err.code = serverCode;
+    err.body = serverBody;
     throw err;
   }
   return res.json() as Promise<T>;

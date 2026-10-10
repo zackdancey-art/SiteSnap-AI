@@ -192,6 +192,14 @@ module.exports = {
         "services/api/src/routes/health.ts",
         "services/api/src/routes/uploads-media-isolation.test.ts",
         "services/api/src/routes/auth-401-codes-db.test.ts",
+      //   routes/invite-accept-identity-db.test.ts
+      //                   the same narrow need again: the pool is held only to
+      //                   apply migrations before the app boots and to drain it
+      //                   afterwards. Every tenanted read and write in that file
+      //                   goes through withTenant, which is the point - the row
+      //                   it rewrites lives behind FORCE ROW LEVEL SECURITY and
+      //                   a bare pool query would silently match nothing.
+        "services/api/src/routes/invite-accept-identity-db.test.ts",
       ],
       rules: {
         "no-restricted-imports": [

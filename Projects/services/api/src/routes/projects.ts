@@ -5,6 +5,8 @@ import { requireAuth, requireAtLeast, AuthenticatedRequest } from "../middleware
 import { createAuthToken } from "../utils/authToken";
 import {
   acceptSiteInvite,
+  isAcceptInviteSuccess,
+  isAcceptInviteWrongUser,
   createDiary,
   createEntry,
   createSite,
@@ -447,11 +449,37 @@ projectsRouter.post("/projects/invites/accept", async (req, res) => {
   if (result === "not_found" || result === "expired" || result === "already_used") {
     return res.status(404).json({ error: "Invite not found or has expired." });
   }
-  if (result === "wrong_user") {
-    return res.status(403).json({ error: "This invitation was sent to a different email address." });
+  if (isAcceptInviteWrongUser(result)) {
+    // Name BOTH addresses and the action. The old wording -- "This invitation
+    // was sent to a different email address." -- was literally true and
+    // operationally useless: it did not say which address, it did not say which
+    // account you were signed in as, and it did not say that the remedy is to
+    // sign out. Reported as a bug on a device where it was in fact correct
+    // behaviour, which is the measure of how badly it read.
+    //
+    // The two addresses are returned as fields as well as prose so a client can
+    // offer sign-out without parsing the sentence; app/invite.tsx does. `code`
+    // exists for the same reason -- the mobile screen used to decide what to
+    // render with a substring match on this very string.
+    return res.status(403).json({
+      error: `This invitation is for ${result.invitedEmail}. You're signed in as ${actor.email} — sign out, then open the invitation link again to accept it.`,
+      code: "invite_wrong_user",
+      invitedEmail: result.invitedEmail,
+      signedInAs: actor.email,
+    });
   }
   if (result === "already_in_company") {
     return res.status(409).json({ status: "already_in_company", error: "You are already a member of a different company." });
+  }
+  if (!isAcceptInviteSuccess(result)) {
+    // Unreachable today -- every refusal above returns, so `result` is narrowed
+    // to AcceptInviteSuccess and the `never` assignment holds. That assignment
+    // is the point: a new member added to AcceptInviteResult and not refused
+    // above fails THIS LINE at typecheck, instead of reaching the 200 below and
+    // answering `{"siteId":undefined,"role":undefined}`.
+    const unhandled: never = result;
+    console.error("[projects] unhandled acceptSiteInvite result", unhandled);
+    return res.status(500).json({ error: "Could not accept the invitation." });
   }
   // Issue a fresh token so the caller's updated role takes effect immediately
   // without requiring a separate login step.

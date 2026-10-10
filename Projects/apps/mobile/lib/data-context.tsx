@@ -165,8 +165,25 @@ async function doFetch<T>(path: string, init: RequestInit | undefined, token: st
     }
     const contentType = res.headers.get("content-type") || "";
     if (contentType.includes("application/json")) {
-      const payload = (await res.json()) as { error?: string; message?: string };
-      throw new Error(payload.error || payload.message || `Request failed (${res.status})`);
+      const payload = (await res.json()) as { error?: string; message?: string; code?: unknown };
+      // The status, the code and the body ride along on the error.
+      //
+      // This line used to be a bare `throw new Error(payload.error || ...)`,
+      // which discarded all three - and a caller that needs to tell one refusal
+      // from another therefore had nothing to branch on but the prose. That is
+      // literally what app/invite.tsx did (`msg.includes("wrong_user")`), and
+      // the tokens it looked for are not in any response body, so the screen
+      // picked its wording by accident. Matching authedJson, which carries the
+      // same fields for the same reason.
+      const err = new Error(payload.error || payload.message || `Request failed (${res.status})`) as Error & {
+        status?: number;
+        code?: string;
+        body?: Record<string, unknown>;
+      };
+      err.status = res.status;
+      if (typeof payload.code === "string") err.code = payload.code;
+      err.body = payload as Record<string, unknown>;
+      throw err;
     }
     const text = await res.text();
     if (text.trim().toLowerCase().startsWith("<!doctype html")) {

@@ -27,7 +27,7 @@ import { Client } from "pg";
 import type { Pool } from "pg";
 import { getPgPool } from "./postgres";
 import { withTenant } from "./tenant";
-import { acceptSiteInvite } from "./projectsStore";
+import { acceptSiteInvite, isAcceptInviteSuccess } from "./projectsStore";
 import { soloCompanyIdForEmail } from "../utils/authToken";
 
 if (!process.env.TEST_DATABASE_URL) {
@@ -174,7 +174,9 @@ if (!process.env.TEST_DATABASE_URL) {
   // ── acceptSiteInvite: cross-company claim via token; membership stamped in the joined company (escalated #3) ──
   test("acceptSiteInvite claims A's invite for a company-less joiner and stamps site_members with A's company", async () => {
     const result = await acceptSiteInvite(joinerEmail, inviteTokenA);
-    assert.ok(typeof result === "object" && result !== null, `accept should succeed, got ${JSON.stringify(result)}`);
+    // Not `typeof result === "object"`: the wrong-recipient refusal is an
+    // object too, and this assertion would pass against it.
+    assert.ok(isAcceptInviteSuccess(result), `accept should succeed, got ${JSON.stringify(result)}`);
     // The membership row exists in company A (readable only in A's tenant context) with A's company_id.
     const member = await withTenant({ companyId: A }, (c) =>
       c.query(`SELECT company_id, role FROM site_members WHERE site_id=$1 AND member_email=$2`, [siteA, joinerEmail]));
