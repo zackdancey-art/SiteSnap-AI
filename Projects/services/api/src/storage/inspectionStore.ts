@@ -319,3 +319,57 @@ export async function deleteInspection(actor: Actor, id: string): Promise<boolea
   ));
   return (result.rowCount ?? 0) > 0;
 }
+
+/**
+ * Who authored a row, for the route-level ownership gate.
+ *
+ * `requireOwnRecord` (middleware/recordOwnership.ts) needs the author BEFORE
+ * the handler runs, so that a crew member changing somebody else's record is
+ * refused with 403 rather than the 404 every store returns for "no row you may
+ * touch". Returns null when there is no such row in the actor's company, which
+ * the gate passes through untouched so the handler produces its own 404 — a
+ * row that is not there must not be distinguishable from one that is.
+ */
+export async function findInspectionOwner(
+  actor: Actor,
+  id: string
+): Promise<{ companyId: string; ownerEmail: string } | null> {
+  if (!useDatabase()) {
+    const existing = memoryInspections.get(id);
+    if (!existing || existing.deletedAt || existing.companyId !== actor.companyId) return null;
+    return { companyId: existing.companyId, ownerEmail: existing.ownerEmail };
+  }
+  const result = await withTenant(actor, (client) =>
+    client.query<{ owner_email: string; company_id: string }>(
+      `SELECT owner_email, company_id FROM inspections WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL LIMIT 1`,
+      [id, actor.companyId]
+    )
+  );
+  if (result.rowCount === 0) return null;
+  return { companyId: result.rows[0].company_id, ownerEmail: result.rows[0].owner_email };
+}
+
+/**
+ * The same lookup for an inspection TEMPLATE, which is the company's reusable
+ * checklist and belongs to no site. On the bare pool rather than `withTenant`,
+ * matching the other inspection_templates queries in this file — the table is
+ * not RLS-forced, and routing it through a tenant transaction here while
+ * listTemplates/deleteTemplate use the pool would be two conventions for one
+ * table.
+ */
+export async function findInspectionTemplateOwner(
+  actor: Actor,
+  id: string
+): Promise<{ companyId: string; ownerEmail: string } | null> {
+  if (!useDatabase()) {
+    const existing = memoryTemplates.get(id);
+    if (!existing || existing.companyId !== actor.companyId) return null;
+    return { companyId: existing.companyId, ownerEmail: existing.ownerEmail };
+  }
+  const result = await getPgPool().query<{ owner_email: string; company_id: string }>(
+    `SELECT owner_email, company_id FROM inspection_templates WHERE id = $1 AND company_id = $2 LIMIT 1`,
+    [id, actor.companyId]
+  );
+  if (result.rowCount === 0) return null;
+  return { companyId: result.rows[0].company_id, ownerEmail: result.rows[0].owner_email };
+}

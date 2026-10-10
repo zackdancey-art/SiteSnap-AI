@@ -170,3 +170,32 @@ export async function deleteDelivery(actor: Actor, id: string): Promise<boolean>
   ));
   return (result.rowCount ?? 0) > 0;
 }
+
+/**
+ * Who authored a row, for the route-level ownership gate.
+ *
+ * `requireOwnRecord` (middleware/recordOwnership.ts) needs the author BEFORE
+ * the handler runs, so that a crew member changing somebody else's record is
+ * refused with 403 rather than the 404 every store returns for "no row you may
+ * touch". Returns null when there is no such row in the actor's company, which
+ * the gate passes through untouched so the handler produces its own 404 — a
+ * row that is not there must not be distinguishable from one that is.
+ */
+export async function findDeliveryOwner(
+  actor: Actor,
+  id: string
+): Promise<{ companyId: string; ownerEmail: string } | null> {
+  if (!useDatabase()) {
+    const existing = memory.get(id);
+    if (!existing || existing.deletedAt || existing.companyId !== actor.companyId) return null;
+    return { companyId: existing.companyId, ownerEmail: existing.ownerEmail };
+  }
+  const result = await withTenant(actor, (client) =>
+    client.query<{ owner_email: string; company_id: string }>(
+      `SELECT owner_email, company_id FROM material_deliveries WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL LIMIT 1`,
+      [id, actor.companyId]
+    )
+  );
+  if (result.rowCount === 0) return null;
+  return { companyId: result.rows[0].company_id, ownerEmail: result.rows[0].owner_email };
+}

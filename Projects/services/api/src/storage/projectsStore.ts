@@ -1870,3 +1870,41 @@ export async function removeSiteMember(
   ));
   return (r.rowCount ?? 0) > 0;
 }
+
+/**
+ * Who authored an entry, a diary, or a diary template — for the route-level
+ * ownership gate.
+ *
+ * `requireOwnRecord` (middleware/recordOwnership.ts) needs the author BEFORE
+ * the handler runs, so that a crew member changing somebody else's record is
+ * refused with 403 rather than the 404 every store returns for "no row you may
+ * touch". Returns null when there is no such row in the actor's company, which
+ * the gate passes through untouched so the handler produces its own 404 — a
+ * row that is not there must not be distinguishable from one that is.
+ *
+ * The three kinds share one function because the lookup is identical in all
+ * three tables and the table name comes from a closed map keyed by a union
+ * type, never from a request.
+ */
+export async function findProjectRowOwner(
+  actor: Actor,
+  kind: "entry" | "diary" | "diaryTemplate",
+  id: string
+): Promise<{ companyId: string; ownerEmail: string } | null> {
+  const TABLES = { entry: "project_entries", diary: "project_diaries", diaryTemplate: "project_templates" } as const;
+  if (!useDatabase()) {
+    await ensureMemoryLoaded();
+    const store = kind === "entry" ? memory.entries : kind === "diary" ? memory.diaries : memory.templates;
+    const existing = store.get(id);
+    if (!existing || existing.companyId !== actor.companyId) return null;
+    return { companyId: existing.companyId, ownerEmail: existing.ownerEmail };
+  }
+  const result = await withTenant(actor, (client) =>
+    client.query<{ owner_email: string; company_id: string }>(
+      `SELECT owner_email, company_id FROM ${TABLES[kind]} WHERE id = $1 AND company_id = $2 LIMIT 1`,
+      [id, actor.companyId]
+    )
+  );
+  if (result.rowCount === 0) return null;
+  return { companyId: result.rows[0].company_id, ownerEmail: result.rows[0].owner_email };
+}
