@@ -1,14 +1,68 @@
 # Phase 1b — Crew Permissions — review
 
-Branch `feat/crew-permissions`, twelve commits off `63b5fe3`. 11 October 2026.
+Branch `feat/crew-permissions`, seventeen commits off `63b5fe3`. 11 October 2026.
 
 The phase exists to answer one question — *would you now hand a crew member this app on a site in
 December?* — and the honest answer is at the bottom, after the evidence that supports it.
 
-Revised after the owner's three decisions on the measurement: `POST /projects/sites` stays manager+
-as a deliberate fourth exception; diary approval becomes manager+ as a **field-level** gate; and
-L79 is closed with Team hidden from crew and Settings kept working. Sections 2, 4, 5, 6 and 7 all
-move as a result, and §7's answer changes.
+Revised twice. First after the owner's three decisions on the measurement: `POST /projects/sites`
+stays manager+ as a deliberate fourth exception; diary approval becomes manager+ as a
+**field-level** gate; and L79 is closed with Team hidden from crew and Settings kept working.
+
+Then again, and more substantially, after **the headline rule itself was corrected** — section 0
+below. The first twelve commits implement the superseded rule; five more implement the correction.
+Read §0 before §1, because two of §1's items describe the rule as it was.
+
+---
+
+## 0. The rule was corrected, in both directions, and the table could not see either
+
+The rule this branch was built to, and the rule it now implements:
+
+| | superseded | **as corrected** |
+|---|---|---|
+| manager | view and edit everything, dashboard included | unchanged |
+| crew — read | "everything a manager can" | **view every site and every entry in the company** |
+| crew — write | "everything a manager can", minus four exceptions | **edit only the entries they created** |
+| crew — dashboard | absent | unchanged |
+
+The four exceptions stand unchanged: no inviting, no creating a site, no deleting a site, no company
+settings, no approving a diary. Timesheets are the one record carved out in the other direction —
+crew see and edit only their own, because that is pay information rather than a shared site record.
+
+**Two gaps, in opposite directions, and the measurement in §2 could not have detected either.**
+
+1. **Crew saw too little.** `listEntries` scoped crew to `owner_email` OR a `site_members` row, and
+   a company-level invitation creates no `site_members` row. So a crew member invited to the
+   company saw only their own entries — wrong under either reading of the rule. Fixed without
+   inserting membership rows on company invitation: a company invitation has no particular site, so
+   inventing a site list at invitation time would be inventing data.
+2. **Crew could edit too much.** Nothing checked authorship on `PATCH` or `DELETE`. Two Postgres
+   paths had no authorship check at all (AUDIT L89). Thirteen write routes now carry
+   `requireOwnRecord`.
+
+Why §2's table missed both, which is the part worth keeping:
+
+> A 200 returning a filtered subset is indistinguishable from a 200 returning everything. Fifteen
+> green reads proved the routes were **reachable**, not that they returned the right rows. And every
+> write the table measured was a crew member writing their **own** row, so nothing in it exercised
+> crew touching somebody else's — which is how two stores came to have no authorship check at all.
+
+The table now measures rows received, by id, and authorship. §2 carries the new populations.
+
+**Where the rule lives.** One named module: `Projects/services/api/src/storage/recordScope.ts`. It
+answers read and write separately — `readVisibility`/`canReadRow` and `canEditRow` — plus two SQL
+emitters for the store queries. No store tests `isCrew` any more; each passes an actor and a
+`RecordKind` and asks. The one deliberate exception is `deleteSite`, documented at the line: it is
+unreachable for crew behind a manager+ route, and routing it through `canEditRow` would remove a
+second-layer guard on a destructive cascade rather than express the rule.
+
+**What moving to site-level assignment would cost**, since the owner expects to want it: change
+`readVisibility` to return a third mode, `"assigned-sites"`, and the two emitters beside it to
+render it as `site_id IN (SELECT site_id FROM site_members WHERE member_email = $n)` for SQL and a
+membership-set test for the in-memory path. `SITE_SCOPED` in the same file already records which
+record kinds have a `site_id` to narrow on. No store changes. The tests that change are that
+module's own and the company-wide rows of the permission table.
 
 ---
 
@@ -137,9 +191,12 @@ request is no longer fired"* is not a thing a screenshot can show.
 The verification standard for this phase was explicit: anything touching authorisation needs a test
 against Postgres, in the DB-gated suite, with **both** controls on the same route in the same test.
 
-The test is written to that standard. Four populations are pinned —
+The test is written to that standard. Six populations are pinned —
 `EXPECTED_READS = 15`, `EXPECTED_WRITE_STEPS = 13`, `EXPECTED_REFUSALS = 15`,
-`EXPECTED_FIELD_PROBES = 4` — so a sweep that quietly measures nothing fails instead of passing. The crew member is a **real invitee**: the owner
+`EXPECTED_FIELD_PROBES = 4`, `EXPECTED_PARITY_KINDS = 5`, `EXPECTED_OWNERSHIP_PROBES = 20`
+— so a sweep that quietly measures nothing fails instead of passing. The last two were added with
+the correction in §0 and are described at the end of this section; the first four measure
+reachability and refusal, which is all they were ever capable of measuring. The crew member is a **real invitee**: the owner
 invites at `role: "crew"`, the crew member registers with the token, accepts, and the test uses the
 fresh token the accept route issues. That matters because L66's second finding was that
 `company-rbac.test.ts` registered its "crew" member *without* an invite token, which makes them the
@@ -227,6 +284,47 @@ in `routes/invite-accept-access.test.ts`, against a crew member who was genuinel
 accepted. A gate nobody has watched execute is a gate on paper, and that in-memory copy is what made
 both red-on-revert runs above possible before CI ever sees the branch.
 
+**The two rows added with §0's correction, and why they are shaped the way they are.**
+
+`EXPECTED_PARITY_KINDS = 5` — sites, entries, incidents, inspections and deliveries are each seeded
+with one row written by the owner and one by the crew member on the same site. Both roles `GET` the
+list; the ids are sorted and compared with `deepEqual`. Status codes are not compared, because that
+is the measurement that failed. Three things make the comparison non-vacuous:
+
+- The **owner control asserts it saw something first.** Two empty lists are trivially "the same
+  rows", so without this the row would go green on a route returning nothing to anybody.
+- The **named rows are asserted individually** as well as the sets. Set equality would also hold if
+  both roles were wrongly narrowed in the same way.
+- The **precondition is stated rather than inherited.** This file's crew member was created by a
+  *site* invitation, so a `site_members` row exists and a green read could be coming from membership
+  rather than from company scope. The test removes the membership itself — having first proved it was
+  there to remove, otherwise "zero rows remain" passes when the `WHERE` clause is wrong — proves it
+  is gone, and restores it in a `finally` so the refusals row below still has one to revoke. All
+  three statements run with `app.company_id` set, because `site_members` is FORCE RLS as of
+  migration 025; on the bare pool they would match no rows and the precondition would be theatre.
+
+`EXPECTED_OWNERSHIP_PROBES = 20` — five probes on each of the four authored record types:
+
+| probe | expected | what it is for |
+|---|---|---|
+| crew `PATCH` their own | 2xx | the capability, which must survive the fix |
+| crew `PATCH` the owner's | 403 | the defect |
+| crew `DELETE` the owner's | 403 | the defect, destructively |
+| owner `PATCH` the owner's | 2xx | the row crew just failed to delete is still there, and the route still works |
+| owner `PATCH` the crew member's | 2xx | "manager: edit everything", and proof the gate is crew-specific rather than ownership for all |
+
+The fourth is the one easy to leave out and it is doing real work: a 403 on a `DELETE` is
+indistinguishable from a 403 on a row that was already gone. The refusal messages name the
+diagnosis rather than the expectation — *404 means the store narrowed it but `requireOwnRecord` did
+not run; 200 means neither did* — because those are two different bugs with two different fixes.
+
+Timesheets get their own row and are the one comparison that must **not** match, so its control runs
+the other way round: the **owner** must be able to see the crew member's timecard before the test
+asserts that the crew member cannot see the owner's. Otherwise "crew see fewer rows" would pass just
+as well on a route returning nothing to anybody. The completeness test asserts
+`PARITY.some((r) => !r.same)`, so the carve-out being *applied* is itself measured rather than
+assumed.
+
 ---
 
 ## 3. The 403 half, which the phase called the part most likely to go wrong
@@ -301,12 +399,15 @@ portal behind it.
 - **The revert-to-draft transition was not gated.** Same point as L86, stated here because it is the one place this branch could be accused of a gap rather than a decision. It is a decision, and it is the owner's to reverse.
 - **`company.ts` was left alone.** Outside the phase's file set, and changing its pathless `use` alters 401-versus-404 behaviour on unmatched paths, which is observable.
 - **The mobile dashboard (manager+) and the portal dashboard (viewer+) were not unified.** Pre-existing asymmetry; either direction changes what a viewer can do, which is not this change's call.
+- **Voiding an inspection signature was not gated (L91).** It is the one write on the inspection surface left out of the ownership sweep, and deliberately: `inspection_signatures` records `signer_name` as free text and carries no author column, so there is nothing for `requireOwnRecord` to look up. Three options are written out in L91; the cheap one is manager+, consistent with approval, and it is the owner's call because it costs a crew member the ability to correct a mis-signature on the spot.
+- **None of the report findings were fixed.** Seven are recorded as AUDIT L92–L98 with line numbers, under the instruction to record rather than fix: the period window anchoring on the latest visible entry, the twelve-photograph ceiling taking the oldest twelve, `totalPhotosAttached` disagreeing with the per-entry sum, five silent drop paths in `normalizeBase64Image`, no author attribution, five entry fields dropped from the payload, and `listEntries`' `limit = 200` applied before the period filter. Two of them — the period anchor and the author attribution — got *worse* as a direct result of the correction in §0, because a crew member's report now draws on the whole company's entries rather than their own. Both are recorded as such.
+- **L98 is L45's truncation in a second place, not the same defect.** Asked and answered in the finding: L45's cap was `z.array(...).max(50)` on the request schema and was fixed by having the server load the entries itself; this one is a cap inside that server-side load. The fix moved the truncation rather than removing it — from the client's payload to the server's query, and from 50 to 200.
 
 ---
 
 ## 6. What cannot be verified without you
 
-1. **The permission table, now four rows.** It runs for the first time in CI on this PR. If any row disagrees with the decision, that is the place it will show. The in-memory copy of the diary probes has run here and is green, which narrows but does not close this.
+1. **The permission table, now six rows.** It runs for the first time in CI on this PR. If any row disagrees with the decision, that is the place it will show. The in-memory copy of the diary probes has run here and is green, which narrows but does not close this — and the two rows added with §0's correction have **no** in-memory half at all. The id-parity row and the twenty ownership probes are compiled, linted and unexecuted. They are also the two rows measuring the defects the first four could not see, so this is the item with the most riding on it.
 2. **Every mobile claim.** The navigator change, the hidden controls, the Approve control's new condition and the 403 copy are unverified on a device. The checklist in the PR body is the instrument; step zero is Settings → About naming the running bundle, because results from a stale binary are not results.
 3. **L86 — crew reverting an approved diary to draft.** Implemented as open, deliberately. Whether it stays open is yours.
 
@@ -316,9 +417,16 @@ portal behind it.
 
 > *Having measured it, would you now hand a crew member this app on a site in December?*
 
-**Yes, subject to two things that are now purely verification — the table going green in CI, and a
-device pass.** That is a change from the previous answer, and the reason is that the two items
-standing in the way were decisions rather than work: both have been made, and both are built.
+**Yes, subject to the same two verification items — the table going green in CI, and a device pass.**
+The answer has not moved. What it rests on has, and that is the honest headline of this revision:
+the previous Yes was issued against a rule the owner has since corrected, on the strength of a
+measurement that could not have detected either of the two gaps §0 describes. The answer was right
+by luck in one direction and wrong in fact in the other — a company-invited crew member really was
+seeing only their own entries at the moment that Yes was written.
+
+So the Yes is worth more now than it was, for a reason unrelated to its wording: it is the first
+time it has been given against a table that measures which rows came back and who may change them,
+rather than which status code came back.
 
 What is genuinely fixed: the thing that made the answer *no* in any season. A crew member could join
 a company and do nothing — 31 routes, the entire field product, 403. That line is gone, each route
@@ -331,15 +439,23 @@ previous list that were nobody's to fix but the owner's.
 
 What stands between here and yes:
 
-1. **The table has to go green in CI.** Until then, everything in §2 is a well-built instrument that has not been read. This is the one that could still change the answer, and it resolves on this PR. The in-memory half is green here, including both red-on-revert runs, so the risk is narrower than it was — but Postgres is where authorisation is actually enforced and that has still not run.
+1. **The table has to go green in CI.** Until then, everything in §2 is a well-built instrument that has not been read. This is the one that could still change the answer, and it resolves on this PR. The in-memory half is green here, including both red-on-revert runs, so the risk is narrower than it was — but Postgres is where authorisation is actually enforced and that has still not run. Narrower in a smaller way than before, too: the id-parity and ownership rows have no in-memory half, so for the two rows that matter most there is nothing to be reassured by yet.
 2. **The device pass has to happen.** Every mobile claim in this branch is unverified by construction. A crew member clocking in on a site is exactly the path no test here has executed, and this branch added a control to that path (the Approve button's new condition) rather than only removing them.
 
 Both are work I have set up and cannot finish from this machine. Neither is a question I am waiting
 on an answer to — which is the real difference from the last time this section was written.
 
-One thing I would not call settled, though it does not block December: crew can still revert an
-approved diary to draft (L86). It is a decision I made in the direction of not extending a refusal
-unasked, and it is the item in this branch I would most expect the owner to change.
+Two things I would not call settled, though neither blocks December. Crew can still revert an
+approved diary to draft (L86) — a decision made in the direction of not extending a refusal unasked,
+and the item in this branch I would most expect the owner to change. And voiding an inspection
+signature is open to everybody (L91), which is the same kind of decision made for a different
+reason: there is no author column to gate on, so closing it means either a role gate or a migration.
+
+One thing I would say about the shape of the work rather than the product. Both gaps in §0 were in
+the gap between the in-memory store and Postgres — L87, L88, L89 and L90 are all that shape, which
+is L65's — and three of the four were invisible to a suite that runs almost entirely in-memory. The
+seventeen commits on this branch moved every one of those predicates into one module whose two
+functions both stores call. That is the change I would defend, more than any individual gate.
 
 ---
 

@@ -2656,3 +2656,261 @@ removing that leaves them with no way at all until a manager is reachable.
 
 The change, if the owner wants it, is one asymmetry rather than a redesign: allow `draft` on POST
 only, and refuse any `status` on PATCH. Owner's call.
+
+### L87 — The in-memory projects store had a `site_members` escape hatch the Postgres store did not, and one test was passing on it while asserting a cross-company read — MEDIUM (test integrity; a green assertion measuring the opposite of its name)
+
+`projectsStore.canAccessRow` — the predicate the corrected crew decision replaced — admitted a row
+when the actor was a member of its site, by consulting an in-memory `memberSiteIds` set. That set
+was keyed on `site_id` and `member_email` **only**. It never looked at `company_id`, so in the
+in-memory store a `site_members` row granted access to a site belonging to a different company.
+
+The Postgres store has no equivalent: `project_sites` is FORCE RLS, so `withTenant` on the actor's
+own company returns zero rows regardless of any membership row. The two stores therefore disagreed,
+and the disagreement was load-bearing for a test.
+
+`routes/invites.test.ts`'s "invited member sees the site in their sites list" (then at line 266)
+registered a member, accepted a site invitation, and then re-queried `GET /projects/sites` with the
+token from **registration** rather than the fresh token `POST /projects/invites/accept` returns.
+`registerAndLogin` passes no `companyName`, so every registration mints its own company — meaning
+the stale token's `companyId` was the member's own empty company, not the inviting one. The test was
+asserting that a token scoped to company A can see a site in company B. It passed only because of
+the escape hatch above, and it would have failed the first time it ran against Postgres.
+
+Fixed in the crew-permissions branch: the test uses the token the accept handler returns, and the
+opposite control is asserted on the same route in the same test — the stale token must **not** see
+the site. Without that second half the first assertion would pass equally well if `/projects/sites`
+had started returning every site in the database. The escape hatch went with `canAccessRow`;
+`storage/recordScope.ts` now answers read and write separately and neither consults `site_members`.
+
+### L88 — `updateSiteProgress` refused every crew member in the in-memory store and allowed every crew member in Postgres — MEDIUM (two products; whichever one you tested was not the one that shipped)
+
+`projectsStore.updateSiteProgress` (`storage/projectsStore.ts:1766`). The in-memory path narrowed
+crew to sites they own. Crew own none — they cannot create a site, which is exception 2 of the
+approved permission table — so the condition was unsatisfiable and the in-memory store refused
+every crew progress update. The Postgres path below it (now line 1786) has no ownership clause at
+all and allowed them all.
+
+Neither behaviour was chosen. The in-memory one is a side effect of reusing one predicate for read
+and write, and it is the one the whole in-memory suite measures, so the suite was describing a
+product that does not exist in production.
+
+Resolved in favour of the Postgres behaviour, which is also the correct one: progress is a shared
+attribute of the site, not an authored record. `project_sites.owner_email` is the manager who
+created the site, so an ownership gate there would refuse crew every progress update and delete a
+working field capability rather than close a gap. `RECORD_CLASS` in `storage/recordScope.ts` calls
+this a `shared-site-attribute` and `canEditRow` admits anyone in the company; both paths now ask it.
+`PATCH /projects/sites/:id/progress` carries a comment saying it is deliberately **not** gated.
+
+### L89 — Two Postgres update paths had no authorship check at all, while their in-memory twins did — HIGH (authorization; a crew member could rewrite anybody's incident or signed inspection in production)
+
+`incidentStore.updateIncident` (`storage/incidentStore.ts:188`) and
+`inspectionStore.updateInspection` (`storage/inspectionStore.ts:264`). Each has an in-memory branch
+that checked the row's owner and a Postgres branch whose `WHERE` was `id = $1 AND company_id = $2
+AND deleted_at IS NULL` and nothing more. So in production any authenticated member of a company
+could `PATCH` any incident or any inspection in it. For inspections that includes one that has
+already been signed: `voidStaleSignaturesOnClient` voids the signature when content changes, so the
+edit is recorded, but the edit itself was never refused.
+
+This is L65's shape for the fourth and fifth time — the in-memory store and the Postgres store
+answering an authorization question differently — and it is the reason the approved permission
+table could not see it. Every write that table measured was a crew member writing their **own**
+row, which both branches allow, so thirteen green writes said nothing about the thirteen refusals
+that should have existed beside them.
+
+Fixed: both paths now append `editOwnershipSql(actor, kind, params)`, and the thirteen `PATCH`/
+`DELETE` routes carry `requireOwnRecord(kind)` so the refusal is a 403 at the route rather than the
+404 a narrowed `UPDATE` produces. Both layers stay: deleting the middleware degrades 403 to 404, it
+does not open the row.
+
+### L90 — The timesheet query ORed in `site_members`, so a crew member on a shared site could read a colleague's pay — HIGH (privacy; pay information disclosed by a clause written for site assignment)
+
+`crewStore`'s scope clause (now the comment at `storage/crewStore.ts:30`). `crew_timecards` carries
+`owner_email`, and the clause admitted a row when the actor owned it **or** was a member of its
+site. On any site with more than one crew member that is every timecard on the site: hours, start
+and end times, break minutes, overtime and trade, for everybody.
+
+The owner's decision names this record as the exception in the other direction — "Timesheets are
+the exception I am naming: crew see and edit only their own. That is pay information, not a shared
+site record." `RECORD_CLASS` calls it a `personal-record`, `readVisibility` returns `own-rows` for
+crew, and the membership branch is gone. A manager still sees everyone's, which is the whole point
+of the record existing.
+
+The clause was not malicious or careless — it was written for a site-assignment model that the
+product does not have, and it is the same half-wiring the read-side scoping bug came from. That is
+the argument for keeping the rule in one named place; see the header of `storage/recordScope.ts`.
+
+### L91 — `POST /inspections/:id/signatures/:sigId/void` has no gate of any kind, and `inspection_signatures` has no author column to build one from — MEDIUM (compliance; the one control on a signed record is open to everybody) — OWNER'S DECISION NEEDED
+
+`routes/inspections.ts:229`. The route sits behind `FIELD_ACCESS` (`requireAuth` only) and calls
+`voidSignature(getActor(req), req.params.sigId, reason)` with no role gate and no ownership gate. So
+any authenticated member of the company can void any signature on any inspection in it.
+
+Voiding is the heaviest action available on a signed compliance record — it is what turns a signed
+inspection back into an unsigned one — and it is the one write on the inspection surface that was
+left out of the ownership sweep, deliberately, because **there is nothing to gate on**.
+`inspection_signatures` records `signer_name` as free text and no `owner_email`. Authorship cannot
+be expressed, so `requireOwnRecord` has no lookup to perform and `canEditRow` has no row shape to
+evaluate.
+
+Three possible answers, and the choice is the owner's because each changes what a crew member can
+do in the field:
+
+1. **Manager+.** One line, no migration, consistent with diary approval being manager+ (L81): if
+   crew cannot attest, crew cannot un-attest. Costs a crew member the ability to correct a
+   mis-signature on the spot.
+2. **The signer, by identity.** Needs a migration to add `signed_by_email` and a backfill decision
+   for existing rows, which is a compliance-evidence question, not a schema one. Left alone under
+   the standing rule that existing records are not backfilled without being told.
+3. **Leave it open and rely on the void reason and the audit trail.** Defensible while every user
+   is in the same small company; it is a record of who voided it, not a control on whether they may.
+
+Recorded unfixed. Option 1 is the cheap one and is what the rest of the attestation surface already
+does, but tightening it was not in this phase's instruction and it is not a consequence of anything
+this phase changed.
+
+### L92 — The report period window anchors on the latest entry the caller can see, not on a date — MEDIUM (correctness; "this month" means a different month per caller and per site)
+
+`routes/ai.ts:208`, `filterEntriesByPeriod`. The function sorts the entries it is given, takes the
+**last** one, and builds the window from that: `daily` keeps the entries sharing that entry's date,
+`weekly` keeps that date minus six days, `monthly` keeps that date's calendar month.
+
+So the period is a function of the data, not of the request. A site whose last entry was in August
+produces an "August monthly report" in October with no indication that it is not October's, and a
+site with no entries in the requested period silently produces a report for whenever its last
+activity was. There is no `from`/`to` on the request and no way to ask for a month that has passed.
+
+It also means the window moves with the caller's visibility — which is precisely what the corrected
+crew decision just changed. Before it, a crew member's `listEntries` returned only their own rows,
+so the anchor was their own last entry; now it is the company's. The same request from the same
+person on the same day could have produced a different month's report yesterday.
+
+**Not fixed.** Report periods are Phase 3 of the owner's plan, and this is that phase's first
+question rather than a defect to patch here: a real fix adds an explicit date range to the request
+and changes what every caller sends.
+
+### L93 — The twelve-photograph ceiling takes the twelve **oldest** photographs in the period — MEDIUM (feature degradation; a monthly report's images are all from the first days of the month)
+
+`routes/ai.ts:348`, `buildVisionInputs`, `maxImages = 12` at line 351. The entries it receives come
+from `filterEntriesByPeriod`, which returns them **ascending** by date. The loop walks entries in
+that order and stops once twelve images are attached.
+
+So on any site that logs more than twelve photographs in the period — a week of normal capture on a
+two-crew site — every image the model sees is from the earliest entries, and the reported progress
+is the progress at the start of the window. Nothing in the output says photographs were dropped.
+For a product whose headline claim is a narrative written from the site's photographs, this is the
+most consequential of the report findings.
+
+Two smaller defects in the same function: the `break` at line 356 leaves the inner photo loop only,
+so the outer entry loop keeps running once the ceiling is reached, re-breaking per entry; and the
+per-image instruction tells the model to cite the image as `'Photo ' + includedImages`, a number
+assigned by attachment order, which does not correspond to anything the reader of the report can
+see.
+
+**Not fixed.** The twelve-photograph ceiling is named as Phase 8 work ("report safeguards, twelve-
+photograph ceiling, cost modelling"), and which twelve to keep is a cost decision, not a bug fix —
+spreading them across the window, or raising the ceiling, changes the per-report token bill.
+
+### L94 — `totalPhotosAttached` and the per-entry `photoCount` sum disagree, and the model is told both — MEDIUM (correctness of the generated document; the AI reports photographs it was not shown)
+
+`routes/ai.ts:632`. `totalPhotosAttached: imageCount` is what `buildVisionInputs` actually attached:
+at most twelve, minus anything `normalizeBase64Image` could not resolve. The `entries` array in the
+same payload carries `photoCount: (entry.photos || []).length` per entry — the **full** count, with
+no cap and no drop-outs.
+
+A month with forty-seven photographs is therefore described to the model as
+`totalPhotosAttached: 12` beside per-entry counts summing to forty-seven, with no statement of which
+twelve. The model has been observed to reconcile that by describing photographs it cannot see, which
+on a seven-year compliance record is worse than reporting fewer.
+
+**Not fixed** — same phase as L93, and the honest fix depends on L93's answer: if the ceiling stays,
+the payload needs to say which entries the images came from and that the rest were omitted.
+
+### L95 — `normalizeBase64Image` returns `null` on five different failures and every one of them is silent — MEDIUM (observability; a photograph that never reached the AI is indistinguishable from one that was not taken)
+
+`routes/ai.ts:307`. The function returns `null` when: the base64 payload is a `data:` URL with no
+comma-separated body; there is neither a base64 payload nor a `storageKey`; the `storageKey` does
+not yield an upload id; the key is not in the canonical `uploads/<id>-<filename>` form; or the
+upload does not belong to the actor's company. The last two are the H7 cross-tenant guard and are
+correct refusals. The caller — `buildVisionInputs` line 358 — does `if (!imageUrl) continue;` for
+all five.
+
+Only one path logs anything, and it is the one that is least likely: a `console.warn` inside the
+`catch` around `mediaStorage.readFile` (line 342). A photograph refused by the ownership check, or
+one whose `storageKey` is simply the wrong shape, produces no log line, no counter, and nothing in
+the response. The report is generated, returns 200, and reads as though those photographs were never
+taken.
+
+This is the same shape as C1's provenance half: a silent downgrade of the headline feature. It is
+also the finding most likely to be masking the others — L93 and L94's numbers cannot be interpreted
+without knowing how many images were dropped rather than capped.
+
+**Not fixed.** The fix is a count per reason, surfaced in the response and the generation log line,
+which belongs with the report-safeguards phase and with C1's provenance work rather than here.
+
+### L96 — The report payload drops the author of every entry, so the generated diary cannot attribute anything — MEDIUM (compliance; a site diary that does not say who recorded what)
+
+`routes/ai.ts:743`, the mapping inside `resolveDiaryRequest`. Every `EntryRecord` carries
+`ownerEmail` — it is on the row, it is mapped by `mapEntry`, and `listEntries` returns it. The
+mapping that builds the AI payload lists `date`, `locationAddress`, `weather`, `crewCount`, `notes`,
+`photos` and `timestamp`, and `ownerEmail` is not among them.
+
+Before the corrected crew decision this cost little: a crew member's `listEntries` returned only
+their own rows, so every entry in their report was theirs by construction. It now returns the whole
+company's, so a single monthly report routinely contains entries recorded by several different
+people and says so nowhere. The document a dispute would be settled with cannot answer who wrote
+which line.
+
+Note that the fix has a privacy dimension rather than being purely additive: `ownerEmail` is an
+email address, and the standing telemetry rule for this product is identifiers and counts, no
+personal content. A display name, or the `workerName` already on the timecard, is the likelier
+right field — which is a decision, not a one-line patch.
+
+**Not fixed**, recorded for the report phase.
+
+### L97 — Five entry fields the capture form collects are dropped before the report sees them — MEDIUM (feature gap; safety fields are captured, stored, and then excluded from the document they exist for)
+
+`routes/ai.ts:743`. `swmsRef`, `hazardNotes`, `toolboxTalk`, `notesMode` and `hourlyNotes` are all
+on `EntryRecord` (`storage/projectsStore.ts:44-50`), all persisted, all mapped back by `mapEntry`
+(lines 314-316 and following) — and none of them is in the mapping that builds the AI payload.
+
+The first three are the safety record: the SWMS reference, the hazard notes, and whether a toolbox
+talk was held. They are the fields a regulator asks about, the form prompts for them, and they do
+not reach the generated diary at all. The last two are the shape of the notes: `notesMode` says
+whether the entry was captured as free text or hour by hour, and `hourlyNotes` holds the hourly
+breakdown — so for an entry captured hourly, the payload's `notes` field is the free-text one, which
+may be empty, and the actual content is dropped.
+
+The second half is the more serious of the two: it is not a missing enrichment, it is the entry's
+own content going missing. An hourly-notes entry can reach the model as effectively blank.
+
+**Not fixed** — these belong with the report payload work, and `hourlyNotes` needs a decision about
+how it is rendered into the prompt rather than just being passed through.
+
+### L98 — `listEntries`' default `limit = 200` is applied before the period filter, which is L45's fifty-entry truncation in a second place — MEDIUM (silent truncation; the same shape as a defect already fixed once)
+
+`routes/ai.ts:737` calls `listEntries(actor, siteId)` with no limit, taking the default
+`limit = 200` (`storage/projectsStore.ts:457`). The query is `ORDER BY timestamp DESC LIMIT 200`
+(line 480), and `filterEntriesByPeriod` then narrows that 200 to the period. So the period chooses
+from the two hundred most recent entries, not from the site's entries.
+
+**Asked and answered: this is a second instance of the same shape, not the same defect.** The two
+are worth distinguishing because the relationship is more awkward than either answer alone:
+
+- L45's truncation was `z.array(DiaryEntrySchema).max(50)` on the **request schema** — a cap on
+  entries the *client* sent, which the portal did not know about. It was fixed by having the server
+  load the entries itself.
+- This one is a cap inside that server-side load. So the L45 fix did not remove the truncation, it
+  **moved** it: from the client's payload to the server's query, and from 50 to 200. The code path
+  this finding is about is the one L45's fix introduced as the remedy.
+
+The impact is narrower than L45's, and the direction matters. Because the `ORDER BY` is `DESC` and
+the window anchors on the **latest** entry (L92), truncation drops the oldest rows, which are
+usually outside the period anyway. It bites when the anchored period itself holds more than two
+hundred entries — and that got considerably more reachable this phase: `listEntries` is now
+company-wide for crew rather than own-rows, so a site with several people capturing daily can clear
+two hundred entries in a month where before only one person's rows counted.
+
+**Not fixed.** The right fix is bounded by L92 — once a report takes an explicit date range, the
+query should filter by that range in SQL rather than paginate and then filter, which removes the cap
+as a concept instead of raising the number. Raising 200 to some larger number would hide the same
+defect for longer, which is what happened the first time.
