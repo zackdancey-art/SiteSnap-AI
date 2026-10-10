@@ -8,6 +8,7 @@ import { FileBackedStore } from "./fileStore";
 import { findUserByEmail, setUserCompany } from "./authStore";
 import { withTenant } from "./tenant";
 import { DiaryProvenance } from "../services/diaryProvenance";
+import { normalizeEmail, sameEmail } from "../utils/emailAddresses";
 
 type SiteStatus = "active" | "completed" | "on-hold";
 type DiaryStatus = "draft" | "approved";
@@ -1240,7 +1241,12 @@ export async function createSiteInvites(
   // owner-only company-member invite: e.g. a manager could mint a company-manager.
   if (actor.companyRole !== "owner" && inviteCompanyRole !== "crew") return INVITE_ROLE_TOO_HIGH;
 
-  for (const email of emails) {
+  // AUDIT L46: normalised here as well as in the route schemas. The schemas are
+  // the user-facing guard; this is the choke point every current and future
+  // caller passes through, including routes/auth.ts. Normalising in one place
+  // only is how the two halves of this comparison drifted apart originally.
+  for (const rawEmail of emails) {
+    const email = normalizeEmail(rawEmail);
     const token = generateInviteToken();
     if (!useDatabase()) {
       const memberKey = `${siteId}:${email}`;
@@ -1287,17 +1293,27 @@ export async function createSiteInvites(
         results.push({ email, status: "already_member" });
         continue;
       }
-      const upsert = await withTenant(actor, (client) => client.query(
+      // `(xmax = 0) AS inserted` is the standard way to tell an INSERT from an
+      // ON CONFLICT DO UPDATE: on a fresh insert xmax is 0, on an update it is
+      // the locking transaction id. The computed value must be read by its
+      // ALIAS. This previously said `RETURNING *, (xmax = 0) AS inserted` and
+      // then read `rows[0].xmax` — but `RETURNING *` does not expand system
+      // columns, so rows[0].xmax was always `undefined`, `undefined === "0"`
+      // was always false, and EVERY invitation on the Postgres path reported
+      // itself as "resent", including brand-new ones. The query had computed
+      // the right answer all along and the code read the wrong field. The
+      // in-memory path was unaffected, which is why this never showed up in a
+      // local run. `*` is dropped because nothing consumed it.
+      const upsert = await withTenant(actor, (client) => client.query<{ inserted: boolean }>(
         `INSERT INTO site_invites (id, site_id, company_id, company_role, invited_email, invited_by, role, token, expires_at)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
          ON CONFLICT (site_id, invited_email) WHERE site_id IS NOT NULL DO UPDATE
            SET token=$8, expires_at=$9, role=$7, invited_by=$6,
                company_id=$3, company_role=$4
-         RETURNING *, (xmax = 0) AS inserted`,
+         RETURNING (xmax = 0) AS inserted`,
         [uuidv7(), siteId, inviteCompanyId, inviteCompanyRole, email, actor.email, role, token, expiresAt]
       ));
-      const wasNew = (upsert as unknown as { rows: Array<{ xmax: string }> }).rows[0].xmax === "0";
-      results.push({ email, status: wasNew ? "sent" : "resent" });
+      results.push({ email, status: upsert.rows[0].inserted ? "sent" : "resent" });
     }
   }
 
@@ -1306,13 +1322,34 @@ export async function createSiteInvites(
 }
 
 // Company-only invite (no site). Adds a user to the company with a company_role.
+/**
+ * The outcome of a company invitation, so the sender can be told which of three
+ * different things happened rather than "sent" for all of them.
+ *
+ * `already_member` is the one that matters. Somebody who already holds an
+ * account in this company is not an error and must not be presented as one —
+ * the sender has simply forgotten, or two owners have both invited the same
+ * person, and a red failure there reads as a broken system. It is reported as a
+ * distinct, successful outcome and no invitation is created, because handing an
+ * existing member a join token achieves nothing.
+ */
+export type CompanyInviteOutcome =
+  | { status: "sent"; record: SiteInviteRecord }
+  | { status: "resent"; record: SiteInviteRecord }
+  | { status: "already_member" };
+
 export async function createCompanyInvite(
   actor: Actor,
-  email: string,
+  emailRaw: string,
   companyRole: CompanyRole
-): Promise<SiteInviteRecord | typeof INVITE_OWNER_REJECTED> {
+): Promise<CompanyInviteOutcome | typeof INVITE_OWNER_REJECTED> {
   if (companyRole === "owner") return INVITE_OWNER_REJECTED;
   await ensureMemoryLoaded();
+  // AUDIT L46: see createSiteInvites. Both unique indexes from migration 018
+  // are on the raw `invited_email`, so an unnormalised address does not merely
+  // compare wrong on acceptance — it also defeats the ON CONFLICT below, and
+  // one person invited at two casings becomes two rows and two live tokens.
+  const email = normalizeEmail(emailRaw);
   const token = generateInviteToken();
   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
   const record: SiteInviteRecord = {
@@ -1327,26 +1364,127 @@ export async function createCompanyInvite(
     expiresAt,
     createdAt: new Date().toISOString(),
   };
+  // Already in this company? Say so instead of issuing a pointless token.
+  // Checked before the write on both store paths so the two agree.
+  const existingUser = await findUserByEmail(email);
+  if (existingUser && existingUser.companyId === actor.companyId) {
+    return { status: "already_member" };
+  }
+
   if (!useDatabase()) {
-    // Replace any existing company invite for this email.
+    // Replace any existing company invite for this email. Deleting the old row
+    // is what makes this a REISSUE: the previous token stops working, so a link
+    // already sitting in someone's inbox dies. See the note in routes/company.ts.
+    let replaced = false;
     for (const [t, inv] of memory.siteInvites.entries()) {
       if (inv.siteId === null && inv.companyId === actor.companyId && inv.invitedEmail === email) {
         memory.siteInvites.delete(t);
+        replaced = true;
       }
     }
     memory.siteInvites.set(token, record);
     await persistMemory();
-    return record;
+    return { status: replaced ? "resent" : "sent", record };
   }
-  const r = await withTenant(actor, (client) => client.query(
+  // `xmax = 0` is true only for a row this statement INSERTed; an ON CONFLICT
+  // update leaves the deleting transaction id behind, so it is non-zero. The
+  // comparison is done in SQL and aliased, because xmax is a system column and
+  // node-postgres hands it back as a string.
+  //
+  // The DO UPDATE overwrites `expires_at`, which is what makes an EXPIRED
+  // invitation re-issuable: the lapsed row is revived with a fresh 7-day window
+  // rather than blocking the re-invitation on the unique index.
+  const r = await withTenant(actor, (client) => client.query<{ inserted: boolean }>(
     `INSERT INTO site_invites (id, site_id, company_id, company_role, invited_email, invited_by, role, token, expires_at)
      VALUES ($1,NULL,$2,$3,$4,$5,'worker',$6,$7)
      ON CONFLICT (company_id, invited_email) WHERE company_id IS NOT NULL AND site_id IS NULL DO UPDATE
        SET token=$6, expires_at=$7, company_role=$3, invited_by=$5
-     RETURNING *`,
+     RETURNING *, (xmax = 0) AS inserted`,
     [record.id, actor.companyId, companyRole, email, actor.email, token, expiresAt]
   ));
-  return mapInvite(r.rows[0]);
+  const row = r.rows[0] as unknown as Parameters<typeof mapInvite>[0] & { inserted: boolean };
+  return { status: row.inserted ? "sent" : "resent", record: mapInvite(row) };
+}
+
+/**
+ * Company invitations the sender has issued, with their state — including the
+ * expired ones.
+ *
+ * `listSiteInvites` filters `expires_at > NOW()`, which means a lapsed
+ * invitation is indistinguishable from never having sent one. For the person
+ * chasing up a crew member who has not joined, those are opposite situations
+ * and the second one is the whole question they are asking. So this deliberately
+ * returns everything and labels it, and the caller decides what to show.
+ *
+ * Note what is NOT returned: `token`. It is a bearer credential — anyone holding
+ * it can join the company as the invited role — and a list endpoint is the wrong
+ * place to hand it out. `listSiteInvites` does return it, which is a separate
+ * finding, not something to copy here.
+ */
+export type CompanyInviteSummary = {
+  id: string;
+  invitedEmail: string;
+  companyRole: CompanyRole | null;
+  invitedBy: string;
+  createdAt: string;
+  expiresAt: string;
+  state: "pending" | "expired";
+};
+
+function summariseInvite(record: SiteInviteRecord, now: number): CompanyInviteSummary {
+  return {
+    id: record.id,
+    invitedEmail: record.invitedEmail,
+    companyRole: record.companyRole,
+    invitedBy: record.invitedBy,
+    createdAt: record.createdAt,
+    expiresAt: record.expiresAt,
+    state: new Date(record.expiresAt).getTime() > now ? "pending" : "expired",
+  };
+}
+
+/**
+ * Back-date a company invitation's expiry so the lapsed-invitation paths are
+ * testable without waiting seven days or stubbing the clock.
+ *
+ * In-memory only, and that is the honest limit of it: two requirements — that a
+ * lapsed invitation stays VISIBLE to its sender, and that it can be re-issued —
+ * are about rows that have aged, and nothing else in the harness can produce
+ * one. Returns the number of rows it changed so a test can assert it actually
+ * found the invitation rather than silently matching nothing.
+ */
+export async function expireCompanyInvitesForTests(email: string): Promise<number> {
+  if (useDatabase()) throw new Error("expireCompanyInvitesForTests is in-memory only");
+  await ensureMemoryLoaded();
+  const target = normalizeEmail(email);
+  const past = new Date(Date.now() - 60_000).toISOString();
+  let changed = 0;
+  for (const [t, inv] of memory.siteInvites.entries()) {
+    if (inv.siteId === null && sameEmail(inv.invitedEmail, target)) {
+      memory.siteInvites.set(t, { ...inv, expiresAt: past });
+      changed += 1;
+    }
+  }
+  await persistMemory();
+  return changed;
+}
+
+export async function listCompanyInvites(actor: Actor): Promise<CompanyInviteSummary[]> {
+  const now = Date.now();
+  if (!useDatabase()) {
+    await ensureMemoryLoaded();
+    return Array.from(memory.siteInvites.values())
+      .filter((i) => i.siteId === null && i.companyId === actor.companyId)
+      .map((i) => summariseInvite(i, now))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+  const r = await withTenant(actor, (client) => client.query(
+    `SELECT * FROM site_invites
+      WHERE site_id IS NULL AND company_id = $1
+      ORDER BY created_at DESC`,
+    [actor.companyId]
+  ));
+  return r.rows.map((row) => summariseInvite(mapInvite(row), now));
 }
 
 export async function listSiteInvites(
@@ -1437,7 +1575,11 @@ export async function acceptSiteInvite(
     await ensureMemoryLoaded();
     const invite = memory.siteInvites.get(token);
     if (!invite) return "not_found";
-    if (invite.invitedEmail !== actorEmail) return "wrong_user";
+    // AUDIT L46: case-insensitive. The stored address is whatever the inviter
+    // typed (for rows predating migration 031); actorEmail comes from a token
+    // claim that routes/auth.ts already folded. Comparing them with !== refused
+    // the right person as `wrong_user`.
+    if (!sameEmail(invite.invitedEmail, actorEmail)) return "wrong_user";
     if (new Date(invite.expiresAt) < new Date()) return "expired";
 
     // Cross-company guard BEFORE consuming the token — a different-company user
@@ -1496,7 +1638,7 @@ export async function acceptSiteInvite(
       invited_email: string; company_id: string | null; expires_at: Date;
     }>(`SELECT invited_email, company_id, expires_at FROM site_invites WHERE token=$1`, [token]);
     if (peek.rowCount && peek.rows[0].company_id) {
-      if (peek.rows[0].invited_email === actorEmail) {
+      if (sameEmail(peek.rows[0].invited_email, actorEmail)) {
         const userRow = await client.query<{ company_id: string | null }>(
           `SELECT company_id FROM auth_users WHERE email=$1`,
           [actorEmail]
@@ -1525,7 +1667,10 @@ export async function acceptSiteInvite(
       return check.rowCount === 0 ? "not_found" : "expired";
     }
     const invite = del.rows[0];
-    if (invite.invited_email !== actorEmail) {
+    // AUDIT L46, as above. The DELETE ... RETURNING has already claimed the
+    // token, so a mismatch here must ROLLBACK — which it does — to keep a
+    // wrong-recipient attempt from burning a valid invitation.
+    if (!sameEmail(invite.invited_email, actorEmail)) {
       await client.query("ROLLBACK");
       return "wrong_user";
     }
@@ -1541,13 +1686,48 @@ export async function acceptSiteInvite(
     }
 
     // Stamp company membership within the same transaction (soft relationship).
+    //
+    // AUDIT L65. The guard here was `(company_id IS NULL OR company_id = $2)`,
+    // and BOTH of its branches are dead in production:
+    //
+    //   - `company_id IS NULL` cannot be true. Migration 016 ends with a DO
+    //     block that RAISE EXCEPTIONs if any auth_users row still has a NULL
+    //     company_id, so after 016 none does — and the invited-signup path
+    //     writes the EMPTY STRING, not NULL (routes/auth.ts sets companyId = ""
+    //     and createUser passes it straight into the INSERT).
+    //   - `company_id = $2` matches only a user already in the target company,
+    //     i.e. it is a no-op.
+    //
+    // So the UPDATE matched zero rows for every case that matters: a brand-new
+    // invited signup (''), and an existing solo-company user. acceptSiteInvite
+    // then returned success and the route minted a fresh auth token from the
+    // INVITE's company — a token claiming a company the database row did not
+    // have, which the next login silently reverted. On Postgres this meant
+    // invitation acceptance had never attached anybody to a company at all.
+    //
+    // The condition below is the SQL equivalent of applyCompanyMembership's
+    // `if (!currentCompany || currentCompany !== invite.companyId)`, which is
+    // what the in-memory path has always done — the two paths disagreed and the
+    // one that runs in production was the wrong one. A solo company is treated
+    // as "no real company" and may be overridden, which is exactly what the
+    // cross-company peek above already assumes when it computes isSoloCompany.
+    //
+    // rowCount is then asserted rather than ignored. The peek above has already
+    // rejected a genuine cross-company user, so a zero here means the row moved
+    // between the peek and this write; rolling back is correct, and it keeps the
+    // silent-success failure mode from ever coming back.
     if (invite.company_id) {
-      await client.query(
+      const stamped = await client.query(
         `UPDATE auth_users
            SET company_id = $2, company_role = $3
-         WHERE email = $1 AND (company_id IS NULL OR company_id = $2)`,
-        [actorEmail, invite.company_id, invite.company_role ?? "crew"]
+         WHERE email = $1
+           AND (company_id IS NULL OR company_id = '' OR company_id = $2 OR company_id = $4)`,
+        [actorEmail, invite.company_id, invite.company_role ?? "crew", soloCompanyIdForEmail(actorEmail)]
       );
+      if (stamped.rowCount !== 1) {
+        await client.query("ROLLBACK");
+        return "already_in_company";
+      }
     }
 
     let siteName: string | null = null;

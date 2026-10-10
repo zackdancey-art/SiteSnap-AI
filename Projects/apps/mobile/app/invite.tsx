@@ -9,7 +9,10 @@ import Colors from "@/constants/colors";
 
 type State =
   | { phase: "loading" }
-  | { phase: "success"; siteName: string; siteId: string; role: string }
+  // siteId and siteName are null for a COMPANY invitation — the API returns
+  // siteId: null for one, and the types claiming `string` here is why the
+  // success screen rendered "joined null" and navigated to /site/null.
+  | { phase: "success"; siteName: string | null; siteId: string | null; role: string }
   | { phase: "error"; message: string };
 
 export default function InviteScreen() {
@@ -25,8 +28,16 @@ export default function InviteScreen() {
       return;
     }
     if (!isAuthenticated) {
-      // Redirect to login, preserving the invite link for after auth
-      router.replace({ pathname: "/login", params: { next: `/invite?token=${token}` } });
+      // SIGNUP, not login.
+      //
+      // This used to send the invitee to /login with the invite link in `next`.
+      // Two things were wrong with that. login.tsx never read `next`, so the
+      // token was discarded; and an invitee almost by definition has no account
+      // yet, so the screen they were shown was the one they could not use. The
+      // signup screen carries the token into registration, where the API
+      // attaches the new account to the inviting company, and it offers
+      // "Already have an account?" for the minority who do.
+      router.replace({ pathname: "/signup", params: { inviteToken: token } });
       return;
     }
     acceptInvite(token)
@@ -63,16 +74,27 @@ export default function InviteScreen() {
           </View>
           <Text style={styles.title}>You're in!</Text>
           <Text style={styles.subtitle}>
-            You've joined <Text style={styles.bold}>{state.siteName}</Text> as a{" "}
-            <Text style={styles.bold}>{state.role}</Text>.
+            {state.siteName ? (
+              <>
+                You&apos;ve joined <Text style={styles.bold}>{state.siteName}</Text> as a{" "}
+                <Text style={styles.bold}>{state.role}</Text>.
+              </>
+            ) : (
+              <>You&apos;ve joined the team. Your sites will appear on your dashboard.</>
+            )}
           </Text>
           <Pressable
             style={({ pressed }) => [styles.button, pressed && { opacity: 0.85 }]}
             onPress={() =>
-              router.replace({ pathname: "/site/[id]", params: { id: state.siteId } })
+              // A COMPANY invitation has no site — the API returns siteId null
+              // for one — so this navigated to /site/null and landed the user on
+              // a broken screen at the exact moment they had just joined.
+              state.siteId
+                ? router.replace({ pathname: "/site/[id]", params: { id: state.siteId } })
+                : router.replace("/(tabs)")
             }
           >
-            <Text style={styles.buttonText}>Go to Site</Text>
+            <Text style={styles.buttonText}>{state.siteId ? "Go to Site" : "Get Started"}</Text>
           </Pressable>
         </View>
       )}

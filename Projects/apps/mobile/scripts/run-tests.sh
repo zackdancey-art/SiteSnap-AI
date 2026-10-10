@@ -30,8 +30,8 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
-EXPECTED_TEST_FILES=8
-EXPECTED_TESTS=58
+EXPECTED_TEST_FILES=9
+EXPECTED_TESTS=61
 
 FILE_LIST=$(find dist-test -name '*.test.js' | sort)
 

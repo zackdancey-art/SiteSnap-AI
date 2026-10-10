@@ -19,6 +19,7 @@ import Colors from "@/constants/colors";
 import { apiRequest } from "@/lib/query-client";
 import { isInputDebugEnabled, logInputEvent } from "@/lib/input-debug";
 import { BackButton, goBackSafe } from "@/components/BackButton";
+import { composeE164 } from "@/lib/phone";
 
 const PREFIX_OPTIONS = [
   { label: "United States", code: "+1" },
@@ -53,7 +54,7 @@ export default function ForgotPasswordScreen() {
       setError("Please enter a valid email address.");
       return;
     }
-    const normalizedPhone = `${smsPrefix}${identifier.replace(/\D/g, "")}`;
+    const normalizedPhone = composeE164(smsPrefix, identifier);
     setError("");
     setMessage("");
     setDevReset(null);

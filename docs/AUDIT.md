@@ -2010,3 +2010,282 @@ naming it, so a migration that adds or drops RLS on a table fails on the commit 
 
 **Disposition:** Open, recorded 9 October 2026. Identified as mechanisable on this branch's sweep
 list and deliberately **not built** — the branch was told to list these, not build them.
+
+### L65 — `acceptSiteInvite` has never attached anybody to a company on Postgres, and reported success for doing nothing — CRITICAL (tenancy; the reason no crew account has ever existed)
+
+Found while tracing the invitation journey for Phase 1.1. On the Postgres path, `acceptSiteInvite`
+(`storage/projectsStore.ts`) stamped the invitee's company with:
+
+```sql
+UPDATE auth_users SET company_id = $2, company_role = $3
+ WHERE email = $1 AND (company_id IS NULL OR company_id = $2)
+```
+
+Both branches of that guard are unsatisfiable or useless:
+
+- `company_id IS NULL` cannot match. Migration `016_backfill_companies.sql:145-154` ends with a
+  `DO` block that `RAISE EXCEPTION`s if a single `auth_users` row still has a NULL `company_id`, so
+  the column is non-NULL by construction on any database that booted. The invited-signup path in
+  `routes/auth.ts:431-440` writes `""`, not NULL, which this guard does not cover.
+- `company_id = $2` matches only rows **already** in the target company, where the `UPDATE` is a
+  no-op.
+
+So the statement matched zero rows on every real invitation. `rowCount` was never checked, the
+function returned a success object, and `routes/projects.ts` went on to mint a fresh auth token
+asserting a `companyId` the database row did not have. The invitee was told they had joined, held a
+token saying so, and was not a member of anything.
+
+The guard also contradicted the intent stated two lines above it in the same function: the
+pre-consume peek deliberately treats a solo company as "no real company" that an explicit company
+invite may override, and then the `UPDATE` refused exactly that case.
+
+This is the root cause of the Phase 1 premise — *"nobody but me can get into this app"* — and it
+also kills the one undiscoverable workaround. Signing up normally and tapping the emailed link
+again fails in production for the same reason.
+
+**Fixed** on `feat/crew-invitations` (`c388956`): the guard now also accepts `''` and the inviting
+company's solo id, and a `rowCount !== 1` rolls the transaction back and returns
+`already_in_company` rather than reporting a success it did not perform.
+
+**How this was established, and its limit.** By reading the SQL against migration 016's assertion
+and against the `""` written by `routes/auth.ts` — *not* by executing it. This environment has no
+Postgres and no `TEST_DATABASE_URL`, so the defect and its fix are both unexecuted here. The
+in-memory path never had this bug, which is why 191 passing tests say nothing about it. A DB-gated
+test is required and is listed as owed work.
+
+**Disposition:** Fixed in code, recorded 9 October 2026, **verification owed** — needs a `test:db`
+suite proving a Postgres invitee ends up with the inviting company on their `auth_users` row.
+
+### L66 — A pathless `projectsRouter.use` gate refuses crew rank 31 routes across seven other routers — CRITICAL (authorization; the entire crew-facing product returns 403 to crew)
+
+`routes/projects.ts:115` read:
+
+```ts
+// Crew (rank 0) are blocked from the entire dashboard router — only viewer+ may proceed.
+projectsRouter.use(requireAuth, requireAtLeast("viewer"));
+```
+
+The comment describes the intent correctly and the code does something much larger. `router.use`
+with no path mounts at `/`, and `routes/index.ts` mounts the routers onto one `apiRouter` with
+`apiRouter.use(projectsRouter)` — also pathless. So this middleware runs for **every** request that
+reaches `apiRouter` at or after `projectsRouter` in the mount order, not merely for the routes
+defined on `projectsRouter`. Seven routers are mounted after it.
+
+Enumerated, and the count asserted two ways that agree: **31 routes** across `push` (3), `crew` (3),
+`incidents` (4), `inspections` (10), `deliveries` (4), `templates` (5) and `location` (2), carrying
+**zero** `requireAtLeast` or `requireCompanyRole` gates of their own — their only role protection
+today is this accident. (`companyRouter` is mounted after it too but gates all six of its own routes,
+so it is unaffected either way.)
+
+Measured, with an owner positive control on the same route in the same run:
+
+```
+# PROBE G crew role           -> {"email":"crew-g@example.com", … "companyRole":"crew"}
+# PROBE G GET  /crew/timecards  -> 403 {"error":"Insufficient permissions."}
+# PROBE G POST /location/update -> 403 {"error":"Insufficient permissions."}
+# PROBE G owner /crew/timecards -> 200
+```
+
+A crew member therefore cannot clock in or out, send a location, file an incident, run an
+inspection, log a delivery, use an entry template, or register for push notifications. They also
+cannot create a diary entry, because `POST /projects/entries` is on `projectsRouter` itself. That is
+the whole field-capture product, 403 to the only role that uses it.
+
+It has never been observed because no crew account has ever successfully existed — L65 is why.
+
+**Why this is not fixed here.** Scoping the gate to `/projects` is the correct structural fix and it
+would simultaneously grant crew rank those 31 routes, because none of them has a gate of its own.
+That is a decision about what a crew member may do in a compliance-evidence product, and it belongs
+to the owner, not to a cleanup commit. It also cannot be made route-by-route without deciding the
+crew permission model, which is the real missing artefact.
+
+**What is fixed here** (`d2b6148`) is the one path that cannot wait for that decision: accepting an
+invitation. Gating acceptance on the rank one acquires *by* accepting is circular, and it made
+failure unrecoverable — `routes/auth.ts:456-465` treats a failed acceptance during registration as
+non-fatal on the stated grounds that *"the user simply lands with no company yet and can retry the
+invite"*, and the retry was a 403:
+
+```
+# PROBE F after signup -> 201 {"email":"crew.f@example.com", … "companyId":"","companyRole":"crew"}
+# PROBE F retry accept -> 403 {"error":"Insufficient permissions."}
+```
+
+An account created from a stale or lapsed link had no route back by any surface. The fix carves out
+exactly `POST /projects/invites/accept` by an exact `req.path` comparison and changes nothing else;
+`routes/invite-accept-access.test.ts` pins it, fails red with that same 403 when the carve-out is
+removed, and asserts that neither a case variant nor a path extending it is carved out — each with
+its positive control in the same test.
+
+**A second finding inside the first, about the tests.** `routes/company-rbac.test.ts` has a crew
+case (test 3) and it passes and it did not catch any of this. Its "crew" member registers *without*
+an invite token, which `routes/auth.ts` handles by creating a solo company and making them its
+**owner**; the invitation is then accepted at rank owner(3) and the account is demoted to crew
+afterwards. So the suite only ever exercised accept-as-owner — a journey no real invitee takes —
+and the demotion hid both L65 and L66 behind a green test. Registering with the invite token is the
+difference between the test and the product.
+
+**Disposition:** Partially fixed, recorded 9 October 2026. The accept carve-out is **fixed and
+red-on-revert verified**. The pathless gate itself is **open and deliberately unfixed, pending the
+owner's decision on the crew permission model** — raised as a Phase 1 stop condition.
+
+---
+
+### L67 — The mobile invite screen reported a successful re-send as a failure, which is the entire "I cannot re-invite an address" complaint — HIGH (correctness; the reported symptom, and the API was never at fault)
+
+`POST /company/members/invite` returns one of four outcomes per address — `sent`, `resent`,
+`already_member`, `error` — and separately reports `delivered`, because creating the invitation row
+and emailing it are two steps that fail independently.
+
+`data-context.tsx` declared the result as:
+
+```ts
+status: "sent" | "error";
+```
+
+and `company-invite.tsx` rendered anything that was not `"sent"` as a red **"Failed to send"**. So a
+re-invitation — which the route reports as `"resent"`, having successfully written a new row with a
+new token and emailed it — appeared on the sender's phone as an error. So did `already_member`,
+which is not a failure either. `delivered` was not in the type at all, so an invitation whose email
+bounced read as sent.
+
+The symptom reported was "I cannot send a second invitation to an address I have already invited."
+The second invitation was being sent every time. The screen said it was not.
+
+This was found by tracing the route's actual return values rather than by reproducing the symptom,
+and it is worth noting **why the obvious hypothesis was wrong**: a duplicate-invitation failure
+looks exactly like a uniqueness-constraint violation, and `site_invites` does carry two partial
+unique indexes on `invited_email`. It would have been easy to "fix" the constraint. The constraint
+is load-bearing and correct — `createCompanyInvite` upserts through it with `ON CONFLICT … DO
+UPDATE`, which is precisely what makes an expired invitation re-issuable. Nothing on the server
+needed changing.
+
+**Disposition:** Fixed, 10 October 2026. The type now names all four outcomes and declares
+`delivered`; the screen derives its glyph, colour and sentence from the whole result. Unverified on
+the device — the mobile surface cannot be screenshotted — and listed as such in
+`docs/PHASE-1-ACCEPTANCE-CHECKLIST.md` step 7.
+
+---
+
+### L68 — The portal gave a green tick to every invitation outcome, including the ones where no email was sent — MEDIUM (correctness; the same defect as L67, inverted)
+
+The Team page rendered every result from the same route inside one green box:
+
+```tsx
+<div key={r.email}>✓ {r.email} — {r.status === "sent" ? "Invitation sent" : r.status}</div>
+```
+
+Three defects, in rising order of consequence. It printed the raw enum at the reader, so re-inviting
+showed `✓ alice@example.com — resent` and an existing member showed
+`✓ alice@example.com — already_member`. It gave a tick and a green background to outcomes that are
+not successes. And `lib/api.ts` typed the result `{ email: string; status: string }`, omitting
+`delivered` entirely — so an invitation the API had explicitly reported as *not emailed* rendered as
+"Invitation sent".
+
+The third is the one with a consequence: the sender believes a link is sitting in an inbox and waits
+for someone who was never contacted.
+
+**Both surfaces were wrong about the same response in opposite directions** — mobile called successes
+failures, the portal called failures successes. Each was written against a guess at the route's
+return shape rather than against the route, which is why neither matched it and why the two
+mismatches do not resemble each other.
+
+**Disposition:** Fixed, 10 October 2026, in `fix(portal): tell the truth about each invitation's
+outcome`. Verified by screenshot at 1440×1100 against a rebuilt `next start` binary: four outcomes,
+four distinct sentences, 0 raw enum strings on the page with a live positive control on the matcher.
+
+---
+
+### L69 — `GET /company/invites` was built, gated, and never called, so a sender could not see a single invitation they had sent — MEDIUM (completeness; the sender's only recovery was to send another one)
+
+The route exists on the API, is manager-gated, returns `state: "pending" | "expired"` and
+deliberately withholds the token. No client called it. The portal's Team page listed **members** —
+people who had already accepted — and gave no indication that an invitation existed at all.
+
+The consequence is not cosmetic. An expired invitation and a never-sent invitation are
+indistinguishable from the sender's side, and `listSiteInvites` makes this worse on the site half by
+filtering `expires_at > NOW()`, so a lapsed invitation vanishes rather than showing as lapsed. An
+owner chasing someone who had not appeared had no way to tell what had happened, and the only
+available action was to send a duplicate — which, before L67/L68, then reported itself ambiguously.
+
+**Disposition:** Fixed for company invitations, 10 October 2026: the Team page now lists them,
+expired rows included rather than filtered. The site-invite half (`listSiteInvites` hiding expired
+rows, and returning the raw bearer token to its caller) is **open** and recorded in
+`docs/PHASE-1-INVITATION-TRACE.md` under smaller findings.
+
+---
+
+### L70 — Migration 031 would have aborted API boot on any database holding two casings of one invited address — HIGH (availability; a migration that fails at boot takes the service with it)
+
+031 normalises `site_invites.invited_email` to lower case so that L46's read-side normalisation can
+find rows written before it. Written as a single `UPDATE`, it collides with migration 018's two
+partial unique indexes — which are on the **raw** `invited_email`, and therefore permit
+`Alice@Example.com` and `alice@example.com` to coexist today. Lower-casing both makes them the same
+row, the unique index rejects it, and the migration aborts.
+
+Migrations run at **API boot** (`storage/migrate.ts`), so this is not a failed migration; it is a
+service that does not start, on exactly the databases that have the condition the migration exists
+to repair.
+
+Found by reading 018's index definitions while writing 031's test, not by running it — there is no
+Postgres in this environment, which is the same gap that let L65 live in production while dev was
+green.
+
+**Disposition:** Fixed before the migration ever ran anywhere, 10 October 2026. 031 now collapses
+each colliding group to its newest row before normalising. Additive and idempotent; re-running is a
+no-op. **Not smoke-tested against Postgres** — its test is `TEST_DATABASE_URL`-gated and executes
+for the first time in CI.
+
+---
+
+### L71 — The file-backed dev store does not persist companies, so restarting the dev API orphans every account created before the restart — LOW (dev ergonomics; wasted a verification run and will waste yours)
+
+`FileBackedStore` persists `sites`, `entries`, `diaries`, `templates`, `siteInvites` and
+`siteMembers`. Companies are held in memory only. Auth users **do** persist, in
+`data/auth-store.json`.
+
+So after an API restart a user still exists, still logs in, still carries a `companyId` in their
+token — and `GET /api/company/profile` answers **404 "Company not found."** for an id that nothing
+will ever resolve again. On the portal this surfaces as a Team page that loads nothing with no
+useful error, because the page's `Promise.all` rejects on the profile call.
+
+Dev and test only; production is Postgres and unaffected. Recorded because the failure presents as
+an application bug rather than as missing state, and it cost a verification run this phase before
+the cause was found.
+
+**Disposition:** Open, recorded 10 October 2026. Not fixed — the workaround (register a fresh owner
+after each API restart) is cheap, and persisting companies in the fallback store is a change to the
+dev/test data path that nothing in this phase needs.
+
+### L72 — Collapsing the workspace to one `@types/react` leaves the portal compiling React 18.3 code against React 19 types — MEDIUM (latent correctness; a 19-only API would typecheck clean and fail at runtime)
+
+Accepted as the cost of [ADR-0004](DECISIONS.md), which is where the reasoning lives. Recorded here
+because the cost is a trap that outlives the fix, and nothing in `apps/supervisor-web` hints at it.
+
+The workspace carried two `@types/react` majors by design — `apps/mobile` on 19.1.17, the portal on
+18.3.31. That pair is fine in the lockfile and fatal on disk: `react-native-safe-area-context`
+declares no `@types/react` peer, so TypeScript resolves React's types for it through pnpm's single
+hidden hoist slot (`node_modules/.pnpm/node_modules/@types/react`), and which of the two versions
+fills that slot is decided per install rather than by the lockfile. The mobile typecheck therefore
+passed on macOS and failed on the `ubuntu-24.04` runner with `TS2322` at
+`lib/useScreenInsets.tsx:181` — `bigint` is not assignable to React 18's `ReactNode`. One version in
+the tree removes the flip; mobile runs React 19.1.0 on react-native 0.81.5, so the one version has
+to be 19.
+
+What that leaves: `apps/supervisor-web` declares `react: ^18.3.0`, installs and runs **React
+18.3.1**, and now compiles against **@types/react 19.1.17**. It typechecks clean today, verified on
+a clean `--frozen-lockfile` install — the portal uses no React-19-only API. The trap is that it
+would *also* typecheck clean if someone added one. `use()`, `useActionState`, or passing `ref` as a
+plain prop are all valid in 19's types and absent from React 18.3.1 at runtime, so the gate would
+stay green and the portal would break in the browser. `@types/react-dom` remains at 18.3.7, which
+narrows the exposure on the DOM side but not on the React side.
+
+No current occurrence: this is a hazard the fix introduces, not a bug it leaves behind. There is no
+guard for it, and a useful one is not obvious — the honest check is "the portal's React types match
+its React runtime", which is exactly what ADR-0004 trades away on purpose.
+`Projects/scripts/assert-single-react-types.mjs` guards the *other* half (that the tree stays
+collapsed to one version) and is verified red-on-revert.
+
+**Disposition:** Open and accepted, recorded 10 October 2026. Closes when `apps/supervisor-web`
+moves to React 19, which is ADR-0004's first expiry condition and makes the single version correct
+rather than merely consistent. Until then, treat a React API that the portal's types accept as
+unproven until checked against React 18.3's actual surface.

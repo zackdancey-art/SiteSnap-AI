@@ -14,6 +14,7 @@ import { DataProvider } from "@/lib/data-context";
 import { logResolvedApiBaseUrlOnce } from "@/lib/api-base-url";
 import { resumeTrackingIfEnabled } from "@/lib/location-service";
 import { ONBOARDING_COMPLETE_KEY } from "./onboarding";
+import * as Linking from "expo-linking";
 import Constants from "expo-constants";
 import Colors from "@/constants/colors";
 
@@ -272,9 +273,26 @@ function RootLayout() {
     logResolvedApiBaseUrlOnce();
     void resumeTrackingIfEnabled();
     SplashScreen.hideAsync();
-    AsyncStorage.getItem(ONBOARDING_COMPLETE_KEY).then((val) => {
-      if (!val) router.replace("/onboarding");
-    }).catch(() => {});
+    // The onboarding redirect must not run when the app was opened BY a link.
+    //
+    // An invitee's first ever launch is a fresh install with no onboarding flag,
+    // opened from the invitation email. +native-intent.tsx resolves that link to
+    // /invite?token=…, and this `router.replace("/onboarding")` then threw it
+    // away — so the invitation was consumed by the one case it exists for, and
+    // the token was gone by the time the user finished the carousel. Same for a
+    // password reset link, which has exactly the same shape of problem.
+    //
+    // getInitialURL() is null on an ordinary cold launch, so the common path is
+    // unchanged; a deep link means the user already has a destination and does
+    // not need to be sold the product first.
+    Linking.getInitialURL()
+      .then((initialUrl) => {
+        if (initialUrl) return;
+        return AsyncStorage.getItem(ONBOARDING_COMPLETE_KEY).then((val) => {
+          if (!val) router.replace("/onboarding");
+        });
+      })
+      .catch(() => {});
   }, []);
 
   return (

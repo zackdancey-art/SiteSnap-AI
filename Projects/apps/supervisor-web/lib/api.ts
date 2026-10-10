@@ -97,6 +97,80 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return res.json() as Promise<T>;
 }
 
+/**
+ * The same call, for a page nobody is signed in on yet.
+ *
+ * `request` above treats 401 as "your session died": it clears local state and
+ * sends the browser to `/`. On the invitation and signup pages that is exactly
+ * wrong — nobody has a session yet, 401 is an ordinary answer, and the redirect
+ * would throw away the `?token=` in the URL on its way out, stranding the
+ * invitee on the sign-in page with the invitation gone and no way back to it
+ * but the original email. So these routes get a helper that reports the status
+ * and navigates nowhere.
+ *
+ * It still sends credentials, because /projects/invites/accept is called with
+ * the session cookie once sign-in has happened on the same page.
+ */
+async function publicRequest<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const res = await fetch(`${API_URL}${path}`, {
+    method,
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    let msg = text;
+    try { msg = (JSON.parse(text) as { error?: string }).error ?? text; } catch { /* */ }
+    throw new Error(msg || `Request failed (${res.status})`);
+  }
+  return res.json() as Promise<T>;
+}
+
+/**
+ * Registration, in the three steps the API requires: start, confirm the email
+ * code, then confirm the SMS code. `inviteToken` goes on the LAST call, which
+ * is where routes/auth.ts reads it — passing it earlier does nothing, and
+ * omitting it makes the new account the owner of its own empty company instead
+ * of a member of the one that invited them.
+ */
+export async function registerStart(payload: {
+  email: string; phone: string; fullName: string; password: string;
+}): Promise<{ devCodes?: { emailCode: string } }> {
+  return publicRequest("POST", "/api/auth/register", payload);
+}
+
+export async function registerVerifyEmail(email: string, emailCode: string): Promise<{ devCodes?: { smsCode: string } }> {
+  return publicRequest("POST", "/api/auth/register/verify-email", { email, emailCode });
+}
+
+export async function registerVerify(
+  email: string, smsCode: string, inviteToken?: string
+): Promise<{ token: string; user: User }> {
+  return publicRequest("POST", "/api/auth/register/verify", {
+    email, smsCode, ...(inviteToken ? { inviteToken } : {}),
+  });
+}
+
+export type AcceptedInvite = {
+  siteId: string | null;
+  siteName: string | null;
+  role: string;
+  companyId?: string;
+  companyRole?: string;
+};
+
+/**
+ * Accept an invitation as the signed-in user.
+ *
+ * `siteId`/`siteName` are null for a company invitation, which carries no site.
+ * Requires a session: the API reads the cookie, and the caller must have signed
+ * in or registered first.
+ */
+export async function acceptInvite(token: string): Promise<AcceptedInvite> {
+  return publicRequest("POST", "/api/projects/invites/accept", { token });
+}
+
 export async function login(email: string, password: string): Promise<{ token: string; user: User }> {
   const data = await request<{ token: string; user: User }>("POST", "/api/auth/login", { email, password });
   // API sets the httpOnly session cookie; we only persist display info locally.
@@ -280,8 +354,59 @@ export async function listCompanyMembers(): Promise<CompanyMember[]> {
   return data.members;
 }
 
-export async function inviteCompanyMembers(emails: string[], companyRole: string): Promise<{ results: { email: string; status: string }[] }> {
-  return request<{ results: { email: string; status: string }[] }>("POST", "/api/company/members/invite", { emails, companyRole });
+/**
+ * One result per address from POST /company/members/invite.
+ *
+ * The route reports four outcomes and two separate steps, and this type used to
+ * flatten both: `status` was typed `string`, which let the Team page print the
+ * raw enum at the reader, and `delivered` was not declared at all.
+ *
+ * `delivered` is the step that matters. The route creates the invitation row
+ * first and emails it second, and says so separately — `status: "sent"` with
+ * `delivered: false` means the invitation exists and no email went out. With
+ * the field dropped, the page showed a green tick either way, so an invitation
+ * nobody could have received read as sent.
+ *
+ * The route also returns the bearer `token` when delivery failed. It is
+ * deliberately NOT declared here: it grants company membership, and nothing on
+ * this surface should be able to render it by accident.
+ */
+export type CompanyInviteResult = {
+  email: string;
+  status: "sent" | "resent" | "already_member" | "error";
+  /** Absent on `already_member` and `error` — neither sends an email. */
+  delivered?: boolean;
+  deliveryError?: string;
+};
+
+export async function inviteCompanyMembers(emails: string[], companyRole: string): Promise<{ results: CompanyInviteResult[] }> {
+  return request<{ results: CompanyInviteResult[] }>("POST", "/api/company/members/invite", { emails, companyRole });
+}
+
+/**
+ * A company invitation that has been sent and not yet accepted.
+ *
+ * Mirrors `CompanyInviteSummary` in the API's projectsStore. There is no token
+ * on it, by design: `GET /company/invites` does not return one.
+ */
+export type CompanyInviteSummary = {
+  id: string;
+  invitedEmail: string;
+  companyRole: string | null;
+  invitedBy: string;
+  createdAt: string;
+  expiresAt: string;
+  state: "pending" | "expired";
+};
+
+/**
+ * What has been sent and not yet accepted. Manager and above, matching
+ * `listCompanyMembers` — a manager who cannot see a pending invitation issues
+ * a duplicate.
+ */
+export async function listCompanyInvites(): Promise<CompanyInviteSummary[]> {
+  const data = await request<{ invites: CompanyInviteSummary[] }>("GET", "/api/company/invites");
+  return data.invites;
 }
 
 export async function updateMemberRole(email: string, companyRole: string): Promise<void> {

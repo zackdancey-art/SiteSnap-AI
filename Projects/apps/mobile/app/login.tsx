@@ -13,7 +13,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { router } from "expo-router";
+import { router, useLocalSearchParams } from "expo-router";
 import { useAuth } from "@/lib/auth-context";
 import Colors from "@/constants/colors";
 import { isInputDebugEnabled, logInputEvent } from "@/lib/input-debug";
@@ -21,6 +21,21 @@ import { isInputDebugEnabled, logInputEvent } from "@/lib/input-debug";
 export default function LoginScreen() {
   const insets = useSafeAreaInsets();
   const { login, lastEmail } = useAuth();
+  /**
+   * Where to go after a successful login.
+   *
+   * invite.tsx has always sent an unauthenticated invitee here with
+   * `?next=/invite?token=…`, and this screen never read it — so the invitee
+   * logged in and was dropped on the dashboard with the invitation silently
+   * discarded. The parameter was being passed to nobody.
+   *
+   * Only internal paths are honoured. `next` arrives from a route parameter,
+   * and a route parameter can arrive from a deep link, so an absolute URL here
+   * would let a crafted link bounce a freshly-authenticated user somewhere of
+   * the sender's choosing.
+   */
+  const { next } = useLocalSearchParams<{ next?: string }>();
+  const safeNext = typeof next === "string" && next.startsWith("/") && !next.startsWith("//") ? next : null;
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -51,7 +66,7 @@ export default function LoginScreen() {
     setSubmitting(true);
     try {
       await login(email, password);
-      router.replace("/(tabs)");
+      router.replace(safeNext ?? "/(tabs)");
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Login failed";
       setError(message);
@@ -59,6 +74,15 @@ export default function LoginScreen() {
       setSubmitting(false);
     }
   };
+
+  // An invitee who lands here and taps "Sign Up" must keep their invitation.
+  // Without this the token dies at the login screen and the account is created
+  // attached to nothing — the orphan state AUDIT L66 describes.
+  const inviteTokenFromNext = (() => {
+    if (!safeNext) return null;
+    const m = /[?&]token=([^&]+)/.exec(safeNext);
+    return m ? decodeURIComponent(m[1]) : null;
+  })();
 
   const webTopInset = Platform.OS === "web" ? 67 : 0;
   const showDebugHint = isInputDebugEnabled();
@@ -180,7 +204,15 @@ export default function LoginScreen() {
 
           <View style={[styles.footer, { paddingBottom: insets.bottom + (Platform.OS === "web" ? 34 : 16) }]}>
             <Text style={styles.footerText}>Don't have an account?</Text>
-            <Pressable onPress={() => router.push("/signup")}>
+            <Pressable
+              onPress={() =>
+                router.push(
+                  inviteTokenFromNext
+                    ? { pathname: "/signup", params: { inviteToken: inviteTokenFromNext } }
+                    : "/signup"
+                )
+              }
+            >
               <Text style={styles.signUpText}>Sign Up</Text>
             </Pressable>
           </View>

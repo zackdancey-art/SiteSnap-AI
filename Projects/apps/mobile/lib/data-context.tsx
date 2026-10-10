@@ -69,14 +69,39 @@ interface DataContextType {
   refresh: () => Promise<void>;
   inviteCrewMembers: (siteId: string, emails: string[], role: string) => Promise<InviteResult[]>;
   inviteCompanyMembers: (emails: string[], companyRole: string) => Promise<CompanyInviteResult[]>;
-  acceptInvite: (token: string) => Promise<{ siteId: string; siteName: string; role: string }>;
+  acceptInvite: (token: string) => Promise<{ siteId: string | null; siteName: string | null; role: string }>;
   getSiteMembers: (siteId: string) => Promise<SiteMember[]>;
   removeSiteMember: (siteId: string, memberEmail: string) => Promise<void>;
 }
 
+/**
+ * One result per address from POST /company/members/invite.
+ *
+ * THE ROUTE HAS FOUR OUTCOMES, NOT TWO. This interface used to declare
+ * `"sent" | "error"`, and `app/company-invite.tsx` renders anything that is not
+ * `"sent"` with a red alert icon and the words "Failed to send" — so a
+ * successful RE-send, which the route reports as `"resent"`, appeared on this
+ * screen as a failure, and so did `"already_member"`, which is not a failure
+ * either. That is the whole of the reported "I cannot send a second invitation
+ * to an address I have already invited": the second invitation is created and
+ * emailed, and the screen says it was not.
+ *
+ * `delivered` is the second half of the same problem. The route creates the
+ * invitation row first and emails it second, and reports those two steps
+ * separately: `status: "sent"` with `delivered: false` means the invitation
+ * exists and the email did not go out. Dropping the field from this type made
+ * that case indistinguishable from a delivered one.
+ *
+ * The route also returns the bearer `token` when delivery failed. It is
+ * deliberately NOT declared here: it grants company membership, and nothing on
+ * this screen should be able to render it by accident.
+ */
 export interface CompanyInviteResult {
   email: string;
-  status: "sent" | "error";
+  status: "sent" | "resent" | "already_member" | "error";
+  /** Absent on `already_member` and `error` — neither sends an email. */
+  delivered?: boolean;
+  deliveryError?: string;
 }
 
 const DataContext = createContext<DataContextType | null>(null);
@@ -859,11 +884,54 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     return resp.results;
   };
 
-  const acceptInvite = async (token: string): Promise<{ siteId: string; siteName: string; role: string }> => {
-    const resp = await apiJson<{ siteId: string; siteName: string; role: string }>("/projects/invites/accept", {
-      method: "POST",
-      body: JSON.stringify({ token }),
-    });
+  /**
+   * Accept a site or company invitation.
+   *
+   * `siteId` and `siteName` are NULL for a company invitation, which joins a
+   * company and no site. This signature used to promise `string` for both; the
+   * route has always returned null here, and `app/invite.tsx` rendered the
+   * literal "null" into its subtitle on the strength of that promise.
+   *
+   * THE TOKEN REFRESH IS LOAD-BEARING, NOT HYGIENE
+   *
+   * Every route derives the acting company from the bearer token's CLAIMS, not
+   * from the user row (`middleware/auth.ts` sets `req.auth` from the verified
+   * token; each router's `getActor` copies `companyId`/`companyRole` straight
+   * off it). An invitee's pre-acceptance token carries `companyId: ""` and
+   * `companyRole: "crew"`, so holding onto it after a successful acceptance
+   * leaves every subsequent request scoped to no company: RLS matches no rows
+   * and the company-scoped routes refuse the caller. The invitee accepts, sees
+   * an empty app, and has to log out and back in before anything appears.
+   *
+   * Nothing else recovers from this. The 401 retry inside `apiJson` does not:
+   * the old token is perfectly valid, merely under-privileged, so the routes
+   * answer 403 and the refresh-and-retry path is never entered.
+   *
+   * `refreshToken()` re-reads the user row, so the claims it mints agree with
+   * what the database actually recorded. That is deliberately preferred over
+   * adopting the fresh token the accept response also carries, which is built
+   * from the values the handler intended to write and would therefore report a
+   * company the row may not have — the exact shape of AUDIT L65, where accept
+   * reported success for attaching nobody to anything. If the attachment did
+   * not happen we want the invitee to see an empty app, not a token asserting
+   * a membership the database disagrees with.
+   *
+   * `apiJson` reads the token from AsyncStorage on every call and
+   * `refreshToken()` persists it there before setting React state, so the
+   * `refresh()` below runs with the new claims rather than the stale closure.
+   */
+  const acceptInvite = async (
+    token: string
+  ): Promise<{ siteId: string | null; siteName: string | null; role: string }> => {
+    const resp = await apiJson<{ siteId: string | null; siteName: string | null; role: string }>(
+      "/projects/invites/accept",
+      {
+        method: "POST",
+        body: JSON.stringify({ token }),
+      }
+    );
+    // Pick up the company the acceptance just granted, before reading any data.
+    await refreshToken();
     // Refresh so the newly joined site appears in the sites list
     await refresh();
     return resp;

@@ -13,40 +13,38 @@ import {
   View,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { router } from "expo-router";
+import { router, useLocalSearchParams } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Colors from "@/constants/colors";
 import { apiRequest } from "@/lib/query-client";
 import { BackButton, goBackSafe } from "@/components/BackButton";
+import { composeE164, DIALLING_CODES } from "@/lib/phone";
 
 type PrefixOption = {
   label: string;
   code: string;
 };
 
-const PREFIX_OPTIONS: PrefixOption[] = [
-  { label: "United States", code: "+1" },
-  { label: "Canada", code: "+1" },
-  { label: "Australia", code: "+61" },
-  { label: "New Zealand", code: "+64" },
-  { label: "United Kingdom", code: "+44" },
-  { label: "Ireland", code: "+353" },
-  { label: "Singapore", code: "+65" },
-  { label: "India", code: "+91" },
-  { label: "South Africa", code: "+27" },
-  { label: "United Arab Emirates", code: "+971" },
-];
+const PREFIX_OPTIONS: PrefixOption[] = DIALLING_CODES;
 
 function isValidEmail(email: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
-function normalizeLocalPhone(phone: string) {
-  return phone.replace(/\D/g, "");
-}
-
 export default function SignUpScreen() {
   const insets = useSafeAreaInsets();
+  /**
+   * The invitation this signup is fulfilling, if any.
+   *
+   * The API has always accepted an `inviteToken` on /auth/register/verify —
+   * routes/auth.ts reads it, skips creating a solo company, and attaches the new
+   * account to the inviting one. No client ever sent it: the string
+   * "inviteToken" appeared nowhere under apps/. So every invited signup created
+   * a brand-new company with the invitee as its owner, and the invitation they
+   * were acting on was left untouched in the database.
+   */
+  const { inviteToken } = useLocalSearchParams<{ inviteToken?: string }>();
+  const invite = typeof inviteToken === "string" && inviteToken.trim() ? inviteToken.trim() : null;
   // Three stages, not two: the SMS is only minted once the email code is
   // accepted (API migration 029), so "check your email" and "check your phone"
   // are genuinely separate waits and cannot share a screen.
@@ -68,7 +66,7 @@ export default function SignUpScreen() {
   const [resendCooldown, setResendCooldown] = useState(0);
 
   const normalizedPhone = useMemo(
-    () => `${phonePrefix}${normalizeLocalPhone(phoneLocal)}`,
+    () => composeE164(phonePrefix, phoneLocal),
     [phoneLocal, phonePrefix]
   );
 
@@ -121,7 +119,7 @@ export default function SignUpScreen() {
       setError("Passwords do not match.");
       return;
     }
-    if (normalizeLocalPhone(phoneLocal).length < 8) {
+    if (phoneLocal.replace(/\D/g, "").length < 8) {
       setError("Please enter a valid phone number.");
       return;
     }
@@ -244,6 +242,9 @@ export default function SignUpScreen() {
       const res = await apiRequest("POST", "/api/auth/register/verify", {
         email: email.trim().toLowerCase(),
         smsCode: smsCode.trim(),
+        // Only sent when present: an empty string here would make the API take
+        // the invited-join branch and create the account with no company.
+        ...(invite ? { inviteToken: invite } : {}),
       });
       const data = (await res.json()) as { error?: string; restart?: boolean; stage?: string };
       if (res.ok) {

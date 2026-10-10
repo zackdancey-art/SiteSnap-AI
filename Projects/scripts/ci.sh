@@ -111,6 +111,15 @@ step "Structural: rules-of-hooks is actually enforced on the React packages"
 step "Structural: workflow runners are pinned and action majors are current"
 ./scripts/assert-workflow-runners-pinned.sh
 
+# Two @types/react majors in the tree leave pnpm's hidden hoist slot with two
+# eligible candidates, and the winner is picked per install rather than by the
+# lockfile -- so the mobile typecheck passed here and failed on the runner. The
+# override collapses it to one version; this proves it stayed collapsed. It runs
+# before Typecheck because a flipped slot invalidates that result rather than
+# failing it.
+step "Structural: exactly one @types/react in the installed tree"
+node ./scripts/assert-single-react-types.mjs
+
 # The Privacy Policy and the Terms each exist in three copies: the canonical
 # markdown in docs/legal/, a data module the mobile app renders, and a page on
 # the marketing site. AUDIT A6 is what happens without this check — the copies

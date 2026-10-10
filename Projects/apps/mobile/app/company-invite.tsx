@@ -51,14 +51,57 @@ export default function CompanyInviteScreen() {
     }
   };
 
-  const statusIcon = (status: CompanyInviteResult["status"]) => {
-    if (status === "sent") return <Ionicons name="mail-outline" size={16} color={Colors.success} />;
-    return <Ionicons name="alert-circle-outline" size={16} color={Colors.error} />;
+  /**
+   * One description per outcome, derived from the WHOLE result rather than from
+   * `status` alone.
+   *
+   * Both helpers used to take `status` and treat everything but `"sent"` as a
+   * failure, which made a successful re-send read as "Failed to send" and
+   * ignored `delivered` entirely. Keeping icon, colour and words in one
+   * function is deliberate: split across two, they drifted.
+   */
+  const describe = (r: CompanyInviteResult): { glyph: keyof typeof Ionicons.glyphMap; color: string; label: string } => {
+    if (r.status === "error") {
+      return { glyph: "alert-circle-outline", color: Colors.error, label: "Could not create the invitation" };
+    }
+    if (r.status === "already_member") {
+      return {
+        glyph: "person-circle-outline",
+        color: Colors.info,
+        label: "Already in your team — no invitation needed",
+      };
+    }
+    if (r.delivered === false) {
+      // The re-send case keeps its warning about the old link: the old link is
+      // dead either way, and the email failing does not bring it back.
+      return {
+        glyph: "warning-outline",
+        color: Colors.warning,
+        label:
+          r.status === "resent"
+            ? "Invitation re-issued, but the email could not be sent — any earlier link for this address has stopped working"
+            : "Invitation created, but the email could not be sent",
+      };
+    }
+    if (r.status === "resent") {
+      return {
+        glyph: "mail-outline",
+        color: Colors.success,
+        label: "Invitation re-sent — any earlier link for this address has stopped working",
+      };
+    }
+    return { glyph: "mail-outline", color: Colors.success, label: "Invitation sent" };
   };
 
-  const statusLabel = (status: CompanyInviteResult["status"]) => {
-    if (status === "sent") return "Invite sent";
-    return "Failed to send";
+  /**
+   * The heading claimed "Invites sent" for every outcome, including the ones
+   * where nothing was sent. Say what happened instead.
+   */
+  const resultsHeading = (rs: CompanyInviteResult[]): string => {
+    const emailed = rs.filter((r) => (r.status === "sent" || r.status === "resent") && r.delivered !== false).length;
+    if (emailed === rs.length) return rs.length === 1 ? "Invitation sent" : "Invitations sent";
+    if (emailed === 0) return "Nothing was emailed";
+    return `${emailed} of ${rs.length} emailed`;
   };
 
   // Screen self-guards regardless of whether the settings entry point is hidden.
@@ -150,16 +193,19 @@ export default function CompanyInviteScreen() {
           </>
         ) : (
           <>
-            <Text style={styles.resultsTitle}>Invites sent</Text>
-            {results.map((r) => (
-              <View key={r.email} style={styles.resultRow}>
-                {statusIcon(r.status)}
-                <View style={{ flex: 1, gap: 2 }}>
-                  <Text style={styles.resultEmail}>{r.email}</Text>
-                  <Text style={styles.resultStatus}>{statusLabel(r.status)}</Text>
+            <Text style={styles.resultsTitle}>{resultsHeading(results)}</Text>
+            {results.map((r) => {
+              const d = describe(r);
+              return (
+                <View key={r.email} style={styles.resultRow}>
+                  <Ionicons name={d.glyph} size={16} color={d.color} />
+                  <View style={{ flex: 1, gap: 2 }}>
+                    <Text style={styles.resultEmail}>{r.email}</Text>
+                    <Text style={styles.resultStatus}>{d.label}</Text>
+                  </View>
                 </View>
-              </View>
-            ))}
+              );
+            })}
             <Pressable
               style={({ pressed }) => [styles.sendButton, { marginTop: 24 }, pressed && { opacity: 0.85 }]}
               onPress={() => router.back()}

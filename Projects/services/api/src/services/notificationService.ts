@@ -320,6 +320,59 @@ export async function sendSiteInvite(payload: SiteInvitePayload): Promise<Delive
   return result;
 }
 
+type CompanyInvitePayload = {
+  to: string;
+  inviterName: string;
+  companyName: string;
+  companyRole: string;
+  token: string;
+};
+
+/**
+ * The company-invitation email.
+ *
+ * This exists because `POST /company/members/invite` did not send one. It
+ * created the row, returned the token in its own JSON response, and stopped —
+ * so the only way anybody could ever have joined a company was for the inviter
+ * to read the raw token out of a network response and pass it along by hand.
+ * That route is the one both the manager portal's Team page and the mobile
+ * invite screen call, which is the whole of "I invite someone and nothing
+ * arrives".
+ *
+ * Separate from `sendSiteInvite` rather than reusing it with the company name in
+ * the `siteName` slot: that would read "invited you to collaborate on Acme
+ * Builders", which describes a site, and this is the first thing a new crew
+ * member ever sees from the product. The URL construction and the 7-day expiry
+ * wording are deliberately identical to `sendSiteInvite`, because both are
+ * consumed by the same `?token=` handler.
+ */
+export async function sendCompanyInvite(payload: CompanyInvitePayload): Promise<DeliveryResult> {
+  const inviteUrl = `${process.env.INVITE_URL || "sitesnap://invite"}?token=${payload.token}`;
+  const subject = `${payload.inviterName} has invited you to join ${payload.companyName} on SiteSnap`;
+
+  const text =
+    `Hi,\n\n` +
+    `${payload.inviterName} has invited you to join ${payload.companyName} on SiteSnap as a ${payload.companyRole}.\n\n` +
+    `Accept your invitation here:\n${inviteUrl}\n\n` +
+    `This invitation expires in 7 days.`;
+
+  const html = buildEmailHtml({
+    heading: "You've been invited to SiteSnap",
+    bodyLines: [
+      `<strong>${payload.inviterName}</strong> has invited you to join <strong>${payload.companyName}</strong> as a ${payload.companyRole}.`,
+      "Tap the button below to accept and set up your account.",
+    ],
+    ctaButton: { text: "Accept Invitation", url: inviteUrl },
+    noteLines: ["This invitation expires in 7 days."],
+  });
+
+  const result = await sendEmail(payload.to, subject, text, html);
+  if (!result.ok) {
+    console.warn(`[invite] Company invite email delivery failed for ${payload.to}: ${result.error}`);
+  }
+  return result;
+}
+
 export async function sendAccountVerification(payload: VerificationPayload): Promise<DeliveryResult> {
   if (payload.channel === "email") {
     if (!payload.email) return { ok: false, error: "Missing recipient email." };
