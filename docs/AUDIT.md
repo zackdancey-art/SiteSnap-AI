@@ -3061,3 +3061,31 @@ answers N" and none of them can fail this way.
 fast crash-and-restart into a silent five-minute stall. Whether it should `shutdown` like its
 `uncaughtException` neighbour is a deployment decision, not a code cleanup — recorded here, not
 changed.
+
+#### Postscript — a pin that had never been taken
+
+Fixing the hang let the write sequence in `crew-permissions-db.test.ts` reach its end for the first
+time, and it immediately failed its own population pin: `14 !== 13`.
+
+The fourteenth step is `delete that entry` (`DELETE /projects/entries/:id`), the last in the
+sequence — and **the population had not changed.** `git log -S` places all fourteen step labels and
+the pin itself in one commit, `897fc80`: `EXPECTED_WRITE_STEPS = 13` was written against a
+fourteen-step sequence and was wrong from the moment it was written. The approve-diary → edit-diary
+swap in `5d845ef` replaced a step without adding one.
+
+It stayed invisible because step 13 is the progress update. The statement errored, the route answered
+nothing, the run died on a client timeout, step 14 never executed and the assertion was never
+reached. **A pin written by counting by hand, never once measured, read as green for the life of the
+branch** — the same shape as the vacuity findings it was built to prevent, one level up: the guard
+was sound and the number in it was never checked against a run.
+
+Raised to 14, with the reasoning at the line.
+
+A second harness defect surfaced with it, and is worth more than the number. The completeness test
+reported `the write half did not run — 0 !== 13` for a sequence that had just executed fourteen steps
+in both roles, because test 5 asserted its count *before* recording its rows — so a changed
+population and a sequence that genuinely never ran produced the identical message. Those are two
+problems with two different fixes. The recording loop now runs ahead of every assertion about it, and
+the completeness test checks "recorded nothing" and "count missed the pin" separately, with a message
+each. The guard itself has now refused to report a pass on an unexecuted table twice and is unchanged
+in strength.
