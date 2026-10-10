@@ -2138,6 +2138,19 @@ difference between the test and the product.
 red-on-revert verified**. The pathless gate itself is **open and deliberately unfixed, pending the
 owner's decision on the crew permission model** — raised as a Phase 1 stop condition.
 
+**Disposition, second half:** **Closed** on `feat/crew-permissions`, 11 October 2026. The owner made
+the decision the first disposition was waiting on — crew view and edit everything a manager can,
+except the supervisor dashboard, inviting anyone, removing a site and changing company settings — and
+the gate is now `projectsRouter.use("/projects", ...FIELD_ACCESS)`, scoped to the paths this router
+serves. Crew was **not** promoted to viewer; each route that needs more than identity states its own
+requirement. The carve-out above is deleted, because with the blanket gate gone the accept route
+needs identity rather than an exception. The same pathless shape in `deliveries.ts` and
+`templates.ts` — harmless only by position — was scoped in the same commit; `company.ts` is the one
+remaining instance and is recorded separately as L82. Red-on-revert verified by reinstating the
+blanket gate: four failures, including the regression test that names the pathless-versus-scoped
+mechanism directly. The permission table itself is produced against Postgres in CI
+(`routes/crew-permissions-db.test.ts`); this machine has no Postgres and could not run it.
+
 ---
 
 ### L67 — The mobile invite screen reported a successful re-send as a failure, which is the entire "I cannot re-invite an address" complaint — HIGH (correctness; the reported symptom, and the API was never at fault)
@@ -2457,3 +2470,90 @@ still caught by the owner-count check, so the hole is self-removal rather than l
 change: the param is normalised once at the top of each route and both comparisons use `sameEmail`.
 A sweep for the same pattern across the API found no other occurrence reading an address off a
 request — every remaining `email ===` compares two stored or token-derived values.
+
+### L79 — The portal's Team and Settings screens call company-scoped endpoints unconditionally, so a crew member meets an error rather than a refusal — MEDIUM (reportability; the L73 habit in a new place)
+
+Found while measuring Phase 1b, not asked for. With the projects gate scoped, crew reach the portal
+and every sidebar destination answers — except two.
+
+`app/team/page.tsx` already guards its *list* calls with `isManager`, but calls
+`fetchCompanyProfile()` unconditionally on mount. `GET /company/profile` is viewer+, so for crew it
+answers 403, and the screen renders its generic load failure. `app/settings/page.tsx` has the same
+shape: `GET /account/settings` is `requireAuth` and answers 200 for crew, but the company half of
+the page reads `/company/profile` and fails.
+
+The defect is not the 403 — the 403 is correct and is one of the three decided exceptions. The
+defect is that a refusal is reported as a breakage, which is precisely the habit L73 named. A crew
+member sees "failed to load" on two of the seven screens they are offered and has no way to know
+whether the product is broken or they are not allowed.
+
+**Not fixed in Phase 1b**, deliberately: what Team and Settings should *show* a crew member is a
+product decision, not a refactor. Three shapes are available and they are not equivalent — hide both
+destinations from the sidebar as the dashboard now is; render the personal half of Settings and omit
+the company half; or render a refusal card in the company section as `app/dashboard/page.tsx` does.
+The third is the smallest and the most honest; the first is the most consistent with the dashboard.
+Owner's call.
+
+### L80 — `projectsStore.canManageSite` admits a crew or viewer who personally owns a site, so "manage" means a role on some paths and ownership on others — MEDIUM (authorization; two definitions of the same word)
+
+`storage/projectsStore.ts:1191` resolves management rights as owner/manager **or** the person
+recorded as the site's creator. A company owner later demoted to crew still satisfies it for every
+site they created, and so does a crew member who created a site before `POST /projects/sites` became
+manager+.
+
+The consequence is that a route gated only on identity would *state* "any company member" and
+*behave* as "managers, plus whoever happens to have created this row" — a gate that says something
+untrue. Phase 1b closed the reachable half by putting `requireAtLeast("manager")` on the three site
+invitation routes and on `GET`/`DELETE /projects/sites/:siteId/members`, so the store's ownership
+clause can no longer be the thing that grants access on those paths.
+
+The store predicate itself is **unchanged**. Narrowing it to role alone would remove rights from any
+site whose creator is no longer a manager, which is a data-affecting change in a compliance-evidence
+product and is not a thing to do unattended.
+
+### L81 — Any authenticated company member can approve a site diary, including the crew member who wrote it — MEDIUM (compliance; an approval that does not mean what the record implies)
+
+`PATCH /projects/diaries/:id` accepts `status: "approved"` and carries no role gate beyond identity,
+before Phase 1b and after it. Crew could not reach it before only because the pathless gate refused
+them the whole router (L66); now that the gate is scoped, they can, and the Phase 1b permission
+table records `crew 200` on it as measured behaviour.
+
+The decision this phase implements says crew get diaries read and write, so this is arguably
+correct. But *approval* is not editing: a site diary marked approved is a supervisory attestation on
+a record kept for seven years, and self-approval by its author is the thing an approval step exists
+to prevent. The portal's dashboard computes an "approval rate" from this field and presents it as
+oversight.
+
+Flagged rather than changed: adding a manager gate here would be a fourth exception the decision
+does not name, and silently narrowing what crew may do is the same class of error as silently
+widening it.
+
+### L82 — `routes/company.ts` carries the same pathless `use` shape as L66, harmless today only because of mount order — LOW (latent; one reordering away from L66)
+
+`companyRouter.use(requireAuth)` at `routes/company.ts:17` has no path argument, so like the gate in
+L66 it runs for every request reaching `apiRouter` at or after it. It is harmless for two reasons
+that are both accidents of arrangement rather than properties of the code: `companyRouter` is
+mounted **last** in `routes/index.ts`, so nothing follows it to be affected; and the middleware is
+`requireAuth`, not a rank gate, so its worst effect on an unmatched path is turning a 404 into a 401.
+
+Neither reason survives a reordering, and L66 is the demonstration that mount order is not something
+a reviewer checks. Phase 1b scoped the pathless `use` in `projects.ts`, `deliveries.ts` and
+`templates.ts`; `company.ts` was left alone because it is outside the phase's file set and changing
+it alters 401-vs-404 behaviour on unmatched paths, which is observable.
+
+### L83 — The portal's `useRole()` resolves an absent `companyRole` to `viewer` — LOW (fail-open default in a permission helper)
+
+`lib/useRole.ts:57` reads `user?.companyRole ?? "viewer"`. The profile is rehydrated from
+`localStorage`, so a session stored by a build predating the field has no role at all and is treated
+as viewer by `isAtLeast`.
+
+Phase 1b did not change it, and the new `canSeeSupervisorDashboard` predicate deliberately reads the
+**raw** value rather than this default, so the dashboard decision does not inherit a default written
+for another purpose. The predicate withholds only a role known to be `crew`, which is fail-*open* in
+the other direction and is argued at its definition: refusing a manager their dashboard because
+their saved session predates the field would be invisible and unfixable by anyone who did not think
+to sign out and back in. The API refuses the dashboard's route independently, which is what makes
+either choice survivable.
+
+Recorded because a reader who finds `?? "viewer"` while auditing permissions should find this note
+rather than conclude it is the whole story.
