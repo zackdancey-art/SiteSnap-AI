@@ -1,11 +1,17 @@
 import { Router } from "express";
 import { z } from "zod";
-import { requireAuth, AuthenticatedRequest } from "../middleware/auth";
+import { FIELD_ACCESS, AuthenticatedRequest } from "../middleware/auth";
 import { listIncidents, createIncident, updateIncident, deleteIncident } from "../storage/incidentStore";
 import { getAllTokensForEmails } from "../storage/pushStore";
 import { sendExpoPushNotifications } from "../utils/expoPush";
 
 export const incidentsRouter: Router = Router();
+// Explicit requirement for this router's own paths — AUDIT L66. Scoped to the
+// prefix rather than pathless, because a pathless `use` here would also run for
+// every router mounted after this one in routes/index.ts; that is exactly how
+// projects.ts came to refuse 31 routes it had never heard of. Operational work,
+// so the requirement is identity, not rank: see FIELD_ACCESS.
+incidentsRouter.use("/incidents", ...FIELD_ACCESS);
 
 function getActor(req: unknown) {
   const r = req as AuthenticatedRequest;
@@ -66,7 +72,7 @@ const IncidentPatchSchema = z.object({
   severity: z.enum(["near-miss", "minor", "major", "critical"]).optional(),
 });
 
-incidentsRouter.get("/incidents", requireAuth, async (req, res) => {
+incidentsRouter.get("/incidents", async (req, res) => {
   try {
     const siteId = typeof req.query.siteId === "string" ? req.query.siteId : undefined;
     const incidents = await listIncidents(getActor(req), siteId);
@@ -77,7 +83,7 @@ incidentsRouter.get("/incidents", requireAuth, async (req, res) => {
   }
 });
 
-incidentsRouter.post("/incidents", requireAuth, async (req, res) => {
+incidentsRouter.post("/incidents", async (req, res) => {
   try {
     const parsed = IncidentSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -112,7 +118,7 @@ incidentsRouter.post("/incidents", requireAuth, async (req, res) => {
   }
 });
 
-incidentsRouter.patch("/incidents/:id", requireAuth, async (req, res) => {
+incidentsRouter.patch("/incidents/:id", async (req, res) => {
   try {
     const parsed = IncidentPatchSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -127,7 +133,7 @@ incidentsRouter.patch("/incidents/:id", requireAuth, async (req, res) => {
   }
 });
 
-incidentsRouter.delete("/incidents/:id", requireAuth, async (req, res) => {
+incidentsRouter.delete("/incidents/:id", async (req, res) => {
   try {
     const removed = await deleteIncident(getActor(req), req.params.id);
     if (!removed) return res.status(404).json({ error: "Incident not found." });

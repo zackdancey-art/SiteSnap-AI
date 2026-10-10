@@ -23,6 +23,23 @@
  * These tests are therefore written against the orphan state specifically, and
  * each one carries its own positive control, because "crew can reach the accept
  * route" and "the gate never ran at all" are indistinguishable from a 200 alone.
+ *
+ * WHAT CHANGED IN PHASE 1b, AND WHY THIS FILE STILL EXISTS
+ *
+ * The carve-out is gone. The blanket gate it was cut out of is gone too: the
+ * router now gates its own paths only, operational routes ask for identity, and
+ * the routes that need rank say so individually. So there is no longer an exact
+ * path to match loosely and no "adjacent path" failure mode to exclude — the
+ * test that pinned that mechanism has been replaced by one that pins the
+ * PROPERTY the mechanism existed for, which is the thing worth keeping: an
+ * account stranded with no company can still reach acceptance, and the gates
+ * around it are still live.
+ *
+ * The positive controls had to change with it. `GET /projects/sites` was the
+ * control for "crew rank is genuinely below this router's gate", and crew now
+ * reach it by design — using it would assert the defect. The controls below use
+ * routes that still refuse crew deliberately: the supervisor report, and
+ * creating a site.
  */
 
 import assert from "node:assert/strict";
@@ -171,15 +188,20 @@ test("an orphaned invitee can retry acceptance, and the gate around it is still 
   const ownerToken = await registerUser("owner@l66.test", "Owner", { companyName: "L66 Co" });
   const orphanToken = await registerOrphanedInvitee("orphan@l66.test", "Orphan");
 
-  // POSITIVE CONTROL, same route, same run: the viewer gate is real and this
-  // token is genuinely below it. Without these two lines a 200 on the accept
-  // route below would be consistent with the gate having been deleted entirely.
-  const ownerDash = await req("GET", "/projects/sites", undefined, ownerToken);
-  assert.equal(ownerDash.status, 200, "control: an owner must still reach the dashboard");
-  const orphanDash = await req<{ error?: string }>("GET", "/projects/sites", undefined, orphanToken);
-  assert.equal(orphanDash.status, 403, "control: crew rank must still be refused the dashboard");
+  // POSITIVE CONTROL, same router, same run: a rank gate is real and this token
+  // is genuinely below it. Without these two lines a 200 on the accept route
+  // below would be consistent with every gate having been deleted entirely,
+  // which is exactly how L66 would be "fixed" wrongly.
+  //
+  // The route is the supervisor report rather than GET /projects/sites, which
+  // this test used until Phase 1b: crew reach the site list by design now, so
+  // asserting a 403 there would re-assert the defect.
+  const ownerReport = await req("GET", "/projects/reports/supervisor", undefined, ownerToken);
+  assert.equal(ownerReport.status, 200, "control: an owner must still reach the supervisor report");
+  const orphanReport = await req<{ error?: string }>("GET", "/projects/reports/supervisor", undefined, orphanToken);
+  assert.equal(orphanReport.status, 403, "control: crew rank must still be refused the supervisor report");
 
-  // The carve-out: a fresh invitation, retried by the stranded account.
+  // The property: a fresh invitation, retried by the stranded account.
   const inviteToken = await inviteCompanyMember(ownerToken, "orphan@l66.test", "crew");
   const accept = await req<{ companyId?: string; companyRole?: string; token?: string; error?: string }>(
     "POST", "/projects/invites/accept", { token: inviteToken }, orphanToken
@@ -205,43 +227,68 @@ test("an orphaned invitee can retry acceptance, and the gate around it is still 
   );
 });
 
-test("the carve-out matches one exact path and nothing adjacent to it", async () => {
+/**
+ * THE L66 REGRESSION TEST, in the in-memory suite.
+ *
+ * The replaced version of this test pinned the carve-out's string comparison —
+ * that "/PROJECTS/INVITES/ACCEPT" and "/projects/invites/accept-all" were NOT
+ * carved out. Both of those assertions are about a mechanism that no longer
+ * exists, and both would now pass for the wrong reason (the first reaches the
+ * handler, the second is a 404), which is the worst kind of green.
+ *
+ * What is worth pinning is the structural property the carve-out was a
+ * workaround for: projectsRouter's gate applies to projectsRouter's paths and
+ * to nothing mounted after it. That is the one-line difference between a crew
+ * member who can work and a crew member who cannot, and it is invisible in a
+ * diff — `use(mw)` and `use("/projects", mw)` look like the same line.
+ */
+test("the projects gate applies to its own paths and not to the routers mounted after it", async () => {
   const ownerToken = await registerUser("owner2@l66.test", "Owner", { companyName: "L66 Co 2" });
   const orphanToken = await registerOrphanedInvitee("orphan2@l66.test", "Orphan");
 
-  // Express routes case-insensitively by default, so this reaches the same
-  // handler — but the carve-out compares req.path exactly, so the gate must
-  // still apply. The failure mode being excluded is a loose comparison
-  // (lowercasing, startsWith, a regex) that would let a crew token past the
-  // gate for anything whose path merely resembles the accept route.
-  const wrongCase = await req<{ error?: string }>(
-    "POST", "/PROJECTS/INVITES/ACCEPT", { token: "whatever" }, orphanToken
-  );
+  // THE LEAK, as an assertion. crewRouter is mounted after projectsRouter in
+  // routes/index.ts and has no rank gate of its own, so under the pathless
+  // `use` this answered 403 — a crew member could not clock in. Six more
+  // routers were refused the same way: push, incidents, inspections,
+  // deliveries, templates, location.
+  const timecards = await req<{ error?: string }>("GET", "/crew/timecards", undefined, orphanToken);
   assert.equal(
-    wrongCase.status, 403,
-    `a non-exact path must not be carved out of the gate: ${wrongCase.status} ${JSON.stringify(wrongCase.body)}`
+    timecards.status, 200,
+    `a crew token must reach crewRouter, which projectsRouter does not own: ${timecards.status} ${JSON.stringify(timecards.body)}`
   );
 
-  // A path that merely starts with the carved-out one must not be carved out.
-  const suffixed = await req<{ error?: string }>(
-    "POST", "/projects/invites/accept-all", { token: "whatever" }, orphanToken
+  // POSITIVE CONTROL: projectsRouter's own rank gates still refuse this same
+  // token in this same run. Scoping the `use` must not have turned into
+  // deleting it — the 200 above and this 403 are the two halves of the fix and
+  // either on its own is satisfied by a mistake.
+  const create = await req<{ error?: string }>(
+    "POST", "/projects/sites",
+    { name: "X", address: "X", client: "X", startDate: "2026-01-01", status: "active" },
+    orphanToken
   );
   assert.equal(
-    suffixed.status, 403,
-    `a path extending the carved-out one must not be carved out: ${suffixed.status} ${JSON.stringify(suffixed.body)}`
+    create.status, 403,
+    `crew must still be refused site creation: ${create.status} ${JSON.stringify(create.body)}`
   );
 
-  // POSITIVE CONTROL: the exact path IS carved out, in this same test, for this
-  // same token. Otherwise both assertions above would pass with the carve-out
-  // removed, which is precisely how a check comes to verify nothing.
-  const inviteToken = await inviteCompanyMember(ownerToken, "orphan2@l66.test", "crew");
-  const exact = await req<{ error?: string }>(
-    "POST", "/projects/invites/accept", { token: inviteToken }, orphanToken
+  // AND THE GATE IS STILL A GATE, not merely a rank check: no credential at all
+  // must not reach either side of it. Without this, removing requireAuth from
+  // FIELD_ACCESS would leave both assertions above green.
+  const anonymous = await req<{ code?: string }>("GET", "/crew/timecards");
+  assert.equal(anonymous.status, 401, "an unauthenticated request must not reach crewRouter");
+  assert.equal(anonymous.body.code, "no_credential");
+
+  const anonymousAccept = await req<{ code?: string }>("POST", "/projects/invites/accept", { token: "whatever" });
+  assert.equal(anonymousAccept.status, 401, "the accept route needs identity, which is why it needs no carve-out");
+  assert.equal(anonymousAccept.body.code, "no_credential");
+
+  // OWNER CONTROL on the refused route, so the 403 is about rank and not about
+  // the route being broken for everyone.
+  const ownerCreate = await req("POST", "/projects/sites",
+    { name: "Owner Site", address: "X", client: "X", startDate: "2026-01-01", status: "active" },
+    ownerToken
   );
-  assert.equal(
-    exact.status, 200,
-    `control: the exact accept path must be reachable: ${exact.status} ${JSON.stringify(exact.body)}`
-  );
+  assert.equal(ownerCreate.status, 201, "control: an owner must still be able to create a site");
 });
 
 test("after acceptance the pre-acceptance token is still unprivileged, and /auth/refresh is what lifts it", async () => {

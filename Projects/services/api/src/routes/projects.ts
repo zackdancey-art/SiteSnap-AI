@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { verifyProvenance } from "../services/diaryProvenance";
-import { requireAuth, requireAtLeast, AuthenticatedRequest } from "../middleware/auth";
+import { FIELD_ACCESS, requireAtLeast, AuthenticatedRequest } from "../middleware/auth";
 import { createAuthToken } from "../utils/authToken";
 import {
   acceptSiteInvite,
@@ -115,46 +115,46 @@ const TemplatePatchSchema = TemplateSchema.omit({ siteId: true }).partial();
 export const projectsRouter: Router = Router();
 
 /**
- * The one path on this router a crew member must be able to reach.
+ * WHAT THIS ROUTER REQUIRES, AND WHY IT IS SCOPED TO "/projects" — AUDIT L66.
  *
- * Accepting an invitation is how somebody STOPS being an outsider, so gating it
- * on the rank they only acquire by accepting is circular. Worse, it made the
- * failure unrecoverable: routes/auth.ts creates the account and then treats a
- * failed acceptSiteInvite as non-fatal, on the stated grounds that "the user
- * simply lands with no company yet and can retry the invite" — and the retry
- * was a 403. An account orphaned that way had no route back by any means.
+ * This used to be one PATHLESS `projectsRouter.use(requireAuth,
+ * requireAtLeast("viewer"))`, plus a carve-out for the invitation-accept path.
+ * A pathless `use` on a router mounted with `apiRouter.use(projectsRouter)`
+ * runs for EVERY request that reaches it, not only for this router's own
+ * routes — and seven routers are mounted AFTER this one in routes/index.ts
+ * (push, crew, incidents, inspections, deliveries, templates, location). So a
+ * crew member was 403'd out of all 31 of their routes by a line written to
+ * protect the supervisor dashboard: no clocking in, no incident, no inspection,
+ * no delivery, no location ping. Measured, with an owner positive control on
+ * the same route in the same run.
+ *
+ * The path argument is the whole fix for that: the gate now runs for the paths
+ * this router actually serves and for nothing downstream of it.
+ *
+ * WHY NOT PROMOTE CREW TO VIEWER INSTEAD
+ *
+ * Because a rank promotion grants whatever else viewer implies, on every route
+ * that gates on viewer today and every one added later, none of which anybody
+ * would re-examine. The requirement belongs on the route, said out loud. So the
+ * router states the operational requirement once — an authenticated company
+ * member, see FIELD_ACCESS — and the routes that need more than that carry it
+ * themselves, each with the reason:
+ *
+ *   requireAtLeast("viewer")   /projects/summary, /projects/reports/supervisor
+ *                              — supervisor aggregates, not field work.
+ *   requireAtLeast("manager")  POST+DELETE /projects/sites, the three site
+ *                              invitation routes, DELETE site member
+ *                              — the decided exceptions: crew do not invite
+ *                                anyone and do not remove a site.
+ *
+ * The carve-out is gone because nothing is left to carve out of: accepting an
+ * invitation is how somebody STOPS being an outsider, so gating it on the rank
+ * they only acquire by accepting was circular, and with the blanket gate
+ * removed the accept route needs no exception — it needs identity, which is
+ * what it now asks for. routes/invite-accept-access.test.ts holds the proof
+ * that the orphan state it stranded is still reachable.
  */
-const ACCEPT_INVITE_PATH = "/projects/invites/accept";
-
-// Crew (rank 0) are blocked from this router's dashboard routes — only viewer+
-// may proceed — with the single carve-out above.
-//
-// AUDIT L66, and read this before touching the shape of these two lines. The
-// gate used to be one pathless `projectsRouter.use(requireAuth,
-// requireAtLeast("viewer"))`. A pathless `use` on a router mounted with
-// `apiRouter.use(projectsRouter)` runs for EVERY request that reaches it, not
-// only for this router's own routes — and seven routers are mounted AFTER this
-// one in routes/index.ts (push, crew, incidents, inspections, deliveries,
-// templates, location), none of which has any role gate of its own. So a crew
-// member was 403'd out of all 31 of their routes by a line written to protect
-// the dashboard: no clocking in, no incident, no inspection, no delivery, no
-// location ping. Measured, with an owner positive control on the same route in
-// the same run. 31 = push 3, crew 3, incidents 4, inspections 10, deliveries 4,
-// templates 5, location 2 — counted two ways that agree, and carrying zero role
-// gates of their own, so this accident is their only role protection today.
-//
-// That leak is NOT fixed here, deliberately. Scoping this `use` to "/projects"
-// is the correct structural fix and it would simultaneously grant crew those 31
-// routes, which is a decision about what a crew member may
-// do in a compliance-evidence product — the user's to make, not one to take
-// unattended. The carve-out below changes the behaviour of exactly one path and
-// nothing else. See docs/PHASE-1-REVIEW.md.
-projectsRouter.use(requireAuth);
-const viewerOrAbove = requireAtLeast("viewer");
-projectsRouter.use((req, res, next) => {
-  if (req.path === ACCEPT_INVITE_PATH) return next();
-  return viewerOrAbove(req, res, next);
-});
+projectsRouter.use("/projects", ...FIELD_ACCESS);
 
 function getActor(req: AuthenticatedRequest) {
   return {
@@ -170,7 +170,7 @@ projectsRouter.get("/projects/bootstrap", async (req, res) => {
   res.json(payload);
 });
 
-projectsRouter.get("/projects/summary", async (req, res) => {
+projectsRouter.get("/projects/summary", requireAtLeast("viewer"), async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const [sites, entries, diaries] = await Promise.all([
     listSites(actor),
@@ -340,7 +340,7 @@ const InviteSchema = z.object({
   role: z.enum(["manager", "viewer", "crew"]).default("crew"),
 });
 
-projectsRouter.post("/projects/sites/:siteId/invites", async (req, res) => {
+projectsRouter.post("/projects/sites/:siteId/invites", requireAtLeast("manager"), async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
 
   if (await isRateLimitedByAccount(actor.email, "bulk-invite", LIMITS.bulkInvitePerAccount.max, LIMITS.bulkInvitePerAccount.windowMs)) {
@@ -387,7 +387,7 @@ projectsRouter.post("/projects/sites/:siteId/invites", async (req, res) => {
   return res.status(201).json({ results });
 });
 
-projectsRouter.get("/projects/sites/:siteId/invites", async (req, res) => {
+projectsRouter.get("/projects/sites/:siteId/invites", requireAtLeast("manager"), async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const invites = await listSiteInvites(actor, req.params.siteId);
   if (invites === null) {
@@ -396,7 +396,7 @@ projectsRouter.get("/projects/sites/:siteId/invites", async (req, res) => {
   return res.json({ invites });
 });
 
-projectsRouter.delete("/projects/sites/:siteId/invites/:inviteId", async (req, res) => {
+projectsRouter.delete("/projects/sites/:siteId/invites/:inviteId", requireAtLeast("manager"), async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const removed = await deleteSiteInvite(actor, req.params.siteId, req.params.inviteId);
   if (!removed) return res.status(404).json({ error: "Invite not found." });
@@ -405,7 +405,16 @@ projectsRouter.delete("/projects/sites/:siteId/invites/:inviteId", async (req, r
 
 // ─── Site members ─────────────────────────────────────────────────────────────
 
-projectsRouter.get("/projects/sites/:siteId/members", async (req, res) => {
+// manager+, to match what actually happens rather than what the decision's
+// headline rule implies. The decision gives crew everything a manager has
+// except three named things, and a site's member roster is not one of them —
+// but listSiteMembers() refuses through canManageSite(), which admits owners,
+// managers, and a crew/viewer who personally owns the site. So an auth-only
+// gate here would state "any member" and behave as "managers only". A gate that
+// says something untrue is the defect this phase is about, so the gate states
+// the effective requirement. If crew should see the roster, the change is in
+// projectsStore.canManageSite, not here — flagged in the PR body.
+projectsRouter.get("/projects/sites/:siteId/members", requireAtLeast("manager"), async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const members = await listSiteMembers(actor, req.params.siteId);
   if (members === null) {
@@ -414,7 +423,7 @@ projectsRouter.get("/projects/sites/:siteId/members", async (req, res) => {
   return res.json({ members });
 });
 
-projectsRouter.delete("/projects/sites/:siteId/members/:email", async (req, res) => {
+projectsRouter.delete("/projects/sites/:siteId/members/:email", requireAtLeast("manager"), async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const removed = await removeSiteMember(actor, req.params.siteId, req.params.email);
   if (!removed) return res.status(404).json({ error: "Member not found." });
