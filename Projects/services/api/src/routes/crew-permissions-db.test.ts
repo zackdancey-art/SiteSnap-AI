@@ -11,12 +11,21 @@
  * suite can be green while production is broken.
  *
  * So this is the table, against the database that production uses, with all
- * three rows in the same test file against the same routes:
+ * four rows in the same test file against the same routes:
  *
  *   - crew 2xx on every operational route, read AND write
  *   - crew 403 on invitation, site deletion, company settings and the
  *     supervisor dashboard
+ *   - crew 2xx AND 403 on the diary routes, depending on whether the body
+ *     carries `status` — the one requirement here that is finer than a route
  *   - owner 2xx on all of them
+ *
+ * The fourth row is the one to read carefully. Approving a diary is manager+
+ * (AUDIT L81) while editing one is not, so the gate is on a FIELD, and the only
+ * thing that distinguishes a correct field gate from a route-level gate — which
+ * would have taken diaries away from the people who write them — is that the
+ * same route answers both ways for the same role. Those two probes are in one
+ * test for that reason; neither is evidence without the other.
  *
  * BOTH CONTROLS, ON THE SAME ROUTE, IN THE SAME TEST — DELIBERATELY
  *
@@ -100,6 +109,7 @@ if (!process.env.TEST_DATABASE_URL) {
   const EXPECTED_READS = 15;
   const EXPECTED_WRITE_STEPS = 13;
   const EXPECTED_REFUSALS = 15;
+  const EXPECTED_FIELD_PROBES = 4;
 
   let server: http.Server;
   let baseUrl: string;
@@ -157,6 +167,15 @@ if (!process.env.TEST_DATABASE_URL) {
   const READS: Row[] = [];
   const WRITES: Row[] = [];
   const REFUSALS: Row[] = [];
+  /**
+   * The fourth population, and the only one where crew's expected answer
+   * differs from row to row: the diary approval gate is on a FIELD, so the same
+   * route answers 200 and 403 depending on the body. Kept separate from
+   * REFUSALS for that reason — a population where every row must be 403 cannot
+   * hold a row that must be 200, and merging them would have meant dropping
+   * the blanket claim that makes the other three populations worth having.
+   */
+  const FIELD: Row[] = [];
 
   const ok = (status: number) => status >= 200 && status < 300;
 
@@ -282,10 +301,15 @@ if (!process.env.TEST_DATABASE_URL) {
         siteId, status: "draft", summary: `${who} daily diary`, reportPeriod: "daily",
       });
       const diaryId = diary.body.diary?.id;
-      // Crew can approve a diary. That is NOT one of the three exceptions and
-      // the route carries no manager gate — flagged in the PR body as a
-      // permission inferred from the decision rather than stated by it.
-      await step("approve that diary", "PATCH", `/projects/diaries/${diaryId ?? "missing"}`, { status: "approved" });
+      // Editing a diary, which crew keep in full. Approving one is manager+ as
+      // of AUDIT L81 and has moved out of this sequence into its own test —
+      // see "the diary gate is on the status field" below. This step stays, in
+      // this list, because it is the half that stops that gate from becoming
+      // "diary editing is manager-only": if the gate were written at the route
+      // instead of the field, this is the row that would go red.
+      await step("edit that diary", "PATCH", `/projects/diaries/${diaryId ?? "missing"}`, {
+        summary: `${who} corrected the diary`,
+      });
 
       await step("save a diary template", "POST", "/projects/templates", {
         siteId, name: `${who} template`, weather: "Fine", crewCount: "3", notesTemplate: "",
@@ -331,6 +355,83 @@ if (!process.env.TEST_DATABASE_URL) {
       assert.ok(ok(crewStatus), `crew must be able to ${label} (${route}): ${crewStatus}`);
       assert.ok(ok(ownerStatus), `the owner control failed on ${route}, so the crew result above proves nothing: ${ownerStatus}`);
     }
+  });
+
+  test("the diary gate is on the status field, and not on the route", async () => {
+    /**
+     * AUDIT L81. A submitted diary is a claim; an approved one is the record,
+     * and the portal presents an approval rate as oversight.
+     *
+     * BOTH ROWS ARE IN THIS ONE TEST ON PURPOSE.
+     *
+     * A gate that locked the whole of PATCH /projects/diaries/:id would satisfy
+     * the 403 row perfectly, and "diary editing is now manager-only" is a worse
+     * defect than the one being fixed — it would take the field product's
+     * central record away from the only people who fill it in. So the allowed
+     * row and the refused row run here against the SAME route, as the same
+     * role, differing only in whether the body carries `status`. Neither row
+     * means anything without the other.
+     *
+     * The POST pair is the same argument applied to creation. DiarySchema's
+     * `status` is REQUIRED on create, so an ungated POST would let a crew
+     * member refused the transition simply create the diary already approved,
+     * and the PATCH gate would be decoration. Gating POST reaches beyond the
+     * letter of the decision, which named PATCH; it is called out in the PR
+     * body for that reason, and the draft row beside it is what shows the cost
+     * is nil — crew still create diaries, which is all either client does.
+     */
+    const seeded = await seed<{ diary: { id: string } }>("POST", "/projects/diaries", {
+      siteId, status: "draft", summary: "crew diary, for the field gate", reportPeriod: "daily",
+    }, crewToken);
+    const diaryId = seeded.body.diary?.id;
+    assert.ok(diaryId, "the field-gate test has no diary to probe, so nothing below measures anything");
+
+    const newDiary = (status: string) => ({
+      siteId, status, summary: `field gate ${status}`, reportPeriod: "daily",
+    });
+
+    /**
+     * Ordered so that the owner control never consumes what a later row needs:
+     * the content edits run while the diary is still a draft, and the approval
+     * rows run last on it.
+     */
+    const probes: Array<{ label: string; method: string; path: string; body: unknown; crewAllowed: boolean }> = [
+      { label: "edit a diary's content, no status in the body", method: "PATCH", path: `/projects/diaries/${diaryId}`, body: { summary: "corrected on site" }, crewAllowed: true },
+      { label: "create a diary as a draft", method: "POST", path: "/projects/diaries", body: newDiary("draft"), crewAllowed: true },
+      { label: "create a diary already approved", method: "POST", path: "/projects/diaries", body: newDiary("approved"), crewAllowed: false },
+      { label: "move a diary to approved", method: "PATCH", path: `/projects/diaries/${diaryId}`, body: { status: "approved" }, crewAllowed: false },
+    ];
+    assert.equal(probes.length, EXPECTED_FIELD_PROBES, "the field-gate population changed — see EXPECTED_FIELD_PROBES");
+
+    for (const { label, method, path: p, body, crewAllowed } of probes) {
+      const asCrew = await req<{ error?: string }>(method, p, body, crewToken);
+      const asOwner = await req<{ error?: string }>(method, p, body, ownerToken);
+      const route = `${method} ${p.replace(/\/[0-9a-f-]{8,}/gi, "/:id")}`;
+      FIELD.push({ label, route, crew: asCrew.status, owner: asOwner.status });
+
+      if (crewAllowed) {
+        assert.ok(
+          ok(asCrew.status),
+          `crew must be able to ${label} (${route}): ${asCrew.status} ${JSON.stringify(asCrew.body)} — a gate at the route rather than the field is the likely cause`
+        );
+      } else {
+        assert.equal(
+          asCrew.status, 403,
+          `crew must be refused: ${label} (${route}): ${asCrew.status} ${JSON.stringify(asCrew.body)}`
+        );
+      }
+      assert.ok(
+        ok(asOwner.status),
+        `the owner control failed on ${route} (${label}), so the crew result above proves nothing: ${asOwner.status} ${JSON.stringify(asOwner.body)}`
+      );
+    }
+
+    // The claim, stated once rather than inferred from the loop: this route
+    // answered BOTH ways for the same role. If it had not, one of the two
+    // halves of the gate is missing.
+    const patchRows = FIELD.filter((r) => r.route.startsWith("PATCH"));
+    assert.ok(patchRows.some((r) => ok(r.crew)), "crew were allowed nothing on PATCH /projects/diaries/:id — the gate is at the route");
+    assert.ok(patchRows.some((r) => r.crew === 403), "crew were refused nothing on PATCH /projects/diaries/:id — there is no gate");
   });
 
   test("crew are refused the four exceptions, and the owner is not, on the same routes", async () => {
@@ -395,10 +496,11 @@ if (!process.env.TEST_DATABASE_URL) {
     }
   });
 
-  test("the measured table is complete, and all three rows hold", () => {
+  test("the measured table is complete, and all four rows hold", () => {
     assert.equal(READS.length, EXPECTED_READS, "the read half did not run");
     assert.equal(WRITES.length, EXPECTED_WRITE_STEPS, "the write half did not run");
     assert.equal(REFUSALS.length, EXPECTED_REFUSALS, "the refusal half did not run");
+    assert.equal(FIELD.length, EXPECTED_FIELD_PROBES, "the field-gate half did not run");
 
     const lines: string[] = [];
     const emit = (heading: string, rows: Row[]) => {
@@ -411,12 +513,16 @@ if (!process.env.TEST_DATABASE_URL) {
     emit("operational reads — crew must be allowed", READS);
     emit("operational writes — crew must be allowed", WRITES);
     emit("the exceptions — crew must be refused", REFUSALS);
+    emit("the diary status field — crew allowed and refused on the same route", FIELD);
     console.log(lines.join("\n"));
 
     // The three rows, as claims rather than as a list of individual asserts.
     assert.ok([...READS, ...WRITES].every((r) => ok(r.crew)), "crew were refused an operational route");
     assert.ok(REFUSALS.every((r) => r.crew === 403), "crew were admitted to an exception");
-    assert.ok([...READS, ...WRITES, ...REFUSALS].every((r) => ok(r.owner)), "the owner was refused something, so some control above is not a control");
+    // FIELD is not blanket-claimed in either direction — that is the point of
+    // it. What holds across it is the owner control, and that both answers
+    // occur, which is asserted in its own test.
+    assert.ok([...READS, ...WRITES, ...REFUSALS, ...FIELD].every((r) => ok(r.owner)), "the owner was refused something, so some control above is not a control");
   });
 
 }

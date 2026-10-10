@@ -291,6 +291,94 @@ test("the projects gate applies to its own paths and not to the routers mounted 
   assert.equal(ownerCreate.status, 201, "control: an owner must still be able to create a site");
 });
 
+test("the diary gate reads the status field and not the path, so crew keep diaries", async () => {
+  /**
+   * AUDIT L81. The authoritative measurement of this is against Postgres, in
+   * crew-permissions-db.test.ts, which is where the phase's standard puts
+   * anything touching authorisation. This one exists because that file cannot
+   * run in this environment — there is no local Postgres — and a gate nobody
+   * has watched execute is a gate on paper. It runs here, in-memory, on every
+   * commit, and it is the red-on-revert check for the middleware itself.
+   *
+   * The two halves are in one test for the reason the gate is on a field at
+   * all: a `use` on the diary routes would satisfy the 403 and take the field
+   * product's central record away from the people who write it. The 200 is what
+   * says that did not happen.
+   */
+  const ownerToken = await registerUser("owner4@l81.test", "Owner", { companyName: "L81 Co" });
+
+  // A crew member who has actually JOINED the company, not the orphaned
+  // invitee the tests above use: that one carries companyId "" by construction,
+  // so the owner control could not see a row it created and the control would
+  // fail as a 404 — a false negative that says nothing about the gate.
+  const orphanToken = await registerOrphanedInvitee("crew4@l81.test", "Crew");
+  const inviteToken = await inviteCompanyMember(ownerToken, "crew4@l81.test", "crew");
+  const accept = await req<{ companyRole?: string; token?: string }>(
+    "POST", "/projects/invites/accept", { token: inviteToken }, orphanToken
+  );
+  assert.equal(accept.status, 200, `acceptance must succeed: ${JSON.stringify(accept.body)}`);
+  assert.equal(accept.body.companyRole, "crew", "precondition: the token below must carry crew, or no 403 here proves anything");
+  const crewToken = accept.body.token;
+  assert.ok(crewToken, "acceptance must reissue a token");
+
+  const site = await req<{ site: { id: string } }>("POST", "/projects/sites",
+    { name: "L81 Site", address: "1 Field Rd", client: "ACME", startDate: "2026-01-01", status: "active" },
+    ownerToken
+  );
+  assert.equal(site.status, 201, `seed: the owner must be able to create the site: ${JSON.stringify(site.body)}`);
+  const siteId = site.body.site.id;
+
+  // ALLOWED: crew create a diary. `status` is required by the schema and both
+  // clients send "draft", which is the value that asserts nothing.
+  const created = await req<{ diary: { id: string }; error?: string }>("POST", "/projects/diaries",
+    { siteId, status: "draft", summary: "Crew draft", reportPeriod: "daily" },
+    crewToken
+  );
+  assert.ok(
+    created.status >= 200 && created.status < 300,
+    `crew must be able to save a draft diary: ${created.status} ${JSON.stringify(created.body)}`
+  );
+  const diaryId = created.body.diary.id;
+
+  // ALLOWED: crew edit its content. No `status` in the body at all.
+  const edited = await req<{ error?: string }>("PATCH", `/projects/diaries/${diaryId}`,
+    { summary: "Crew corrected the summary" }, crewToken
+  );
+  assert.ok(
+    edited.status >= 200 && edited.status < 300,
+    `crew must keep editing diaries — a route-level gate is the likely cause: ${edited.status} ${JSON.stringify(edited.body)}`
+  );
+
+  // REFUSED: the transition to approved, on the route that just answered 200.
+  const approve = await req<{ error?: string }>("PATCH", `/projects/diaries/${diaryId}`,
+    { status: "approved" }, crewToken
+  );
+  assert.equal(approve.status, 403, `crew must not approve a diary: ${approve.status} ${JSON.stringify(approve.body)}`);
+
+  // REFUSED: and not reachable by creating one already approved either, which
+  // would make the refusal above decoration.
+  const createApproved = await req<{ error?: string }>("POST", "/projects/diaries",
+    { siteId, status: "approved", summary: "Crew self-approved", reportPeriod: "daily" },
+    crewToken
+  );
+  assert.equal(createApproved.status, 403, `crew must not create an approved diary: ${createApproved.status} ${JSON.stringify(createApproved.body)}`);
+
+  // OWNER CONTROL, on the same route with the same body: so the two 403s are
+  // about rank and not about a broken route or a rejected payload.
+  const ownerApprove = await req<{ error?: string }>("PATCH", `/projects/diaries/${diaryId}`,
+    { status: "approved" }, ownerToken
+  );
+  assert.ok(
+    ownerApprove.status >= 200 && ownerApprove.status < 300,
+    `control: the owner must be able to approve: ${ownerApprove.status} ${JSON.stringify(ownerApprove.body)}`
+  );
+
+  // AND the refusal is not a dead session. L73 in the other dimension — see
+  // the mobile half in apps/mobile/lib/permissions.test.ts.
+  const stillAlive = await req("GET", "/projects/diaries", undefined, crewToken);
+  assert.equal(stillAlive.status, 200, "a 403 must not have cost the crew member their session");
+});
+
 test("after acceptance the pre-acceptance token is still unprivileged, and /auth/refresh is what lifts it", async () => {
   const ownerToken = await registerUser("owner3@l66.test", "Owner", { companyName: "L66 Co 3" });
   const orphanToken = await registerOrphanedInvitee("orphan3@l66.test", "Orphan");
