@@ -9,6 +9,11 @@
  * templates, location — crew gets, read and write, across every site in the
  * company.
  *
+ * Plus one refusal that is narrower than a feature: crew may edit a diary and
+ * may not APPROVE one. See canApproveDiary, and read the note there before
+ * reaching for it — the hazard in this one is implementing it as "crew cannot
+ * use diaries", which is a worse bug than the one it fixes.
+ *
  * WHY A MODULE RATHER THAN THE EXPRESSION IT REPLACES
  * `user?.companyRole === "owner" || user?.companyRole === "manager"` was written
  * out longhand in three files (the tab layout and both halves of the supervisor
@@ -87,6 +92,25 @@ export function canDeleteSite(companyRole: unknown): boolean {
  * membership change rather than field work — and gated with it.
  */
 export function canManageSiteMembers(companyRole: unknown): boolean {
+  return isManagerOrAbove(companyRole);
+}
+
+/**
+ * APPROVING a site diary. Manager+, and note what this is NOT: it is not
+ * permission to edit a diary, which crew keep in full.
+ *
+ * A submitted diary is a claim; an approved one is the record. The supervisor
+ * dashboard computes an "approval rate" from the field and presents it as
+ * oversight, so a rate counting the author's own approvals is a misleading
+ * number on a seven-year compliance document. AUDIT L81.
+ *
+ * The API gate is finer than a route — POST and PATCH /projects/diaries inspect
+ * the `status` field, so a content edit carrying no status passes for crew and
+ * only the transition is refused. This predicate decides one control's
+ * visibility; it does not decide whether a crew member may open the diary
+ * screen, and the screen must stay fully usable for them.
+ */
+export function canApproveDiary(companyRole: unknown): boolean {
   return isManagerOrAbove(companyRole);
 }
 

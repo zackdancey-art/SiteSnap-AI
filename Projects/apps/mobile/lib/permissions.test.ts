@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   FORBIDDEN_MESSAGE,
+  canApproveDiary,
   canChangeCompanySettings,
   canDeleteSite,
   canInvite,
@@ -10,6 +11,7 @@ import {
   describeFailure,
   isForbidden,
 } from "./permissions";
+import * as permissionsModule from "./permissions";
 import { SESSION_EXPIRED_MESSAGE, SessionExpiredError, isSessionExpired } from "./session";
 
 /**
@@ -73,6 +75,7 @@ test("crew are the only operational role refused nothing else — every predicat
     canDeleteSite,
     canManageSiteMembers,
     canChangeCompanySettings,
+    canApproveDiary,
   ];
   for (const p of predicates) {
     assert.equal(p("crew"), false, `${p.name} must refuse crew`);
@@ -81,6 +84,37 @@ test("crew are the only operational role refused nothing else — every predicat
       `${p.name} must allow an owner — a predicate that refuses everybody is not a permission`
     );
   }
+});
+
+test("approving a diary is manager+, and that is not the same as using diaries", () => {
+  // AUDIT L81. Matches requireAtLeast("manager") on the `status` field at the
+  // API: a submitted diary is a claim, an approved one is the record, and the
+  // portal presents an approval rate as oversight.
+  assert.equal(canApproveDiary("crew"), false);
+  assert.equal(canApproveDiary("viewer"), false);
+  assert.equal(canApproveDiary("manager"), true);
+  assert.equal(canApproveDiary("owner"), true);
+
+  // THE ROW THAT MATTERS MOST IS NOT HERE, AND CANNOT BE
+  //
+  // The defect this predicate guards against is not "crew can approve". It is
+  // the fix for it being written as "crew cannot use diaries" — which would
+  // satisfy every assertion above and be a worse bug than the one it replaced.
+  // A unit test of a boolean cannot distinguish those two, because the
+  // difference is in what ELSE the diary screen still does. The assertion that
+  // separates them is a crew content-edit returning 200 on the same route in
+  // the same test as the refused approval, and it lives in the API's
+  // routes/crew-permissions-db.test.ts, against Postgres.
+  //
+  // What this file can establish is that the module gained exactly one
+  // predicate and not a diary predicate: there is no canUseDiaries,
+  // canEditDiary or canWriteDiary to be found, because nothing about editing
+  // one is conditional on role.
+  assert.deepEqual(
+    Object.keys(permissionsModule).filter((k) => /diar/i.test(k)),
+    ["canApproveDiary"],
+    "exactly one diary predicate — a second one is probably a refusal of editing"
+  );
 });
 
 test("an unrecognised or absent role gets the least access, never the most", () => {

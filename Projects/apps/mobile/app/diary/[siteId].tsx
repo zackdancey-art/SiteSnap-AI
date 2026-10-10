@@ -15,6 +15,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { router, useLocalSearchParams } from "expo-router";
 import { useData } from "@/lib/data-context";
 import { useAuth } from "@/lib/auth-context";
+import { canApproveDiary } from "@/lib/permissions";
 import { apiRequest, BASE_URL } from "@/lib/query-client";
 import Colors from "@/constants/colors";
 import { DailyEntry, GeneratedDiary, DiarySection, DiaryEditLogEntry, DiaryGeneration } from "@/lib/types";
@@ -175,7 +176,11 @@ export default function DiaryPreviewScreen() {
   }
 
   const resolvedPeriod = currentDiary?.reportPeriod || selectedPeriod;
-  const canApproveDiary = Boolean(user);
+  // AUDIT L81. This was `Boolean(user)` — true for anybody signed in — so the
+  // "Awaiting supervisor approval" branch below, which was written for exactly
+  // this case, had never once been reachable. Approving is manager+; editing
+  // the diary is not, and nothing else on this screen changes for crew.
+  const mayApproveDiary = canApproveDiary(user?.companyRole);
   const resolvedSummary =
     currentDiary?.summary?.trim() ||
     currentDiary?.fullReport?.split("\n").find((line) => line.trim()) ||
@@ -649,7 +654,7 @@ export default function DiaryPreviewScreen() {
 
             <View style={styles.actionRow}>
               {currentDiary.status === "draft" ? (
-                canApproveDiary ? (
+                mayApproveDiary ? (
                   <Pressable style={styles.approveButton} onPress={handleApprove}>
                     <Ionicons name="checkmark-circle" size={20} color={Colors.white} />
                     <Text style={styles.approveButtonText}>Approve</Text>
