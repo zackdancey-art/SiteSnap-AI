@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { getPgPool } from "./postgres";
-import { Actor, isCrew } from "./actor";
+import { Actor } from "./actor";
+import { canEditRow, canReadRow, editOwnershipSql, readVisibilitySql } from "./recordScope";
 import { withTenant } from "./tenant";
 import { computeInspectionContentHash, voidStaleSignaturesOnClient, voidStaleSignaturesInMemory } from "./signatureStore";
 
@@ -65,20 +66,11 @@ function useDatabase() {
   return Boolean(process.env.DATABASE_URL && process.env.DATABASE_URL.trim());
 }
 
-function canAccess(actor: Actor, companyId: string, ownerEmail: string) {
-  if (companyId !== actor.companyId) return false;
-  if (!isCrew(actor)) return true;
-  return actor.email === ownerEmail;
-}
-
-function crewScopeSql(actor: Actor, params: unknown[], hasSite: boolean): string | null {
-  if (!isCrew(actor)) return null;
-  params.push(actor.email);
-  const p = params.length;
-  return hasSite
-    ? `(owner_email = $${p} OR site_id IN (SELECT site_id FROM site_members WHERE member_email = $${p}))`
-    : `owner_email = $${p}`;
-}
+// canAccess and crewScopeSql lived here; both rules are in
+// storage/recordScope.ts now. Two kinds pass through this file: an
+// `inspection` is a shared site record, and an `inspectionTemplate` is the
+// company's reusable checklist, which belongs to no site — the `hasSite`
+// argument the old clause took is now SITE_SCOPED, keyed by kind.
 
 const memoryTemplates = new Map<string, InspectionTemplateRecord>();
 const memoryInspections = new Map<string, InspectionRecord>();
@@ -87,12 +79,12 @@ const memoryInspections = new Map<string, InspectionRecord>();
 
 export async function listTemplates(actor: Actor): Promise<InspectionTemplateRecord[]> {
   if (!useDatabase()) {
-    return Array.from(memoryTemplates.values()).filter((t) => canAccess(actor, t.companyId, t.ownerEmail));
+    return Array.from(memoryTemplates.values()).filter((t) => canReadRow(actor, "inspectionTemplate", t));
   }
   const params: unknown[] = [actor.companyId];
   const conditions: string[] = [`company_id = $1`];
-  const crew = crewScopeSql(actor, params, false);
-  if (crew) conditions.push(crew);
+  const visibility = readVisibilitySql(actor, "inspectionTemplate", params);
+  if (visibility) conditions.push(visibility);
   const result = await getPgPool().query(
     `SELECT id, owner_email, company_id, name, items_json, created_at FROM inspection_templates WHERE ${conditions.join(" AND ")} ORDER BY name`,
     params
@@ -118,13 +110,15 @@ export async function createTemplate(actor: Actor, name: string, items: string[]
 export async function deleteTemplate(actor: Actor, id: string): Promise<boolean> {
   if (!useDatabase()) {
     const existing = memoryTemplates.get(id);
-    if (!existing || !canAccess(actor, existing.companyId, existing.ownerEmail)) return false;
+    if (!existing || !canEditRow(actor, "inspectionTemplate", existing)) return false;
     memoryTemplates.delete(id);
     return true;
   }
-  const conditions = isCrew(actor) ? `id = $1 AND company_id = $2 AND owner_email = $3` : `id = $1 AND company_id = $2`;
-  const params = isCrew(actor) ? [id, actor.companyId, actor.email] : [id, actor.companyId];
-  const result = await getPgPool().query(`DELETE FROM inspection_templates WHERE ${conditions}`, params);
+  const params: unknown[] = [id, actor.companyId];
+  const conditions = ["id = $1", "company_id = $2"];
+  const ownership = editOwnershipSql(actor, "inspectionTemplate", params);
+  if (ownership) conditions.push(ownership);
+  const result = await getPgPool().query(`DELETE FROM inspection_templates WHERE ${conditions.join(" AND ")}`, params);
   return (result.rowCount ?? 0) > 0;
 }
 
@@ -156,15 +150,15 @@ function mapInspection(row: {
 export async function listInspections(actor: Actor, siteId?: string): Promise<InspectionRecord[]> {
   if (!useDatabase()) {
     return Array.from(memoryInspections.values())
-      .filter((i) => canAccess(actor, i.companyId, i.ownerEmail))
+      .filter((i) => canReadRow(actor, "inspection", i))
       .filter((i) => !i.deletedAt)
       .filter((i) => (siteId ? i.siteId === siteId : true))
       .sort((a, b) => b.date.localeCompare(a.date));
   }
   const params: unknown[] = [actor.companyId];
   const conditions = ["deleted_at IS NULL", `company_id = $1`];
-  const crew = crewScopeSql(actor, params, true);
-  if (crew) conditions.push(crew);
+  const visibility = readVisibilitySql(actor, "inspection", params);
+  if (visibility) conditions.push(visibility);
   if (siteId) { params.push(siteId); conditions.push(`site_id = $${params.length}`); }
   const result = await withTenant(actor, (client) => client.query(
     `SELECT * FROM inspections WHERE ${conditions.join(" AND ")} ORDER BY date DESC`,
@@ -176,13 +170,13 @@ export async function listInspections(actor: Actor, siteId?: string): Promise<In
 export async function getInspection(actor: Actor, id: string): Promise<InspectionRecord | null> {
   if (!useDatabase()) {
     const existing = memoryInspections.get(id);
-    if (!existing || !canAccess(actor, existing.companyId, existing.ownerEmail) || existing.deletedAt) return null;
+    if (!existing || existing.deletedAt || !canReadRow(actor, "inspection", existing)) return null;
     return existing;
   }
   const params: unknown[] = [id, actor.companyId];
   const conditions = ["id = $1", "company_id = $2", "deleted_at IS NULL"];
-  const crew = crewScopeSql(actor, params, true);
-  if (crew) conditions.push(crew);
+  const visibility = readVisibilitySql(actor, "inspection", params);
+  if (visibility) conditions.push(visibility);
   const result = await withTenant(actor, (client) => client.query(
     `SELECT * FROM inspections WHERE ${conditions.join(" AND ")}`,
     params
@@ -257,7 +251,7 @@ export async function updateInspection(actor: Actor, id: string, patch: Inspecti
   if (patch.results) patch = { ...patch, results: sanitizeResultPhotos(patch.results) };
   if (!useDatabase()) {
     const existing = memoryInspections.get(id);
-    if (!existing || !canAccess(actor, existing.companyId, existing.ownerEmail) || existing.deletedAt) return null;
+    if (!existing || existing.deletedAt || !canEditRow(actor, "inspection", existing)) return null;
     const updated = { ...existing, ...patch };
     memoryInspections.set(id, updated);
     const { hash } = computeInspectionContentHash(updated);
@@ -267,7 +261,31 @@ export async function updateInspection(actor: Actor, id: string, patch: Inspecti
   // Wrapped in withTenant so the auto-void of stale signatures below runs with
   // app.company_id set — inspection_signatures is FORCE RLS, so the void
   // UPDATE would silently match zero rows without it.
+  // AUDIT L89: like incidents, this path had no authorship check while its
+  // in-memory twin above did — a crew member could rewrite anyone's completed
+  // inspection in production, including one that has been signed, and the
+  // suite stayed green. editOwnershipSql is that check.
   return withTenant(actor, async (client) => {
+    // The params array is built BEFORE the clause so editOwnershipSql numbers
+    // its own placeholder off the real length. A hardcoded $14 here would be
+    // correct today and silently wrong the first time a column is added to the
+    // SET list above.
+    const params: unknown[] = [
+      id, actor.companyId,
+      patch.results ? JSON.stringify(patch.results) : null,
+      patch.status ?? null,
+      patch.scope ?? null,
+      patch.areaInspected ?? null,
+      patch.time ?? null,
+      patch.inspectorName ?? null,
+      patch.inspectorRole ?? null,
+      patch.inspectorCompany ?? null,
+      patch.defects ? JSON.stringify(patch.defects) : null,
+      patch.overallOutcome ?? null,
+      patch.followUpRequired ?? null,
+    ];
+    const ownership = editOwnershipSql(actor, "inspection", params);
+    const ownerClause = ownership ? ` AND ${ownership}` : "";
     const result = await client.query(
       `UPDATE inspections SET
          results_json = COALESCE($3::jsonb, results_json),
@@ -282,21 +300,8 @@ export async function updateInspection(actor: Actor, id: string, patch: Inspecti
          overall_outcome = COALESCE($12, overall_outcome),
          follow_up_required = COALESCE($13, follow_up_required),
          updated_at = NOW()
-       WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL RETURNING *`,
-      [
-        id, actor.companyId,
-        patch.results ? JSON.stringify(patch.results) : null,
-        patch.status ?? null,
-        patch.scope ?? null,
-        patch.areaInspected ?? null,
-        patch.time ?? null,
-        patch.inspectorName ?? null,
-        patch.inspectorRole ?? null,
-        patch.inspectorCompany ?? null,
-        patch.defects ? JSON.stringify(patch.defects) : null,
-        patch.overallOutcome ?? null,
-        patch.followUpRequired ?? null,
-      ]
+       WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL${ownerClause} RETURNING *`,
+      params
     );
     if (result.rowCount === 0) return null;
     const record = mapInspection(result.rows[0]);
@@ -309,13 +314,16 @@ export async function updateInspection(actor: Actor, id: string, patch: Inspecti
 export async function deleteInspection(actor: Actor, id: string): Promise<boolean> {
   if (!useDatabase()) {
     const existing = memoryInspections.get(id);
-    if (!existing || !canAccess(actor, existing.companyId, existing.ownerEmail)) return false;
+    if (!existing || !canEditRow(actor, "inspection", existing)) return false;
     memoryInspections.set(id, { ...existing, deletedAt: new Date().toISOString() });
     return true;
   }
+  const params: unknown[] = [id, actor.companyId];
+  const conditions = ["id = $1", "company_id = $2", "deleted_at IS NULL"];
+  const ownership = editOwnershipSql(actor, "inspection", params);
+  if (ownership) conditions.push(ownership);
   const result = await withTenant(actor, (client) => client.query(
-    `UPDATE inspections SET deleted_at = NOW() WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL`,
-    [id, actor.companyId]
+    `UPDATE inspections SET deleted_at = NOW() WHERE ${conditions.join(" AND ")}`, params
   ));
   return (result.rowCount ?? 0) > 0;
 }

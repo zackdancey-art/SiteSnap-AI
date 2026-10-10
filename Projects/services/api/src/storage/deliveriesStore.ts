@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { getPgPool } from "./postgres";
-import { Actor, isCrew } from "./actor";
+import { Actor } from "./actor";
+import { canEditRow, canReadRow, editOwnershipSql, readVisibilitySql } from "./recordScope";
 import { withTenant } from "./tenant";
 
 export type DeliveryRecord = {
@@ -23,18 +24,9 @@ function useDatabase() {
   return Boolean(process.env.DATABASE_URL?.trim());
 }
 
-function canAccess(actor: Actor, companyId: string, ownerEmail: string) {
-  if (companyId !== actor.companyId) return false;
-  if (!isCrew(actor)) return true;
-  return actor.email === ownerEmail;
-}
-
-function crewScopeSql(actor: Actor, params: unknown[]): string | null {
-  if (!isCrew(actor)) return null;
-  params.push(actor.email);
-  const p = params.length;
-  return `(owner_email = $${p} OR site_id IN (SELECT site_id FROM site_members WHERE member_email = $${p}))`;
-}
+// canAccess and crewScopeSql lived here; storage/recordScope.ts holds both
+// rules now. A delivery docket is a shared site record — the company reads it,
+// its author changes it.
 
 function mapRow(row: {
   id: string; owner_email: string; company_id: string; site_id: string; date: string;
@@ -78,14 +70,14 @@ export async function initDeliveriesSchema(): Promise<void> {
 export async function listDeliveries(actor: Actor, siteId?: string): Promise<DeliveryRecord[]> {
   if (!useDatabase()) {
     return Array.from(memory.values())
-      .filter((d) => canAccess(actor, d.companyId, d.ownerEmail) && !d.deletedAt)
+      .filter((d) => canReadRow(actor, "delivery", d) && !d.deletedAt)
       .filter((d) => (siteId ? d.siteId === siteId : true))
       .sort((a, b) => b.date.localeCompare(a.date));
   }
   const params: unknown[] = [actor.companyId];
   const conditions: string[] = ["deleted_at IS NULL", `company_id = $1`];
-  const crew = crewScopeSql(actor, params);
-  if (crew) conditions.push(crew);
+  const visibility = readVisibilitySql(actor, "delivery", params);
+  if (visibility) conditions.push(visibility);
   if (siteId) {
     params.push(siteId);
     conditions.push(`site_id = $${params.length}`);
@@ -128,7 +120,7 @@ export async function updateDelivery(
 ): Promise<DeliveryRecord | null> {
   if (!useDatabase()) {
     const existing = memory.get(id);
-    if (!existing || !canAccess(actor, existing.companyId, existing.ownerEmail) || existing.deletedAt) return null;
+    if (!existing || existing.deletedAt || !canEditRow(actor, "delivery", existing)) return null;
     const updated = { ...existing, ...patch };
     memory.set(id, updated);
     return updated;
@@ -137,7 +129,8 @@ export async function updateDelivery(
     const check = await client.query<{ owner_email: string; company_id: string }>(
       `SELECT owner_email, company_id FROM material_deliveries WHERE id = $1 AND deleted_at IS NULL LIMIT 1`, [id]
     );
-    if (check.rowCount === 0 || !canAccess(actor, check.rows[0].company_id, check.rows[0].owner_email)) return null;
+    if (check.rowCount === 0) return null;
+    if (!canEditRow(actor, "delivery", { companyId: check.rows[0].company_id, ownerEmail: check.rows[0].owner_email })) return null;
     const result = await client.query(
       `UPDATE material_deliveries SET
          date     = COALESCE($2, date),
@@ -159,14 +152,16 @@ export async function updateDelivery(
 export async function deleteDelivery(actor: Actor, id: string): Promise<boolean> {
   if (!useDatabase()) {
     const existing = memory.get(id);
-    if (!existing || !canAccess(actor, existing.companyId, existing.ownerEmail)) return false;
+    if (!existing || !canEditRow(actor, "delivery", existing)) return false;
     memory.set(id, { ...existing, deletedAt: new Date().toISOString() });
     return true;
   }
-  const conditions = isCrew(actor) ? `id = $1 AND company_id = $2 AND owner_email = $3` : `id = $1 AND company_id = $2`;
-  const params = isCrew(actor) ? [id, actor.companyId, actor.email] : [id, actor.companyId];
+  const params: unknown[] = [id, actor.companyId];
+  const conditions = ["id = $1", "company_id = $2", "deleted_at IS NULL"];
+  const ownership = editOwnershipSql(actor, "delivery", params);
+  if (ownership) conditions.push(ownership);
   const result = await withTenant(actor, (client) => client.query(
-    `UPDATE material_deliveries SET deleted_at = NOW() WHERE ${conditions} AND deleted_at IS NULL`, params
+    `UPDATE material_deliveries SET deleted_at = NOW() WHERE ${conditions.join(" AND ")}`, params
   ));
   return (result.rowCount ?? 0) > 0;
 }

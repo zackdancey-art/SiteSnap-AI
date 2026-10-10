@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from "uuid";
-import { Actor, isCrew } from "./actor";
+import { Actor } from "./actor";
+import { canEditRow, canReadRow, editOwnershipSql, readVisibilitySql } from "./recordScope";
 import { withTenant } from "./tenant";
 
 export type IncidentSeverity = "near-miss" | "minor" | "major" | "critical";
@@ -68,13 +69,9 @@ function useDatabase() {
   return Boolean(process.env.DATABASE_URL && process.env.DATABASE_URL.trim());
 }
 
-// Company-scoped access for a row. Non-crew see everything in their company;
-// crew see only rows they own (membership sharing is enforced in the DB path).
-function canAccess(actor: Actor, companyId: string, ownerEmail: string) {
-  if (companyId !== actor.companyId) return false;
-  if (!isCrew(actor)) return true;
-  return actor.email === ownerEmail;
-}
+// canAccess and crewScopeSql lived here. Both are now in storage/recordScope.ts,
+// as two separate rules: an incident is a shared site record, so anyone in the
+// company reads it (canReadRow) and only its author changes it (canEditRow).
 
 const memoryIncidents = new Map<string, IncidentRecord>();
 
@@ -118,19 +115,10 @@ function mapRow(row: {
   };
 }
 
-// Crew scoping clause shared by list queries (DB path). Appends membership
-// sharing so crew see their own + sites they are members of.
-function crewScopeSql(actor: Actor, params: unknown[]): string | null {
-  if (!isCrew(actor)) return null;
-  params.push(actor.email);
-  const p = params.length;
-  return `(owner_email = $${p} OR site_id IN (SELECT site_id FROM site_members WHERE member_email = $${p}))`;
-}
-
 export async function listIncidents(actor: Actor, siteId?: string): Promise<IncidentRecord[]> {
   if (!useDatabase()) {
     return Array.from(memoryIncidents.values())
-      .filter((i) => canAccess(actor, i.companyId, i.ownerEmail))
+      .filter((i) => canReadRow(actor, "incident", i))
       .filter((i) => !i.deletedAt)
       .filter((i) => (siteId ? i.siteId === siteId : true))
       .sort((a, b) => b.date.localeCompare(a.date));
@@ -139,8 +127,8 @@ export async function listIncidents(actor: Actor, siteId?: string): Promise<Inci
   // `company_id = $1` is kept as belt-and-braces alongside the RLS policy
   // (migration 019), which is the authoritative company filter.
   const conditions = ["deleted_at IS NULL", `company_id = $1`];
-  const crew = crewScopeSql(actor, params);
-  if (crew) conditions.push(crew);
+  const visibility = readVisibilitySql(actor, "incident", params);
+  if (visibility) conditions.push(visibility);
   if (siteId) { params.push(siteId); conditions.push(`site_id = $${params.length}`); }
   const result = await withTenant(actor, (client) =>
     client.query(
@@ -189,13 +177,21 @@ export async function createIncident(actor: Actor, payload: Omit<IncidentRecord,
 export async function updateIncident(actor: Actor, id: string, patch: Partial<Pick<IncidentRecord, "status" | "correctiveAction" | "severity">>): Promise<IncidentRecord | null> {
   if (!useDatabase()) {
     const existing = memoryIncidents.get(id);
-    if (!existing || !canAccess(actor, existing.companyId, existing.ownerEmail) || existing.deletedAt) return null;
+    if (!existing || existing.deletedAt || !canEditRow(actor, "incident", existing)) return null;
     const updated = { ...existing, ...patch };
     memoryIncidents.set(id, updated);
     return updated;
   }
   // Cross-company guard is enforced by the RLS policy (migration 019); the
   // `company_id = $2` clause is kept as belt-and-braces.
+  //
+  // AUDIT L89: this path had no authorship check at all while the in-memory
+  // path above had one, so a crew member could rewrite anyone's incident in
+  // production and the suite stayed green. editOwnershipSql is that check.
+  const params: unknown[] = [id, actor.companyId, patch.status ?? null, patch.correctiveAction ?? null, patch.severity ?? null];
+  const conditions = ["id = $1", "company_id = $2", "deleted_at IS NULL"];
+  const ownership = editOwnershipSql(actor, "incident", params);
+  if (ownership) conditions.push(ownership);
   const result = await withTenant(actor, (client) =>
     client.query(
       `UPDATE incidents SET
@@ -203,8 +199,8 @@ export async function updateIncident(actor: Actor, id: string, patch: Partial<Pi
          corrective_action = COALESCE($4, corrective_action),
          severity = COALESCE($5, severity),
          updated_at = NOW()
-       WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL RETURNING *`,
-      [id, actor.companyId, patch.status ?? null, patch.correctiveAction ?? null, patch.severity ?? null]
+       WHERE ${conditions.join(" AND ")} RETURNING *`,
+      params
     )
   );
   if (result.rowCount === 0) return null;
@@ -214,15 +210,16 @@ export async function updateIncident(actor: Actor, id: string, patch: Partial<Pi
 export async function deleteIncident(actor: Actor, id: string): Promise<boolean> {
   if (!useDatabase()) {
     const existing = memoryIncidents.get(id);
-    if (!existing || !canAccess(actor, existing.companyId, existing.ownerEmail)) return false;
+    if (!existing || !canEditRow(actor, "incident", existing)) return false;
     memoryIncidents.set(id, { ...existing, deletedAt: new Date().toISOString() });
     return true;
   }
+  const params: unknown[] = [id, actor.companyId];
+  const conditions = ["id = $1", "company_id = $2", "deleted_at IS NULL"];
+  const ownership = editOwnershipSql(actor, "incident", params);
+  if (ownership) conditions.push(ownership);
   const result = await withTenant(actor, (client) =>
-    client.query(
-      `UPDATE incidents SET deleted_at = NOW() WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL`,
-      [id, actor.companyId]
-    )
+    client.query(`UPDATE incidents SET deleted_at = NOW() WHERE ${conditions.join(" AND ")}`, params)
   );
   return (result.rowCount ?? 0) > 0;
 }

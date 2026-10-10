@@ -1,4 +1,5 @@
 import { Actor, isCrew } from "./actor";
+import { sameEmail } from "../utils/emailAddresses";
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════
@@ -47,9 +48,11 @@ import { Actor, isCrew } from "./actor";
  * third mode — `"assigned-sites"` — and the two emitters below to render it as
  * `site_id IN (SELECT site_id FROM site_members WHERE member_email = $n)` for
  * SQL and a membership-set test for the in-memory path. Nothing in any store
- * changes; the stores already hand their `site_id` column name to the SQL
- * emitter for exactly this reason. The tests that would have to change are
- * this module's own and the company-wide rows of the crew permission table.
+ * changes: no store names a column or a role to this module — they pass an
+ * actor and a `RecordKind`, and `SITE_SCOPED` below already records which
+ * kinds have a `site_id` to narrow on. The tests that would have to change
+ * are this module's own and the company-wide rows of the crew permission
+ * table.
  *
  * KEEP THE RULE HERE. A `company_id` check copied into a store method is how
  * the last model became unmovable.
@@ -164,6 +167,16 @@ export function readVisibility(actor: Actor, kind: RecordKind): ReadVisibility {
  * The `owner_email` comparison is the authorship record, and it is set from
  * `actor.email` at creation in every store — never from the request body, so
  * it cannot be claimed.
+ *
+ * WHY THE TWO HALVES COMPARE DIFFERENTLY
+ *
+ * This predicate folds case via `sameEmail` (AUDIT L46's one definition of "the
+ * same person"); the SQL emitters below use plain `owner_email = $n`. That is
+ * not an oversight. Both sides of the stored comparison were written from an
+ * address `routes/auth.ts` had already folded, so plain equality is correct in
+ * the database and keeps the `owner_email` index usable; `sameEmail` is the
+ * safer rule where there is no index to lose, and it also refuses two empty
+ * strings, which `===` would accept as a match.
  */
 export function canEditRow(
   actor: Actor,
@@ -173,7 +186,7 @@ export function canEditRow(
   if (row.companyId !== actor.companyId) return false;
   if (RECORD_CLASS[kind] === "shared-site-attribute") return true;
   if (!isCrew(actor)) return true;
-  return actor.email.toLowerCase() === row.ownerEmail.toLowerCase();
+  return sameEmail(actor.email, row.ownerEmail);
 }
 
 /** The in-memory twin of `readVisibility`, for the JSON fallback store. */
@@ -184,7 +197,7 @@ export function canReadRow(
 ): boolean {
   if (row.companyId !== actor.companyId) return false;
   if (readVisibility(actor, kind) === "whole-company") return true;
-  return actor.email.toLowerCase() === row.ownerEmail.toLowerCase();
+  return sameEmail(actor.email, row.ownerEmail);
 }
 
 /**
@@ -200,7 +213,7 @@ export function canReadRow(
 export function readVisibilitySql(actor: Actor, kind: RecordKind, params: unknown[]): string | null {
   if (readVisibility(actor, kind) === "whole-company") return null;
   params.push(actor.email);
-  return `LOWER(owner_email) = LOWER($${params.length})`;
+  return `owner_email = $${params.length}`;
 }
 
 /**
@@ -215,5 +228,5 @@ export function editOwnershipSql(actor: Actor, kind: RecordKind, params: unknown
   if (RECORD_CLASS[kind] === "shared-site-attribute") return null;
   if (!isCrew(actor)) return null;
   params.push(actor.email);
-  return `LOWER(owner_email) = LOWER($${params.length})`;
+  return `owner_email = $${params.length}`;
 }

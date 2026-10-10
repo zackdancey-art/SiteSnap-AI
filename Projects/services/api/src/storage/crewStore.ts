@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from "uuid";
-import { Actor, isCrew } from "./actor";
+import { Actor } from "./actor";
+import { canEditRow, canReadRow, editOwnershipSql, readVisibilitySql } from "./recordScope";
 import { withTenant } from "./tenant";
 
 export type TimecardRecord = {
@@ -26,18 +27,11 @@ function useDatabase() {
   return Boolean(process.env.DATABASE_URL && process.env.DATABASE_URL.trim());
 }
 
-function canAccess(actor: Actor, companyId: string, ownerEmail: string) {
-  if (companyId !== actor.companyId) return false;
-  if (!isCrew(actor)) return true;
-  return actor.email === ownerEmail;
-}
-
-function crewScopeSql(actor: Actor, params: unknown[]): string | null {
-  if (!isCrew(actor)) return null;
-  params.push(actor.email);
-  const p = params.length;
-  return `(owner_email = $${p} OR site_id IN (SELECT site_id FROM site_members WHERE member_email = $${p}))`;
-}
+// A timesheet is the named exception: RECORD_CLASS calls it `personal-record`,
+// so crew read and write only their own while a manager sees everyone's. The
+// clause that used to live here ORed in `site_members`, which meant a crew
+// member on a shared site could read a colleague's hours — pay information,
+// disclosed by a clause written for site assignment. AUDIT L90.
 
 const memoryTimecards = new Map<string, TimecardRecord>();
 
@@ -66,15 +60,15 @@ function mapRow(row: {
 export async function listTimecards(actor: Actor, siteId?: string): Promise<TimecardRecord[]> {
   if (!useDatabase()) {
     return Array.from(memoryTimecards.values())
-      .filter((t) => canAccess(actor, t.companyId, t.ownerEmail))
+      .filter((t) => canReadRow(actor, "timesheet", t))
       .filter((t) => !t.deletedAt)
       .filter((t) => (siteId ? t.siteId === siteId : true))
       .sort((a, b) => b.date.localeCompare(a.date));
   }
   const params: unknown[] = [actor.companyId];
   const conditions = ["deleted_at IS NULL", `company_id = $1`];
-  const crew = crewScopeSql(actor, params);
-  if (crew) conditions.push(crew);
+  const visibility = readVisibilitySql(actor, "timesheet", params);
+  if (visibility) conditions.push(visibility);
   if (siteId) { params.push(siteId); conditions.push(`site_id = $${params.length}`); }
   const result = await withTenant(actor, (client) => client.query(
     `SELECT * FROM crew_timecards WHERE ${conditions.join(" AND ")} ORDER BY date DESC`,
@@ -99,14 +93,16 @@ export async function createTimecard(actor: Actor, payload: Omit<TimecardRecord,
 export async function deleteTimecard(actor: Actor, id: string): Promise<boolean> {
   if (!useDatabase()) {
     const existing = memoryTimecards.get(id);
-    if (!existing || !canAccess(actor, existing.companyId, existing.ownerEmail)) return false;
+    if (!existing || !canEditRow(actor, "timesheet", existing)) return false;
     memoryTimecards.set(id, { ...existing, deletedAt: new Date().toISOString() });
     return true;
   }
-  const conditions = isCrew(actor) ? `id = $1 AND company_id = $2 AND owner_email = $3` : `id = $1 AND company_id = $2`;
-  const params = isCrew(actor) ? [id, actor.companyId, actor.email] : [id, actor.companyId];
+  const params: unknown[] = [id, actor.companyId];
+  const conditions = ["id = $1", "company_id = $2", "deleted_at IS NULL"];
+  const ownership = editOwnershipSql(actor, "timesheet", params);
+  if (ownership) conditions.push(ownership);
   const result = await withTenant(actor, (client) => client.query(
-    `UPDATE crew_timecards SET deleted_at = NOW() WHERE ${conditions} AND deleted_at IS NULL`,
+    `UPDATE crew_timecards SET deleted_at = NOW() WHERE ${conditions.join(" AND ")}`,
     params
   ));
   return (result.rowCount ?? 0) > 0;
