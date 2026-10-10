@@ -4,9 +4,19 @@ import Link from "next/link";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import { logout } from "@/lib/api";
+import { useRole } from "@/lib/useRole";
 
+/**
+ * `managerOnly` marks a destination a crew member must not be offered.
+ *
+ * Today that is the dashboard alone, which is the decision: crew view and edit
+ * everything a manager can except the supervisor dashboard, which does not
+ * appear for them at all. It is a field on the item rather than a filter
+ * written at the call site so that the next entry added has to state which it
+ * is, instead of defaulting to visible by omission.
+ */
 const NAV = [
-  { href: "/dashboard", label: "Dashboard", icon: GridIcon },
+  { href: "/dashboard", label: "Dashboard", icon: GridIcon, managerOnly: true },
   { href: "/sites",     label: "Sites",     icon: BuildingIcon },
   { href: "/locations", label: "Live Map",  icon: MapPinIcon },
   { href: "/reports",   label: "Reports",   icon: ReportIcon },
@@ -18,6 +28,12 @@ const NAV = [
 export default function Sidebar({ userName }: { userName: string }) {
   const pathname = usePathname();
   const router = useRouter();
+  const { canSeeSupervisorDashboard } = useRole();
+  // Not rendered rather than rendered-and-disabled: a greyed-out link still
+  // names a screen and still carries its href. Hiding it is not the permission
+  // either — app/dashboard/page.tsx refuses the URL and the API refuses the
+  // route — this is only about not offering somebody a door they cannot open.
+  const nav = NAV.filter((item) => !item.managerOnly || canSeeSupervisorDashboard);
 
   const handleLogout = async () => {
     await logout();
@@ -35,7 +51,7 @@ export default function Sidebar({ userName }: { userName: string }) {
       </div>
 
       <nav className="sidebar-nav">
-        {NAV.map(({ href, label, icon: Icon }) => (
+        {nav.map(({ href, label, icon: Icon }) => (
           <Link
             key={href}
             href={href}

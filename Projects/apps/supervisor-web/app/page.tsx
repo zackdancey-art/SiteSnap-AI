@@ -4,8 +4,9 @@ import { useState, useEffect } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { login, isAuthenticated } from "@/lib/api";
+import { login, isAuthenticated, getSavedUser } from "@/lib/api";
 import { analytics } from "@/lib/analytics";
+import { landingPath } from "@/lib/useRole";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -16,7 +17,10 @@ export default function LoginPage() {
   const [showPw, setShowPw] = useState(false);
 
   useEffect(() => {
-    if (isAuthenticated()) router.replace("/dashboard");
+    // Both of this page's exits used to be /dashboard, which for a crew member
+    // is the one screen they may not have. landingPath() keeps managers and
+    // viewers exactly where they were and sends crew to Sites instead.
+    if (isAuthenticated()) router.replace(landingPath(getSavedUser()?.companyRole));
   }, [router]);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -28,7 +32,7 @@ export default function LoginPage() {
       const data = await login(email.trim().toLowerCase(), password);
       analytics.identify(data.user.email, data.user.role);
       analytics.loginSuccess(data.user.role);
-      router.replace("/dashboard");
+      router.replace(landingPath(data.user.companyRole));
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Sign in failed.");
     } finally {

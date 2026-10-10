@@ -28,6 +28,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { useSearchParams, useRouter } from "next/navigation";
 import { login, acceptInvite } from "@/lib/api";
+import { landingPath } from "@/lib/useRole";
 
 function InviteForm() {
   const searchParams = useSearchParams();
@@ -51,14 +52,14 @@ function InviteForm() {
       await login(email.trim().toLowerCase(), password);
       const result = await acceptInvite(token);
       setAccepted({ siteName: result.siteName, companyRole: result.companyRole });
-      // Crew ranks BELOW viewer (middleware/auth.ts ROLE_RANK: crew 0, viewer 1)
-      // and every company route on the dashboard sits behind at least viewer, so
-      // sending a crew member to /dashboard lands them on a screen where each
-      // request answers 403 and nothing explains why. They are accepted and
-      // attached either way - their tools are on the phone, so say that instead.
-      if (result.companyRole !== "crew") {
-        setTimeout(() => router.replace("/dashboard"), 2000);
-      }
+      // This used to send only non-crew onward, because crew ranked below the
+      // viewer gate every portal route sat behind and /dashboard answered 403
+      // to everything it asked for. That gate was pathless and wrong — it was
+      // refusing crew 31 routes belonging to other routers (AUDIT L66) — and
+      // scoping it gave crew back Sites, Reports, Activity and the live map.
+      // So everyone is taken onward now, and landingPath() is what keeps crew
+      // off the one screen that is still not theirs.
+      setTimeout(() => router.replace(landingPath(result.companyRole)), 2000);
     } catch (err: unknown) {
       // Deliberately not a redirect. Signing in may have succeeded while
       // acceptance failed — an expired or already-used invitation — and in that
@@ -105,8 +106,9 @@ function InviteForm() {
                 {accepted.siteName
                   ? `You have been added to ${accepted.siteName}. `
                   : "You have joined the team. "}
-                Day-to-day work — diaries, photos, timesheets and deliveries — happens in the
-                SiteSnap app on your iPhone. Sign in there with this same email address.
+                Day-to-day work — diaries, photos, timesheets and deliveries — is quickest in
+                the SiteSnap app on your phone; sign in there with this same email address.
+                Taking you to the portal…
               </p>
             ) : (
               <p style={{ fontSize: 14, color: "var(--text-secondary)" }}>

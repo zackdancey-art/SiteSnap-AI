@@ -6,6 +6,7 @@ import Topbar from "@/components/Topbar";
 import { SkeletonMetrics, SkeletonTable } from "@/components/Skeleton";
 import { getSavedUser } from "@/lib/api";
 import { useBootstrap } from "@/lib/useBootstrap";
+import { useRole } from "@/lib/useRole";
 
 const STATUS_CFG: Record<string, { label: string; color: string; bg: string }> = {
   active:    { label: "Active",    color: "#22C55E", bg: "#F0FDF4" },
@@ -50,6 +51,7 @@ function MetricCard({ label, value, accent, iconBg, icon, sub }: {
 
 export default function DashboardPage() {
   const user = getSavedUser();
+  const { canSeeSupervisorDashboard } = useRole();
   const bootstrap = useBootstrap();
   const data = bootstrap.status === "ok" ? bootstrap.data : null;
   const loading = bootstrap.status === "loading";
@@ -76,6 +78,46 @@ export default function DashboardPage() {
   }, [data, search]);
 
   const firstName = user?.name?.split(" ")[0] ?? "Manager";
+
+  /**
+   * Hiding the sidebar link is not the permission. `/dashboard` is a URL
+   * anybody can type, so the screen refuses on its own, and says something
+   * true while doing it: not "failed to load", not an empty shell, not a
+   * spinner that never resolves. Reporting a refusal as a breakage is the
+   * habit AUDIT L73 named, and it is exactly as available here as it was
+   * there.
+   *
+   * The sidebar still renders, so this is a wrong turn rather than a dead end.
+   *
+   * `useBootstrap()` above still runs — it is a hook and cannot be made
+   * conditional, and `/projects/bootstrap` is a route crew are entitled to in
+   * any case, since the whole field product reads it. What is withheld is the
+   * supervision VIEW of that data, which is what the decision names. The
+   * dashboard's own route, GET /projects/reports/supervisor, is viewer+ and
+   * refuses crew at the API regardless of what this component does.
+   */
+  if (!canSeeSupervisorDashboard) {
+    return (
+      <div className="app-shell">
+        <Sidebar userName={user?.name ?? user?.email ?? "Manager"} />
+        <div className="main">
+          <Topbar title="Dashboard" />
+          <div className="page-body">
+            <div className="card" style={{ padding: 28, maxWidth: 560 }}>
+              <h1 style={{ fontSize: 18, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>
+                You don&apos;t have access to this
+              </h1>
+              <p style={{ fontSize: 14, color: "var(--text-secondary)", marginBottom: 0 }}>
+                The dashboard is for managers and owners. Everything else you need — sites,
+                diaries, photos, timesheets and deliveries — is yours, and the quickest place
+                to do it is the SiteSnap app on your phone.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="app-shell">
