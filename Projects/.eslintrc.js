@@ -200,6 +200,14 @@ module.exports = {
       //                   it rewrites lives behind FORCE ROW LEVEL SECURITY and
       //                   a bare pool query would silently match nothing.
         "services/api/src/routes/invite-accept-identity-db.test.ts",
+      //   routes/crew-permissions-db.test.ts
+      //                   narrower still: the pool is held ONLY to apply
+      //                   migrations before the app boots and to drain it in
+      //                   after(). That file makes no SQL query of its own at
+      //                   all - every assertion in it goes through the HTTP
+      //                   API, which is the whole point of a permission table,
+      //                   so there is no tenanted query for withTenant to wrap.
+        "services/api/src/routes/crew-permissions-db.test.ts",
       ],
       rules: {
         "no-restricted-imports": [
