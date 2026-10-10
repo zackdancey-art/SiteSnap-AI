@@ -276,14 +276,37 @@ test("invited member sees the site in their sites list", async () => {
   const token = listR.body.invites[0].token;
 
   const memberToken = await registerAndLogin("member@example.com", "+447911000070", "Member");
-  await seed("POST", "/projects/invites/accept", { token }, memberToken);
+  // Use the FRESH token the accept handler returns, not the one from
+  // registration. AUDIT L87: this test used to re-query with the stale token,
+  // whose companyId is the member's OWN company — `registerAndLogin` passes no
+  // companyName, so every registration mints a company — and it passed only
+  // because the in-memory store's `memberSiteIds` escape hatch matched a
+  // site_members row REGARDLESS of company. Against Postgres it would have
+  // failed: project_sites is FORCE RLS, so withTenant on the member's own
+  // company returns zero rows. The test was asserting a cross-company read.
+  const acceptR = await seed<{ token: string }>(
+    "POST", "/projects/invites/accept", { token }, memberToken
+  );
+  const joinedToken = acceptR.body.token;
+  assert.ok(joinedToken, "accept must return a token carrying the joined company");
 
   const sitesR = await req<{ sites: Array<{ id: string; name: string }> }>(
-    "GET", "/projects/sites", undefined, memberToken
+    "GET", "/projects/sites", undefined, joinedToken
   );
   assert.equal(sitesR.status, 200);
   assert.ok(sitesR.body.sites.some((s) => s.id === siteId && s.name === "Member Site"),
     "member should see the invited site");
+
+  // The other control, on the same route in the same test: the stale token is
+  // scoped to the member's own empty company, so it must NOT see the site.
+  // Without this, the assertion above would pass equally well if /projects/sites
+  // had started returning every site in the database.
+  const staleR = await req<{ sites: Array<{ id: string }> }>(
+    "GET", "/projects/sites", undefined, memberToken
+  );
+  assert.equal(staleR.status, 200);
+  assert.ok(!staleR.body.sites.some((s) => s.id === siteId),
+    "the pre-accept token's company must not see another company's site");
 });
 
 test("supervisor can revoke an invite", async () => {
