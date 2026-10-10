@@ -413,6 +413,21 @@ if (!process.env.TEST_DATABASE_URL) {
 
     const asCrew = await sequence("crew", crewToken);
     const asOwner = await sequence("owner", ownerToken);
+
+    // Record what ran BEFORE asserting anything about it. The count assertion
+    // below used to come first, and when it threw it left WRITES empty — so the
+    // completeness test reported "the write half did not run" for a sequence
+    // that had just executed fourteen steps, visible in the request log. A
+    // population that changed and a sequence that genuinely never executed are
+    // two different problems with two different fixes, and they must not arrive
+    // as the same message.
+    for (let i = 0; i < asCrew.length; i++) {
+      const [label, route, crew] = asCrew[i];
+      // -1 where the owner run is shorter; the length assertion below is what
+      // reports that, rather than this loop throwing on an index.
+      WRITES.push({ label, route, crew, owner: asOwner[i]?.[2] ?? -1 });
+    }
+
     assert.equal(asCrew.length, EXPECTED_WRITE_STEPS, "the operational write population changed — see EXPECTED_WRITE_STEPS");
     assert.equal(asOwner.length, asCrew.length, "the two runs did not perform the same sequence, so they are not comparable");
 
@@ -420,7 +435,6 @@ if (!process.env.TEST_DATABASE_URL) {
       const [label, route, crewStatus] = asCrew[i];
       const [ownerLabel, , ownerStatus] = asOwner[i];
       assert.equal(ownerLabel, label, "the two sequences diverged");
-      WRITES.push({ label, route, crew: crewStatus, owner: ownerStatus });
       assert.ok(ok(crewStatus), `crew must be able to ${label} (${route}): ${crewStatus}`);
       assert.ok(ok(ownerStatus), `the owner control failed on ${route}, so the crew result above proves nothing: ${ownerStatus}`);
     }
@@ -828,14 +842,38 @@ if (!process.env.TEST_DATABASE_URL) {
   });
 
   test("the measured table is complete, and all six rows hold", () => {
-    assert.equal(READS.length, EXPECTED_READS, "the read half did not run");
-    assert.equal(WRITES.length, EXPECTED_WRITE_STEPS, "the write half did not run");
-    assert.equal(REFUSALS.length, EXPECTED_REFUSALS, "the refusal half did not run");
-    assert.equal(FIELD.length, EXPECTED_FIELD_PROBES, "the field-gate half did not run");
+    /**
+     * Two distinct failures, two distinct messages.
+     *
+     * "did not run" and "the population changed" used to be the same assertion,
+     * so a count that moved by one read as a half that had executed nothing —
+     * which is exactly what happened when the write sequence grew its
+     * fourteenth reachable step. Nothing is weakened: both conditions still
+     * have to hold for this test to pass.
+     */
+    // `readonly unknown[]`: only the length matters here, and PARITY holds a
+    // different row shape from the other five.
+    const complete = (name: string, rows: readonly unknown[], expected: number, pin: string) => {
+      assert.notEqual(
+        rows.length, 0,
+        `the ${name} half recorded nothing at all, so its own test failed before reaching the point where it ` +
+        `records rows. The failure to fix is that test's, above — not this count.`
+      );
+      assert.equal(
+        rows.length, expected,
+        `the ${name} population changed: ${rows.length} rows against ${pin} = ${expected}. Name the row that ` +
+        `moved and why before changing the number.`
+      );
+    };
+
+    complete("read", READS, EXPECTED_READS, "EXPECTED_READS");
+    complete("write", WRITES, EXPECTED_WRITE_STEPS, "EXPECTED_WRITE_STEPS");
+    complete("refusal", REFUSALS, EXPECTED_REFUSALS, "EXPECTED_REFUSALS");
+    complete("field-gate", FIELD, EXPECTED_FIELD_PROBES, "EXPECTED_FIELD_PROBES");
     // +1: the timesheet carve-out pushes its own parity row, and it is the row
     // that must NOT match. Counting it here is what stops it being dropped.
-    assert.equal(PARITY.length, EXPECTED_PARITY_KINDS + 1, "the read-parity half did not run");
-    assert.equal(OWNERSHIP.length, EXPECTED_OWNERSHIP_PROBES, "the ownership half did not run");
+    complete("read-parity", PARITY, EXPECTED_PARITY_KINDS + 1, "EXPECTED_PARITY_KINDS + 1");
+    complete("ownership", OWNERSHIP, EXPECTED_OWNERSHIP_PROBES, "EXPECTED_OWNERSHIP_PROBES");
 
     const lines: string[] = [];
     const emit = (heading: string, rows: Row[]) => {
