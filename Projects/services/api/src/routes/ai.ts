@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { asyncSafeRouter } from "../middleware/asyncRouter";
 import { z } from "zod";
 import { requireAuth, AuthenticatedRequest } from "../middleware/auth";
 import { rateLimitByCompany, LIMITS } from "../middleware/rateLimit";
@@ -128,7 +129,7 @@ type OpenAIContentItem =
   | { type: "input_text"; text: string }
   | { type: "input_image"; image_url: string; detail: "auto" | "low" | "high" };
 
-export const aiRouter: Router = Router();
+export const aiRouter: Router = asyncSafeRouter();
 const mediaStorage = getMediaStorage();
 
 function normalizePeriod(period: unknown): ReportPeriod {

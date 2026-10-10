@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { asyncSafeRouter } from "../middleware/asyncRouter";
 import { z } from "zod";
 import { requireAuth, requireAtLeast, requireCompanyRole, AuthenticatedRequest } from "../middleware/auth";
 import {
@@ -13,7 +14,7 @@ import { createCompanyInvite, listCompanyInvites } from "../storage/projectsStor
 import { sendCompanyInvite } from "../services/notificationService";
 import { normalizeEmail, sameEmail } from "../utils/emailAddresses";
 
-export const companyRouter: Router = Router();
+export const companyRouter: Router = asyncSafeRouter();
 companyRouter.use(requireAuth);
 
 function getActor(req: AuthenticatedRequest) {

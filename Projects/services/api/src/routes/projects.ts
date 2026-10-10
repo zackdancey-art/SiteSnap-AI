@@ -1,4 +1,5 @@
 import { Router, type RequestHandler } from "express";
+import { asyncSafeRouter } from "../middleware/asyncRouter";
 import { z } from "zod";
 import { verifyProvenance } from "../services/diaryProvenance";
 import { FIELD_ACCESS, requireAtLeast, AuthenticatedRequest } from "../middleware/auth";
@@ -113,7 +114,7 @@ const TemplateSchema = z.object({
 
 const TemplatePatchSchema = TemplateSchema.omit({ siteId: true }).partial();
 
-export const projectsRouter: Router = Router();
+export const projectsRouter: Router = asyncSafeRouter();
 
 /**
  * WHAT THIS ROUTER REQUIRES, AND WHY IT IS SCOPED TO "/projects" — AUDIT L66.

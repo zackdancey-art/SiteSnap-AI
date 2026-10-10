@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { asyncSafeRouter } from "../middleware/asyncRouter";
 import authRouter from "./auth";
 import { aiRouter } from "./ai";
 import { uploadsRouter } from "./uploads";
@@ -13,7 +14,7 @@ import { templatesRouter } from "./templates";
 import { locationRouter } from "./location";
 import { companyRouter } from "./company";
 
-const apiRouter: Router = Router();
+const apiRouter: Router = asyncSafeRouter();
 
 apiRouter.use(authRouter);
 apiRouter.use(aiRouter);

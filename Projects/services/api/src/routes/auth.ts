@@ -1,4 +1,5 @@
 import { Request, Response, Router } from "express";
+import { asyncSafeRouter } from "../middleware/asyncRouter";
 import { createHash, randomBytes, randomInt } from "crypto";
 import { z } from "zod";
 import {
@@ -60,7 +61,7 @@ function clearSessionCookie(res: Response) {
   res.clearCookie(SESSION_COOKIE, { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: "/" });
 }
 
-const router: Router = Router();
+const router: Router = asyncSafeRouter();
 // An empty ACCOUNT_VERIFICATION_TTL_MS used to parse to 0 here, expiring every
 // verification code the moment it was minted — signup broke for everyone and
 // the only symptom was a truthful-looking 401. See utils/env.ts.

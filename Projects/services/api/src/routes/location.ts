@@ -1,9 +1,10 @@
 import { Router } from "express";
+import { asyncSafeRouter } from "../middleware/asyncRouter";
 import { z } from "zod";
 import { FIELD_ACCESS, AuthenticatedRequest } from "../middleware/auth";
 import { upsertLocation, getAllWorkerLocations } from "../storage/locationStore";
 
-export const locationRouter: Router = Router();
+export const locationRouter: Router = asyncSafeRouter();
 // Explicit requirement for this router's own paths — AUDIT L66. Scoped to the
 // prefix rather than pathless, because a pathless `use` here would also run for
 // every router mounted after this one in routes/index.ts; that is exactly how

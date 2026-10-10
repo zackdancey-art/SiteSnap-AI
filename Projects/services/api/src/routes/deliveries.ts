@@ -1,11 +1,12 @@
 import { Router } from "express";
+import { asyncSafeRouter } from "../middleware/asyncRouter";
 import { z } from "zod";
 import { FIELD_ACCESS, AuthenticatedRequest } from "../middleware/auth";
 import { requireOwnRecord } from "../middleware/recordOwnership";
 import { listDeliveries, createDelivery, updateDelivery, deleteDelivery } from "../storage/deliveriesStore";
 import { rateLimit } from "../middleware/rateLimit";
 
-export const deliveriesRouter: Router = Router();
+export const deliveriesRouter: Router = asyncSafeRouter();
 // Explicit requirement for this router's own paths — AUDIT L66. This line used
 // to be a PATHLESS `use(requireAuth)`, the same shape that made projects.ts
 // refuse 31 routes belonging to other routers. It did no harm here only because

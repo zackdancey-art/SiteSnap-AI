@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { asyncSafeRouter } from "../middleware/asyncRouter";
 import fs from "fs";
 import path from "path";
 import { Sentry } from "../instrument";
@@ -6,7 +7,7 @@ import { requireAuth } from "../middleware/auth";
 import { getPgPool } from "../storage/postgres";
 import { getRateLimiterStatus } from "../middleware/rateLimit";
 
-export const healthRouter: Router = Router();
+export const healthRouter: Router = asyncSafeRouter();
 
 // Liveness — the process is up. Never touches the DB.
 healthRouter.get("/health", (_req, res) => {
