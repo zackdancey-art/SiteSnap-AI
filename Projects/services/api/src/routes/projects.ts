@@ -6,6 +6,7 @@ import { FIELD_ACCESS, requireAtLeast, AuthenticatedRequest } from "../middlewar
 import { requireOwnRecord } from "../middleware/recordOwnership";
 import { createAuthToken } from "../utils/authToken";
 import { findUserByEmail } from "../storage/authStore";
+import { setSessionCookie } from "../utils/sessionCookie";
 import {
   acceptSiteInvite,
   isAcceptInviteSuccess,
@@ -562,16 +563,26 @@ projectsRouter.post("/projects/invites/accept", async (req, res) => {
   // Issue a fresh token so the caller's updated role takes effect immediately
   // without requiring a separate login step.
   //
-  // The record is re-read rather than reconstructed from the claims, because
+  // THIS TOKEN IS NOW LOAD-BEARING, WHERE IT USED TO BE A CONVENIENCE
+  //
   // acceptSiteInvite -> setUserCompany has just incremented this user's token
-  // generation (their companyId changed, so their other devices hold tokens
-  // that address the wrong tenant). A token minted at the OLD generation here
-  // would be refused by the very next request, turning a successful invite
-  // acceptance into an immediate sign-out.
+  // generation: their companyId changed, so the tokens on their other devices
+  // address the wrong tenant and must stop working. That means the credential
+  // the caller made THIS request with is, by the time we answer, no longer
+  // accepted. If they keep using it, every following request is a 401. So the
+  // replacement is not an optimisation any more -- it is the only thing that
+  // keeps a successful acceptance from presenting as an immediate sign-out.
+  //
+  // It is minted from the RECORD, not from `result` and not from the claims.
+  // `result` carries what the handler intended to write; the record carries
+  // what the database actually has. AUDIT L65 was accept reporting success for
+  // attaching nobody to anything, and a token asserting a membership the row
+  // disagrees with is the same lie one layer along. Reading the row is free
+  // here -- it is the same query the generation needs.
   const reqAuth = (req as unknown as AuthenticatedRequest).auth;
   const record = await findUserByEmail(reqAuth.email);
-  const effectiveCompanyId = result.companyId ?? reqAuth.companyId;
-  const effectiveCompanyRole = result.companyRole ?? reqAuth.companyRole;
+  const effectiveCompanyId = record?.companyId ?? result.companyId ?? reqAuth.companyId;
+  const effectiveCompanyRole = record?.companyRole ?? result.companyRole ?? reqAuth.companyRole;
   const freshToken = createAuthToken({
     email: reqAuth.email,
     fullName: record?.fullName ?? reqAuth.fullName,
@@ -580,5 +591,13 @@ projectsRouter.post("/projects/invites/accept", async (req, res) => {
     companyRole: effectiveCompanyRole,
     tokenGeneration: record?.tokenGeneration ?? reqAuth.tokenGeneration,
   });
+  // The portal cannot read the token out of the body -- its session cookie is
+  // httpOnly, which is the whole point of it -- so for a cookie caller the
+  // replacement has to arrive as a Set-Cookie or not at all. Bearer callers get
+  // it in the body, as they always have; setting a cookie for them as well
+  // would leave the device holding two credentials at two generations.
+  if ((req as unknown as AuthenticatedRequest).authTransport === "cookie") {
+    setSessionCookie(res, freshToken);
+  }
   return res.json({ token: freshToken, siteId: result.siteId, siteName: result.siteName, role: result.role, companyId: effectiveCompanyId, companyRole: effectiveCompanyRole });
 });
