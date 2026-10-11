@@ -7,6 +7,7 @@ test("createAuthToken and verifyAuthToken round trip", () => {
     email: "worker@example.com",
     fullName: "Worker User",
     role: "worker",
+    tokenGeneration: 0,
   });
 
   const claims = verifyAuthToken(token);

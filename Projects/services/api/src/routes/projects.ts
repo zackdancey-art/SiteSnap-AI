@@ -5,6 +5,7 @@ import { verifyProvenance } from "../services/diaryProvenance";
 import { FIELD_ACCESS, requireAtLeast, AuthenticatedRequest } from "../middleware/auth";
 import { requireOwnRecord } from "../middleware/recordOwnership";
 import { createAuthToken } from "../utils/authToken";
+import { findUserByEmail } from "../storage/authStore";
 import {
   acceptSiteInvite,
   isAcceptInviteSuccess,
@@ -560,15 +561,24 @@ projectsRouter.post("/projects/invites/accept", async (req, res) => {
   }
   // Issue a fresh token so the caller's updated role takes effect immediately
   // without requiring a separate login step.
+  //
+  // The record is re-read rather than reconstructed from the claims, because
+  // acceptSiteInvite -> setUserCompany has just incremented this user's token
+  // generation (their companyId changed, so their other devices hold tokens
+  // that address the wrong tenant). A token minted at the OLD generation here
+  // would be refused by the very next request, turning a successful invite
+  // acceptance into an immediate sign-out.
   const reqAuth = (req as unknown as AuthenticatedRequest).auth;
+  const record = await findUserByEmail(reqAuth.email);
   const effectiveCompanyId = result.companyId ?? reqAuth.companyId;
   const effectiveCompanyRole = result.companyRole ?? reqAuth.companyRole;
   const freshToken = createAuthToken({
     email: reqAuth.email,
-    fullName: reqAuth.fullName,
-    role: reqAuth.role,
+    fullName: record?.fullName ?? reqAuth.fullName,
+    role: record?.role ?? reqAuth.role,
     companyId: effectiveCompanyId,
     companyRole: effectiveCompanyRole,
+    tokenGeneration: record?.tokenGeneration ?? reqAuth.tokenGeneration,
   });
   return res.json({ token: freshToken, siteId: result.siteId, siteName: result.siteName, role: result.role, companyId: effectiveCompanyId, companyRole: effectiveCompanyRole });
 });

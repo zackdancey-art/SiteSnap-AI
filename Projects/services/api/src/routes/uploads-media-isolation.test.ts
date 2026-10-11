@@ -85,8 +85,8 @@ if (!process.env.TEST_DATABASE_URL) {
   const probeRole = `media_probe_${runId.replace(/[^a-z0-9]/gi, "")}`;
   const probePassword = `Media_${Date.now()}_7kQw`;
 
-  const tokenA = createAuthToken({ email: `owner-a-${runId}@media.local`, fullName: "Owner A", companyId: COMPANY_A, companyRole: "owner" });
-  const tokenB = createAuthToken({ email: `owner-b-${runId}@media.local`, fullName: "Owner B", companyId: COMPANY_B, companyRole: "owner" });
+  const tokenA = createAuthToken({ email: `owner-a-${runId}@media.local`, fullName: "Owner A", companyId: COMPANY_A, companyRole: "owner", tokenGeneration: 0 });
+  const tokenB = createAuthToken({ email: `owner-b-${runId}@media.local`, fullName: "Owner B", companyId: COMPANY_B, companyRole: "owner", tokenGeneration: 0 });
 
   const BYTES_A = Buffer.from(`company-a-photograph-${runId}`);
   const BYTES_B = Buffer.from(`company-b-photograph-${runId}`);

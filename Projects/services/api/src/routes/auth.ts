@@ -483,6 +483,7 @@ router.post("/auth/register/verify", async (req, res) => {
         role: user.role,
         companyId: user.companyId,
         companyRole: user.companyRole,
+        tokenGeneration: user.tokenGeneration,
       }),
       user: {
         email: user.email,
@@ -539,6 +540,7 @@ async function loginHandler(req: Request, res: Response) {
       role: existing.role,
       companyId: existing.companyId,
       companyRole: existing.companyRole,
+      tokenGeneration: existing.tokenGeneration,
     });
     setSessionCookie(res, token);
     return res.json({
@@ -650,6 +652,8 @@ router.patch("/auth/profile", requireAuth, async (req: Request, res: Response) =
     const token = createAuthToken({
       email: auth.email, fullName: nextName, role: nextRole,
       companyId: auth.companyId, companyRole: auth.companyRole,
+      // No record to read, so carry forward the generation the caller presented.
+      tokenGeneration: auth.tokenGeneration,
     });
     return res.json({
       token,
@@ -663,6 +667,7 @@ router.patch("/auth/profile", requireAuth, async (req: Request, res: Response) =
   const token = createAuthToken({
     email: updated.email, fullName: updated.fullName, role: updated.role,
     companyId: updated.companyId, companyRole: updated.companyRole,
+    tokenGeneration: updated.tokenGeneration,
   });
   return res.json({
     token,
@@ -713,7 +718,8 @@ router.post("/auth/refresh", requireAuth, async (req: Request, res: Response) =>
   const role = user?.role ?? auth.role;
   const companyId = user?.companyId ?? auth.companyId;
   const companyRole = user?.companyRole ?? auth.companyRole;
-  const token = createAuthToken({ email, fullName, role, companyId, companyRole });
+  const tokenGeneration = user?.tokenGeneration ?? auth.tokenGeneration;
+  const token = createAuthToken({ email, fullName, role, companyId, companyRole, tokenGeneration });
   setSessionCookie(res, token);
   return res.json({ token, user: { email, name: fullName, role, companyId, companyRole } });
 });
@@ -764,7 +770,8 @@ router.post("/auth/revoke-all", requireAuth, async (req: Request, res: Response)
   const role = user?.role ?? auth.role;
   const companyId = user?.companyId ?? auth.companyId;
   const companyRole = user?.companyRole ?? auth.companyRole;
-  const token = createAuthToken({ email, fullName, role, companyId, companyRole });
+  const tokenGeneration = user?.tokenGeneration ?? auth.tokenGeneration;
+  const token = createAuthToken({ email, fullName, role, companyId, companyRole, tokenGeneration });
   setSessionCookie(res, token);
   return res.json({ token });
 });

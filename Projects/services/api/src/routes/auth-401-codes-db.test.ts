@@ -109,7 +109,7 @@ if (!process.env.TEST_DATABASE_URL) {
 
   /** A token whose payload is intact and whose signature is not ours. */
   const forgedTokenFor = (email: string): string => {
-    const valid = createAuthToken({ email, fullName: "Codes A", companyId: COMPANY, companyRole: "owner" });
+    const valid = createAuthToken({ email, fullName: "Codes A", companyId: COMPANY, companyRole: "owner", tokenGeneration: 0 });
     const [payload, signature] = valid.split(".");
     // Same length, different bytes: verifyAuthToken rejects a length mismatch
     // before it reaches timingSafeEqual, and a length mismatch is a different
@@ -167,7 +167,7 @@ if (!process.env.TEST_DATABASE_URL) {
   });
 
   test("a dead session and a mistyped password are both 401 and are told apart by code", async () => {
-    const token = createAuthToken({ email: EMAIL_A, fullName: "Codes A", companyId: COMPANY, companyRole: "owner" });
+    const token = createAuthToken({ email: EMAIL_A, fullName: "Codes A", companyId: COMPANY, companyRole: "owner", tokenGeneration: 0 });
 
     // (1) Live session, wrong credential in the BODY. The client must keep its
     // own message here; routing this to sign-in signs someone out for a typo.
@@ -218,7 +218,7 @@ if (!process.env.TEST_DATABASE_URL) {
     // Positive control on the same route: a token this secret signed, not yet
     // expired, is accepted. Without it this test would pass if requireAuth
     // rejected everything.
-    const live = createAuthToken({ email: EMAIL_B, fullName: "Codes B", companyId: COMPANY, companyRole: "owner" });
+    const live = createAuthToken({ email: EMAIL_B, fullName: "Codes B", companyId: COMPANY, companyRole: "owner", tokenGeneration: 0 });
     const ok = await changePassword(live, CURRENT_PASSWORD, `Next_${runId}_4B`);
     assert.equal(ok.status, 200, `change-password refused a valid token: ${JSON.stringify(ok.body)}`);
     assert.equal(ok.body.ok, true);
