@@ -1,5 +1,6 @@
 import { NextFunction, Request, RequestHandler, Response } from "express";
 import { AuthClaims, CompanyRole, UserRole, verifyAuthToken } from "../utils/authToken";
+import { readSessionCookie } from "../utils/sessionCookie";
 
 export type AuthenticatedRequest = Request & { auth: AuthClaims };
 
@@ -53,20 +54,8 @@ function extractBearerToken(req: Request): string | null {
   return token;
 }
 
-function extractSessionCookie(req: Request): string | null {
-  const raw = req.headers.cookie ?? "";
-  for (const part of raw.split(";")) {
-    const idx = part.indexOf("=");
-    if (idx === -1) continue;
-    if (part.slice(0, idx).trim() === "sitesnap.session") {
-      return decodeURIComponent(part.slice(idx + 1).trim());
-    }
-  }
-  return null;
-}
-
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
-  const token = extractBearerToken(req) ?? extractSessionCookie(req);
+  const token = extractBearerToken(req) ?? readSessionCookie(req);
   if (!token) {
     return res.status(401).json({ error: "Missing bearer token.", code: AUTH_ERROR_CODES.NO_CREDENTIAL });
   }

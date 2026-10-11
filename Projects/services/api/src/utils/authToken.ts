@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { readIntEnv } from "./env";
+import { COOKIE_MAX_AGE_MS } from "./sessionCookie";
 
 export type UserRole = "worker" | "supervisor" | "admin";
 export type CompanyRole = "owner" | "manager" | "viewer" | "crew";
@@ -40,15 +41,19 @@ const TOKEN_TTL_SECONDS = readIntEnv("AUTH_TOKEN_TTL_SECONDS", 60 * 60 * 24 * 7,
  * where in the seven-day cycle they stopped. Renewal happens at expiry, not
  * continuously, which is what makes it a range rather than a number.
  *
- * The 30 days is not invented here. It is COOKIE_MAX_AGE_MS, which the portal
- * has been setting since the cookie model landed: the browser was already being
- * told to keep the session for 30 days while the token inside it was honoured
- * for 7. One of those two numbers was wrong, and two numbers that disagree are
- * worse than one that is slightly generous.
+ * The 30 days is not invented here, and it is not written here either. It is
+ * COOKIE_MAX_AGE_MS, imported, which the portal has been setting since the
+ * cookie model landed: the browser was already being told to keep the session
+ * for 30 days while the token inside it was honoured for 7. One of those two
+ * numbers was wrong, and two numbers that disagree are worse than one that is
+ * slightly generous — so there is now one number, and changing the cookie's
+ * lifetime moves this with it.
  */
-const SESSION_MAX_IDLE_SECONDS = readIntEnv("AUTH_SESSION_MAX_IDLE_SECONDS", 60 * 60 * 24 * 30, {
-  min: 1,
-});
+const SESSION_MAX_IDLE_SECONDS = readIntEnv(
+  "AUTH_SESSION_MAX_IDLE_SECONDS",
+  Math.floor(COOKIE_MAX_AGE_MS / 1000),
+  { min: 1 },
+);
 
 /**
  * How far past `exp` the refresh route will still accept a token.

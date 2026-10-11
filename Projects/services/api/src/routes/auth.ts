@@ -43,23 +43,7 @@ import {
 } from "../middleware/rateLimit";
 import { hashPassword, verifyPassword } from "../utils/password";
 import { readIntEnv } from "../utils/env";
-
-const SESSION_COOKIE = "sitesnap.session";
-const COOKIE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-
-function setSessionCookie(res: Response, token: string) {
-  res.cookie(SESSION_COOKIE, token, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    maxAge: COOKIE_MAX_AGE_MS,
-    path: "/",
-  });
-}
-
-function clearSessionCookie(res: Response) {
-  res.clearCookie(SESSION_COOKIE, { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: "/" });
-}
+import { clearSessionCookie, setSessionCookie } from "../utils/sessionCookie";
 
 const router: Router = asyncSafeRouter();
 // An empty ACCOUNT_VERIFICATION_TTL_MS used to parse to 0 here, expiring every
