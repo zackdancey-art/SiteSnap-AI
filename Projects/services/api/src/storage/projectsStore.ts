@@ -4,6 +4,7 @@ import { v7 as uuidv7 } from "uuid";
 import { getPgPool } from "./postgres";
 import { CompanyRole, soloCompanyIdForEmail } from "../utils/authToken";
 import { Actor, isCrew } from "./actor";
+import { canEditRow, canReadRow, editOwnershipSql, readVisibilitySql } from "./recordScope";
 import { FileBackedStore } from "./fileStore";
 import { findUserByEmail, setUserCompany } from "./authStore";
 import { withTenant } from "./tenant";
@@ -25,7 +26,14 @@ export type SiteRecord = {
   status: SiteStatus;
   createdAt: string;
   progressPercent?: number;
-  deletedAt?: string | null;
+  // NO `deletedAt`. A site is HARD deleted in both stores — `deleteSite` does
+  // `memory.sites.delete(...)` and `DELETE FROM project_sites`, and
+  // `project_sites` has no `deleted_at` column in any migration. The field used
+  // to be declared here and was never written by anything, which is how a
+  // `deleted_at IS NULL` predicate came to sit in `updateSiteProgress` against
+  // a column that does not exist. Soft-delete for sites is Phase 6, with the
+  // bin and the 90-day purge; it arrives with a migration, a mapper and a list
+  // filter, the way the other four record types have it. See AUDIT L99.
 };
 
 export type EntryRecord = {
@@ -151,26 +159,11 @@ function useDatabase() {
   return Boolean(process.env.DATABASE_URL && process.env.DATABASE_URL.trim());
 }
 
-// Company-scoped access to a row identified by its company + owner. A row is
-// accessible when it belongs to the actor's company AND, for crew, when the
-// actor owns it or is a member of its site. Non-crew (viewer/manager/owner)
-// see everything within their own company.
-function canAccessRow(
-  actor: Actor,
-  rowCompanyId: string,
-  ownerEmail: string,
-  memberSiteIds?: Set<string>,
-  siteId?: string
-): boolean {
-  // Explicit site-member record grants access regardless of company match —
-  // this allows site invites accepted with a stale pre-accept token to still
-  // surface the invited site in list queries.
-  if (siteId && memberSiteIds?.has(siteId)) return true;
-  if (rowCompanyId !== actor.companyId) return false;
-  // Crew only see sites they own; non-crew company members see all.
-  if (isCrew(actor)) return actor.email === ownerEmail;
-  return true;
-}
+// canAccessRow lived here and answered two different questions — "may you see
+// this row" and "may you change it" — with one predicate. storage/recordScope.ts
+// now answers them separately (canReadRow / canEditRow), which is what the
+// corrected decision requires: crew read the whole company and write only their
+// own rows. Its `memberSiteIds` escape hatch went with it; see AUDIT L87.
 
 const store = new FileBackedStore<Partial<MemoryJson>>(
   path.join(process.cwd(), "data", "projects-store.json"),
@@ -382,34 +375,21 @@ type SiteRow = {
 export async function listSites(actor: Actor, limit = 200, offset = 0): Promise<SiteRecord[]> {
   if (!useDatabase()) {
     await ensureMemoryLoaded();
-    const memberSiteIds = new Set(
-      Array.from(memory.siteMembers.values())
-        .filter((m) => m.memberEmail === actor.email)
-        .map((m) => m.siteId)
-    );
     return Array.from(memory.sites.values())
-      .filter((site) => canAccessRow(actor, site.companyId, site.ownerEmail, memberSiteIds, site.id))
+      .filter((site) => canReadRow(actor, "site", site))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(offset, offset + limit);
   }
-  // Non-crew (viewer/manager/owner): every site in the company.
-  // Crew: only sites they own or are a member of, within the company.
+  // Every site in the company, for every role including crew. A crew member
+  // who cannot see the site they are standing on cannot file anything against
+  // it; the rule is readVisibility("site") and lives in recordScope.ts.
   const result = await withTenant(actor, (client) =>
-    !isCrew(actor)
-      ? client.query<SiteRow>(
-          `SELECT * FROM project_sites
-           WHERE company_id = $1
-           ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
-          [actor.companyId, limit, offset]
-        )
-      : client.query<SiteRow>(
-          `SELECT * FROM project_sites
-           WHERE company_id = $1
-             AND (owner_email = $2
-                  OR id IN (SELECT site_id FROM site_members WHERE member_email = $2))
-           ORDER BY created_at DESC LIMIT $3 OFFSET $4`,
-          [actor.companyId, actor.email, limit, offset]
-        )
+    client.query<SiteRow>(
+      `SELECT * FROM project_sites
+       WHERE company_id = $1
+       ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+      [actor.companyId, limit, offset]
+    )
   );
   return result.rows.map(mapSite);
 }
@@ -448,7 +428,14 @@ export async function deleteSite(actor: Actor, siteId: string): Promise<boolean>
     const existing = memory.sites.get(siteId);
     // Cross-company guard: never touch another company's site.
     if (!existing || existing.companyId !== actor.companyId) return false;
-    // Crew may only delete sites they own.
+    // Crew may only delete sites they own — which is none, since crew cannot
+    // create a site. This is deliberately NOT routed through canEditRow: the
+    // route is requireAtLeast("manager"), so the branch is unreachable for
+    // crew, and `site` is a `shared-site-attribute` whose canEditRow admits
+    // anyone in the company (correctly — site progress is not authored). So
+    // calling it here would REMOVE a second-layer guard on a destructive
+    // cascade rather than express the rule. The two layers disagreeing is the
+    // point; see the note on RECORD_CLASS in recordScope.ts.
     if (isCrew(actor) && existing.ownerEmail !== actor.email) return false;
     memory.sites.delete(siteId);
     for (const [entryId, entry] of memory.entries.entries()) {
@@ -477,27 +464,19 @@ export async function deleteSite(actor: Actor, siteId: string): Promise<boolean>
 export async function listEntries(actor: Actor, siteId?: string, limit = 200, offset = 0): Promise<EntryRecord[]> {
   if (!useDatabase()) {
     await ensureMemoryLoaded();
-    const memberSiteIds = new Set(
-      Array.from(memory.siteMembers.values())
-        .filter((m) => m.memberEmail === actor.email)
-        .map((m) => m.siteId)
-    );
     return Array.from(memory.entries.values())
-      .filter((entry) => canAccessRow(actor, entry.companyId, entry.ownerEmail, memberSiteIds, entry.siteId))
+      .filter((entry) => canReadRow(actor, "entry", entry))
       .filter((entry) => (siteId ? entry.siteId === siteId : true))
       .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
       .slice(offset, offset + limit);
   }
 
-  // Always company-scoped. Crew additionally limited to owned/member sites.
+  // Always company-scoped, and for entries that is the whole of it — a company
+  // crew member reads every entry on every site. See readVisibility.
   const params: unknown[] = [actor.companyId];
   const queryParts: string[] = [`company_id = $1`];
-  if (isCrew(actor)) {
-    params.push(actor.email);
-    queryParts.push(
-      `(owner_email = $${params.length} OR site_id IN (SELECT site_id FROM site_members WHERE member_email = $${params.length}))`
-    );
-  }
+  const visibility = readVisibilitySql(actor, "entry", params);
+  if (visibility) queryParts.push(visibility);
   if (siteId) {
     params.push(siteId);
     queryParts.push(`site_id = $${params.length}`);
@@ -570,13 +549,8 @@ export async function updateEntry(
 ): Promise<EntryRecord | null> {
   if (!useDatabase()) {
     await ensureMemoryLoaded();
-    const memberSiteIds = new Set(
-      Array.from(memory.siteMembers.values())
-        .filter((m) => m.memberEmail === actor.email)
-        .map((m) => m.siteId)
-    );
     const current = memory.entries.get(entryId);
-    if (!current || !canAccessRow(actor, current.companyId, current.ownerEmail, memberSiteIds, current.siteId)) return null;
+    if (!current || !canEditRow(actor, "entry", current)) return null;
     const updated: EntryRecord = {
       ...current,
       ...patch,
@@ -595,12 +569,12 @@ export async function updateEntry(
     const existingRow = existingResult.rows[0];
     // Cross-company guard: a different company's row is invisible (treated as 404).
     if (existingRow.company_id !== actor.companyId) return null;
-    if (isCrew(actor) && existingRow.owner_email !== actor.email) {
-      const member = await client.query(
-        `SELECT 1 FROM site_members WHERE site_id = $1 AND member_email = $2`,
-        [existingRow.site_id, actor.email]
-      );
-      if (member.rowCount === 0) return null;
+    // Authorship. Site membership used to widen this; it no longer does — a
+    // crew member edits the entries they wrote and no one else's, whoever else
+    // is on the site. requireOwnRecord has already answered 403 for this case;
+    // this is the layer that holds if the route's gate is removed.
+    if (!canEditRow(actor, "entry", { companyId: existingRow.company_id, ownerEmail: existingRow.owner_email })) {
+      return null;
     }
 
     const result = await client.query(
@@ -644,22 +618,17 @@ export async function deleteEntry(actor: Actor, entryId: string): Promise<boolea
   if (!useDatabase()) {
     await ensureMemoryLoaded();
     const existing = memory.entries.get(entryId);
-    if (!existing || existing.companyId !== actor.companyId) return false;
-    if (isCrew(actor) && existing.ownerEmail !== actor.email) return false;
+    if (!existing || !canEditRow(actor, "entry", existing)) return false;
     memory.entries.delete(entryId);
     await persistMemory();
     return true;
   }
+  const params: unknown[] = [entryId, actor.companyId];
+  const conditions = ["id = $1", "company_id = $2"];
+  const ownership = editOwnershipSql(actor, "entry", params);
+  if (ownership) conditions.push(ownership);
   const result = await withTenant(actor, (client) =>
-    isCrew(actor)
-      ? client.query(
-          `DELETE FROM project_entries WHERE id = $1 AND company_id = $2 AND owner_email = $3`,
-          [entryId, actor.companyId, actor.email]
-        )
-      : client.query(
-          `DELETE FROM project_entries WHERE id = $1 AND company_id = $2`,
-          [entryId, actor.companyId]
-        )
+    client.query(`DELETE FROM project_entries WHERE ${conditions.join(" AND ")}`, params)
   );
   return (result.rowCount ?? 0) > 0;
 }
@@ -667,25 +636,16 @@ export async function deleteEntry(actor: Actor, entryId: string): Promise<boolea
 export async function listDiaries(actor: Actor, siteId?: string, limit = 200, offset = 0): Promise<DiaryRecord[]> {
   if (!useDatabase()) {
     await ensureMemoryLoaded();
-    const memberSiteIds = new Set(
-      Array.from(memory.siteMembers.values())
-        .filter((m) => m.memberEmail === actor.email)
-        .map((m) => m.siteId)
-    );
     return Array.from(memory.diaries.values())
-      .filter((diary) => canAccessRow(actor, diary.companyId, diary.ownerEmail, memberSiteIds, diary.siteId))
+      .filter((diary) => canReadRow(actor, "diary", diary))
       .filter((diary) => (siteId ? diary.siteId === siteId : true))
       .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt))
       .slice(offset, offset + limit);
   }
   const params: unknown[] = [actor.companyId];
   const queryParts: string[] = [`company_id = $1`];
-  if (isCrew(actor)) {
-    params.push(actor.email);
-    queryParts.push(
-      `(owner_email = $${params.length} OR site_id IN (SELECT site_id FROM site_members WHERE member_email = $${params.length}))`
-    );
-  }
+  const visibility = readVisibilitySql(actor, "diary", params);
+  if (visibility) queryParts.push(visibility);
   if (siteId) {
     params.push(siteId);
     queryParts.push(`site_id = $${params.length}`);
@@ -778,13 +738,8 @@ export async function updateDiary(
 ): Promise<DiaryRecord | null> {
   if (!useDatabase()) {
     await ensureMemoryLoaded();
-    const memberSiteIds = new Set(
-      Array.from(memory.siteMembers.values())
-        .filter((m) => m.memberEmail === actor.email)
-        .map((m) => m.siteId)
-    );
     const current = memory.diaries.get(diaryId);
-    if (!current || !canAccessRow(actor, current.companyId, current.ownerEmail, memberSiteIds, current.siteId)) return null;
+    if (!current || !canEditRow(actor, "diary", current)) return null;
     const auditEntry = buildAuditEntry(current, patch, actor, note);
     const updated: DiaryRecord = {
       ...current,
@@ -812,12 +767,9 @@ export async function updateDiary(
     if (existingResult.rowCount === 0) return null;
     const existing = existingResult.rows[0];
     if (existing.company_id !== actor.companyId) return null;
-    if (isCrew(actor) && existing.owner_email !== actor.email) {
-      const member = await client.query(
-        `SELECT 1 FROM site_members WHERE site_id = $1 AND member_email = $2`,
-        [existing.site_id, actor.email]
-      );
-      if (member.rowCount === 0) return null;
+    // Authorship, no longer widened by site membership — see updateEntry.
+    if (!canEditRow(actor, "diary", { companyId: existing.company_id, ownerEmail: existing.owner_email })) {
+      return null;
     }
 
     const currentForAudit: DiaryRecord = {
@@ -1042,24 +994,15 @@ function mapTemplate(row: {
 export async function listTemplates(actor: Actor, siteId?: string): Promise<TemplateRecord[]> {
   if (!useDatabase()) {
     await ensureMemoryLoaded();
-    const memberSiteIds = new Set(
-      Array.from(memory.siteMembers.values())
-        .filter((m) => m.memberEmail === actor.email)
-        .map((m) => m.siteId)
-    );
     return Array.from(memory.templates.values())
-      .filter((t) => canAccessRow(actor, t.companyId, t.ownerEmail, memberSiteIds, t.siteId))
+      .filter((t) => canReadRow(actor, "diaryTemplate", t))
       .filter((t) => (siteId ? t.siteId === siteId : true))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
   const params: unknown[] = [actor.companyId];
   const queryParts: string[] = [`company_id = $1`];
-  if (isCrew(actor)) {
-    params.push(actor.email);
-    queryParts.push(
-      `(owner_email = $${params.length} OR site_id IN (SELECT site_id FROM site_members WHERE member_email = $${params.length}))`
-    );
-  }
+  const visibility = readVisibilitySql(actor, "diaryTemplate", params);
+  if (visibility) queryParts.push(visibility);
   if (siteId) {
     params.push(siteId);
     queryParts.push(`site_id = $${params.length}`);
@@ -1107,8 +1050,7 @@ export async function updateTemplate(
   if (!useDatabase()) {
     await ensureMemoryLoaded();
     const current = memory.templates.get(templateId);
-    if (!current || current.companyId !== actor.companyId) return null;
-    if (isCrew(actor) && current.ownerEmail !== actor.email) return null;
+    if (!current || !canEditRow(actor, "diaryTemplate", current)) return null;
     const updated = { ...current, ...patch };
     memory.templates.set(templateId, updated);
     await persistMemory();
@@ -1120,8 +1062,9 @@ export async function updateTemplate(
       [templateId]
     );
     if (existing.rowCount === 0) return null;
-    if (existing.rows[0].company_id !== actor.companyId) return null;
-    if (isCrew(actor) && existing.rows[0].owner_email !== actor.email) return null;
+    if (!canEditRow(actor, "diaryTemplate", { companyId: existing.rows[0].company_id, ownerEmail: existing.rows[0].owner_email })) {
+      return null;
+    }
     const result = await client.query(
       `UPDATE project_templates
        SET name = COALESCE($2, name),
@@ -1141,8 +1084,7 @@ export async function deleteTemplate(actor: Actor, templateId: string): Promise<
   if (!useDatabase()) {
     await ensureMemoryLoaded();
     const tmpl = memory.templates.get(templateId);
-    if (!tmpl || tmpl.companyId !== actor.companyId) return false;
-    if (isCrew(actor) && tmpl.ownerEmail !== actor.email) return false;
+    if (!tmpl || !canEditRow(actor, "diaryTemplate", tmpl)) return false;
     memory.templates.delete(templateId);
     await persistMemory();
     return true;
@@ -1153,8 +1095,9 @@ export async function deleteTemplate(actor: Actor, templateId: string): Promise<
       [templateId]
     );
     if (existing.rowCount === 0) return false;
-    if (existing.rows[0].company_id !== actor.companyId) return false;
-    if (isCrew(actor) && existing.rows[0].owner_email !== actor.email) return false;
+    if (!canEditRow(actor, "diaryTemplate", { companyId: existing.rows[0].company_id, ownerEmail: existing.rows[0].owner_email })) {
+      return false;
+    }
     const result = await client.query(
       `DELETE FROM project_templates WHERE id = $1 AND company_id = $2`,
       [templateId, actor.companyId]
@@ -1832,8 +1775,14 @@ export async function updateSiteProgress(actor: Actor, siteId: string, progressP
   if (!useDatabase()) {
     await ensureMemoryLoaded();
     const existing = memory.sites.get(siteId);
-    if (!existing || existing.companyId !== actor.companyId || existing.deletedAt) return null;
-    if (isCrew(actor) && existing.ownerEmail !== actor.email) return null;
+    if (!existing) return null;
+    // AUDIT L88. This path used to narrow crew to sites they OWN, which crew
+    // never do — they cannot create one — so the in-memory store refused every
+    // crew progress update while the Postgres store below allowed them all.
+    // Progress is a shared attribute of the site, not an authored record:
+    // RECORD_CLASS calls it `shared-site-attribute` and canEditRow admits
+    // anyone in the company, which is what production already did.
+    if (!canEditRow(actor, "site", existing)) return null;
     const updated: SiteRecord = { ...existing, progressPercent: pct };
     memory.sites.set(siteId, updated);
     await persistMemory();
@@ -1841,8 +1790,12 @@ export async function updateSiteProgress(actor: Actor, siteId: string, progressP
   }
   const result = await withTenant(actor, (client) =>
     client.query<SiteRow & { progress_percent: number }>(
+      // No `deleted_at IS NULL` here: project_sites has no such column, so this
+      // statement used to fail with `column "deleted_at" does not exist` on
+      // EVERY call against Postgres. AUDIT L99. Removing the predicate is the
+      // fix rather than adding the column — soft-delete is Phase 6.
       `UPDATE project_sites SET progress_percent = $2
-       WHERE id = $1 AND company_id = $3 AND deleted_at IS NULL RETURNING *`,
+       WHERE id = $1 AND company_id = $3 RETURNING *`,
       [siteId, pct, actor.companyId]
     )
   );
@@ -1869,4 +1822,42 @@ export async function removeSiteMember(
     [siteId, memberEmail]
   ));
   return (r.rowCount ?? 0) > 0;
+}
+
+/**
+ * Who authored an entry, a diary, or a diary template — for the route-level
+ * ownership gate.
+ *
+ * `requireOwnRecord` (middleware/recordOwnership.ts) needs the author BEFORE
+ * the handler runs, so that a crew member changing somebody else's record is
+ * refused with 403 rather than the 404 every store returns for "no row you may
+ * touch". Returns null when there is no such row in the actor's company, which
+ * the gate passes through untouched so the handler produces its own 404 — a
+ * row that is not there must not be distinguishable from one that is.
+ *
+ * The three kinds share one function because the lookup is identical in all
+ * three tables and the table name comes from a closed map keyed by a union
+ * type, never from a request.
+ */
+export async function findProjectRowOwner(
+  actor: Actor,
+  kind: "entry" | "diary" | "diaryTemplate",
+  id: string
+): Promise<{ companyId: string; ownerEmail: string } | null> {
+  const TABLES = { entry: "project_entries", diary: "project_diaries", diaryTemplate: "project_templates" } as const;
+  if (!useDatabase()) {
+    await ensureMemoryLoaded();
+    const store = kind === "entry" ? memory.entries : kind === "diary" ? memory.diaries : memory.templates;
+    const existing = store.get(id);
+    if (!existing || existing.companyId !== actor.companyId) return null;
+    return { companyId: existing.companyId, ownerEmail: existing.ownerEmail };
+  }
+  const result = await withTenant(actor, (client) =>
+    client.query<{ owner_email: string; company_id: string }>(
+      `SELECT owner_email, company_id FROM ${TABLES[kind]} WHERE id = $1 AND company_id = $2 LIMIT 1`,
+      [id, actor.companyId]
+    )
+  );
+  if (result.rowCount === 0) return null;
+  return { companyId: result.rows[0].company_id, ownerEmail: result.rows[0].owner_email };
 }

@@ -1,6 +1,7 @@
 import { Router } from "express";
+import { asyncSafeRouter } from "../middleware/asyncRouter";
 import { z } from "zod";
-import { requireAuth, AuthenticatedRequest } from "../middleware/auth";
+import { FIELD_ACCESS, AuthenticatedRequest } from "../middleware/auth";
 import { listTemplates, createTemplate, deleteTemplate } from "../storage/templateStore";
 
 // ── Australian WHS built-in checklists (Safe Work Australia compliant) ────────
@@ -92,8 +93,14 @@ const WHS_CHECKLISTS = [
   },
 ];
 
-export const templatesRouter: Router = Router();
-templatesRouter.use(requireAuth);
+export const templatesRouter: Router = asyncSafeRouter();
+// Explicit requirement for this router's own paths — AUDIT L66. This line used
+// to be a PATHLESS `use(requireAuth)`, the same shape that made projects.ts
+// refuse 31 routes belonging to other routers. It did no harm here only because
+// everything mounted after it happens to require authentication anyway, which
+// is luck rather than design. Scoped now. Operational work, so the requirement
+// is identity, not rank: see FIELD_ACCESS.
+templatesRouter.use(["/whs-checklists", "/entry-templates"], ...FIELD_ACCESS);
 
 function getActor(req: AuthenticatedRequest) {
   return { email: req.auth.email, role: req.auth.role, companyId: req.auth.companyId, companyRole: req.auth.companyRole };

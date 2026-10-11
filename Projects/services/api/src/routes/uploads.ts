@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { asyncSafeRouter } from "../middleware/asyncRouter";
 import multer from "multer";
 import { requireAuth, AuthenticatedRequest, AUTH_ERROR_CODES } from "../middleware/auth";
 import { verifyAuthToken } from "../utils/authToken";
@@ -7,7 +8,7 @@ import { signUploadPath, verifyUploadSignature } from "../utils/signedUrl";
 import { recordUpload, uploadBelongsToActorCompany } from "../storage/uploadsStore";
 import { rateLimit } from "../middleware/rateLimit";
 
-export const uploadsRouter: Router = Router();
+export const uploadsRouter: Router = asyncSafeRouter();
 
 const ALLOWED_MIME_TYPES = new Set([
   "image/jpeg",

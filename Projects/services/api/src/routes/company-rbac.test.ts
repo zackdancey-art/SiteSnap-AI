@@ -180,9 +180,34 @@ test("2: Viewer GET /projects/sites returns 200; POST returns 403", async () => 
   assert.equal(postRes.status, 403, "viewer POST should be 403");
 });
 
-// ── 3. Crew blocked from dashboard ───────────────────────────────────────────
+// ── 3. Crew: the field product, not the management of it ─────────────────────
 
-test("3: Crew token on GET /projects/sites returns 403", async () => {
+/**
+ * This test used to assert `GET /projects/sites returns 403` for crew, and it
+ * passed for a year. What it was pinning was AUDIT L66: one pathless
+ * `requireAtLeast("viewer")` on projectsRouter, which refused crew 31 routes
+ * across seven other routers — every diary, incident, inspection, delivery,
+ * timesheet and location ping. A crew member could join a company and then do
+ * nothing. The 403 was the bug, written down as the expectation.
+ *
+ * The decision, recorded in the Phase 1b PR body: a crew member may view and
+ * edit everything a manager can, except the supervisor dashboard, and except
+ * inviting anyone, removing a site, or changing company settings.
+ *
+ * Both halves are asserted here, on the same router, in the same run, because
+ * a 200 alone is equally consistent with every gate on this router having been
+ * deleted — which is the plausible way to "fix" L66 and the thing that must not
+ * have happened.
+ *
+ * NOTE ON WHAT THIS TEST'S "crew" ACTUALLY IS: registerUser without a
+ * companyName still creates a solo company and makes this account its OWNER, so
+ * the invitation below is accepted at rank owner and the account is demoted to
+ * crew only afterwards. That is not the journey a real invitee takes, and it is
+ * why routes/invite-accept-access.test.ts exists separately — it builds its
+ * crew member by registering WITH an invite token. The authoritative table is
+ * in crew-permissions-db.test.ts, against Postgres.
+ */
+test("3: Crew may use the field routes and may not manage the company's sites", async () => {
   const ownerToken = await registerUser("owner@co.test", "Owner", "My Co");
 
   const invRes = await req<{ results: { token?: string }[] }>(
@@ -197,8 +222,31 @@ test("3: Crew token on GET /projects/sites returns 403", async () => {
   const crewAccept = await req<{ token?: string }>("POST", "/projects/invites/accept", { token: inviteToken }, crewToken);
   const crewActiveToken = crewAccept.body.token ?? crewToken;
 
-  const dashRes = await req("GET", "/projects/sites", undefined, crewActiveToken);
-  assert.equal(dashRes.status, 403, "crew should be blocked from dashboard");
+  // THE HALF THAT MUST BE ALLOWED. Reading the company's sites is step one of
+  // every field task; without it there is nothing to attach a diary to.
+  const sites = await req<{ error?: string }>("GET", "/projects/sites", undefined, crewActiveToken);
+  assert.equal(
+    sites.status, 200,
+    `crew must be able to list the sites they work on: ${sites.status} ${JSON.stringify(sites.body)}`
+  );
+
+  // THE HALF THAT MUST BE REFUSED, on the same router. Creating a site is
+  // manager+, and so is removing one.
+  const created = await req<{ error?: string }>(
+    "POST", "/projects/sites",
+    { name: "Crew Site", address: "X", client: "X", startDate: "2026-01-01", status: "active" },
+    crewActiveToken
+  );
+  assert.equal(created.status, 403, "crew must not be able to create a site");
+
+  // And the supervisor aggregate, which is the screen the decision excludes.
+  const report = await req<{ error?: string }>("GET", "/projects/reports/supervisor", undefined, crewActiveToken);
+  assert.equal(report.status, 403, "crew must not reach the supervisor report");
+
+  // OWNER CONTROL on the same two routes, same run: they are reachable with
+  // sufficient rank, so the 403s above are the gate and not a broken route.
+  const ownerReport = await req("GET", "/projects/reports/supervisor", undefined, ownerToken);
+  assert.equal(ownerReport.status, 200, "control: an owner must reach the supervisor report");
 });
 
 // ── 4. Owner-only member management ──────────────────────────────────────────

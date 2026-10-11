@@ -36,6 +36,7 @@ import {
   login,
 } from "@/lib/api";
 import { composeE164, DIALLING_CODES } from "@/lib/phone";
+import { landingPath } from "@/lib/useRole";
 
 type Step = "details" | "emailCode" | "smsCode";
 
@@ -55,7 +56,6 @@ function SignupForm() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [done, setDone] = useState<"crew" | null>(null);
 
   const normalizedEmail = email.trim().toLowerCase();
 
@@ -128,48 +128,18 @@ function SignupForm() {
       // portal a session.
       await login(normalizedEmail, password);
 
-      // Crew ranks BELOW viewer (middleware/auth.ts ROLE_RANK: crew 0,
-      // viewer 1) and the dashboard's company routes all require at least
-      // viewer, so /dashboard would answer 403 to everything it asks for.
-      // The account is real and attached; the work just happens on the phone.
-      if (created.user.companyRole === "crew") {
-        setDone("crew");
-        setLoading(false);
-        return;
-      }
-      router.replace("/dashboard");
+      // This used to stop crew here, because crew ranked below the viewer gate
+      // every portal route sat behind and /dashboard answered 403 to everything
+      // it asked for. That gate was pathless and wrong (AUDIT L66); scoping it
+      // gave crew back Sites, Reports, Activity and the live map, so there is
+      // somewhere truthful to send them. landingPath() keeps them off the
+      // dashboard, which is the one screen still not theirs.
+      router.replace(landingPath(created.user.companyRole));
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Could not complete signup.");
       setLoading(false);
     }
   };
-
-  if (done === "crew") {
-    return (
-      <div className="auth-page">
-        <div className="auth-card">
-          <div className="auth-logo">
-            <Image src="/logo.png" alt="SiteSnap AI" width={56} height={56} style={{ borderRadius: 14 }} />
-            <div>
-              <div className="auth-title">SiteSnap AI</div>
-              <div className="auth-sub">Manager Portal</div>
-            </div>
-          </div>
-          <div style={{ textAlign: "center", padding: "16px 0" }}>
-            <div style={{ fontSize: 48, marginBottom: 12 }}>✅</div>
-            <h2 style={{ fontSize: 18, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>
-              Your account is ready
-            </h2>
-            <p style={{ fontSize: 14, color: "var(--text-secondary)" }}>
-              You have joined the team. Day-to-day work — diaries, photos, timesheets and
-              deliveries — happens in the SiteSnap app on your iPhone. Sign in there with
-              this same email address.
-            </p>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   if (!inviteToken) {
     return (
@@ -221,7 +191,7 @@ function SignupForm() {
         </div>
 
         {error && <div className="auth-error visible">{error}</div>}
-        {!error && notice && !done && (
+        {!error && notice && (
           <p style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 12 }}>{notice}</p>
         )}
 

@@ -1,7 +1,9 @@
-import { Router } from "express";
+import { Router, type RequestHandler } from "express";
+import { asyncSafeRouter } from "../middleware/asyncRouter";
 import { z } from "zod";
 import { verifyProvenance } from "../services/diaryProvenance";
-import { requireAuth, requireAtLeast, AuthenticatedRequest } from "../middleware/auth";
+import { FIELD_ACCESS, requireAtLeast, AuthenticatedRequest } from "../middleware/auth";
+import { requireOwnRecord } from "../middleware/recordOwnership";
 import { createAuthToken } from "../utils/authToken";
 import {
   acceptSiteInvite,
@@ -112,49 +114,56 @@ const TemplateSchema = z.object({
 
 const TemplatePatchSchema = TemplateSchema.omit({ siteId: true }).partial();
 
-export const projectsRouter: Router = Router();
+export const projectsRouter: Router = asyncSafeRouter();
 
 /**
- * The one path on this router a crew member must be able to reach.
+ * WHAT THIS ROUTER REQUIRES, AND WHY IT IS SCOPED TO "/projects" — AUDIT L66.
  *
- * Accepting an invitation is how somebody STOPS being an outsider, so gating it
- * on the rank they only acquire by accepting is circular. Worse, it made the
- * failure unrecoverable: routes/auth.ts creates the account and then treats a
- * failed acceptSiteInvite as non-fatal, on the stated grounds that "the user
- * simply lands with no company yet and can retry the invite" — and the retry
- * was a 403. An account orphaned that way had no route back by any means.
+ * This used to be one PATHLESS `projectsRouter.use(requireAuth,
+ * requireAtLeast("viewer"))`, plus a carve-out for the invitation-accept path.
+ * A pathless `use` on a router mounted with `apiRouter.use(projectsRouter)`
+ * runs for EVERY request that reaches it, not only for this router's own
+ * routes — and seven routers are mounted AFTER this one in routes/index.ts
+ * (push, crew, incidents, inspections, deliveries, templates, location). So a
+ * crew member was 403'd out of all 31 of their routes by a line written to
+ * protect the supervisor dashboard: no clocking in, no incident, no inspection,
+ * no delivery, no location ping. Measured, with an owner positive control on
+ * the same route in the same run.
+ *
+ * The path argument is the whole fix for that: the gate now runs for the paths
+ * this router actually serves and for nothing downstream of it.
+ *
+ * WHY NOT PROMOTE CREW TO VIEWER INSTEAD
+ *
+ * Because a rank promotion grants whatever else viewer implies, on every route
+ * that gates on viewer today and every one added later, none of which anybody
+ * would re-examine. The requirement belongs on the route, said out loud. So the
+ * router states the operational requirement once — an authenticated company
+ * member, see FIELD_ACCESS — and the routes that need more than that carry it
+ * themselves, each with the reason:
+ *
+ *   requireAtLeast("viewer")   /projects/summary, /projects/reports/supervisor
+ *                              — supervisor aggregates, not field work.
+ *   requireAtLeast("manager")  POST+DELETE /projects/sites, the three site
+ *                              invitation routes, DELETE site member
+ *                              — the decided exceptions: crew do not invite
+ *                                anyone and do not remove a site.
+ *
+ * One requirement is finer than a route, and is stated at the route instead:
+ * APPROVING a diary is manager+ while EDITING one is not, so POST and PATCH
+ * /projects/diaries gate on the `status` FIELD rather than on the path. See
+ * requireManagerToAttestDiaryStatus below — a route-level gate there would read
+ * as "diary editing is manager-only", which is a worse defect than the one it
+ * would be fixing.
+ *
+ * The carve-out is gone because nothing is left to carve out of: accepting an
+ * invitation is how somebody STOPS being an outsider, so gating it on the rank
+ * they only acquire by accepting was circular, and with the blanket gate
+ * removed the accept route needs no exception — it needs identity, which is
+ * what it now asks for. routes/invite-accept-access.test.ts holds the proof
+ * that the orphan state it stranded is still reachable.
  */
-const ACCEPT_INVITE_PATH = "/projects/invites/accept";
-
-// Crew (rank 0) are blocked from this router's dashboard routes — only viewer+
-// may proceed — with the single carve-out above.
-//
-// AUDIT L66, and read this before touching the shape of these two lines. The
-// gate used to be one pathless `projectsRouter.use(requireAuth,
-// requireAtLeast("viewer"))`. A pathless `use` on a router mounted with
-// `apiRouter.use(projectsRouter)` runs for EVERY request that reaches it, not
-// only for this router's own routes — and seven routers are mounted AFTER this
-// one in routes/index.ts (push, crew, incidents, inspections, deliveries,
-// templates, location), none of which has any role gate of its own. So a crew
-// member was 403'd out of all 31 of their routes by a line written to protect
-// the dashboard: no clocking in, no incident, no inspection, no delivery, no
-// location ping. Measured, with an owner positive control on the same route in
-// the same run. 31 = push 3, crew 3, incidents 4, inspections 10, deliveries 4,
-// templates 5, location 2 — counted two ways that agree, and carrying zero role
-// gates of their own, so this accident is their only role protection today.
-//
-// That leak is NOT fixed here, deliberately. Scoping this `use` to "/projects"
-// is the correct structural fix and it would simultaneously grant crew those 31
-// routes, which is a decision about what a crew member may
-// do in a compliance-evidence product — the user's to make, not one to take
-// unattended. The carve-out below changes the behaviour of exactly one path and
-// nothing else. See docs/PHASE-1-REVIEW.md.
-projectsRouter.use(requireAuth);
-const viewerOrAbove = requireAtLeast("viewer");
-projectsRouter.use((req, res, next) => {
-  if (req.path === ACCEPT_INVITE_PATH) return next();
-  return viewerOrAbove(req, res, next);
-});
+projectsRouter.use("/projects", ...FIELD_ACCESS);
 
 function getActor(req: AuthenticatedRequest) {
   return {
@@ -170,7 +179,7 @@ projectsRouter.get("/projects/bootstrap", async (req, res) => {
   res.json(payload);
 });
 
-projectsRouter.get("/projects/summary", async (req, res) => {
+projectsRouter.get("/projects/summary", requireAtLeast("viewer"), async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const [sites, entries, diaries] = await Promise.all([
     listSites(actor),
@@ -229,7 +238,7 @@ projectsRouter.post("/projects/entries", async (req, res) => {
   return res.status(201).json({ entry });
 });
 
-projectsRouter.patch("/projects/entries/:id", async (req, res) => {
+projectsRouter.patch("/projects/entries/:id", requireOwnRecord("entry"), async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const parsed = EntryPatchSchema.safeParse(req.body ?? {});
   if (!parsed.success) {
@@ -240,7 +249,7 @@ projectsRouter.patch("/projects/entries/:id", async (req, res) => {
   return res.json({ entry });
 });
 
-projectsRouter.delete("/projects/entries/:id", async (req, res) => {
+projectsRouter.delete("/projects/entries/:id", requireOwnRecord("entry"), async (req, res) => {
   const removed = await deleteEntry(getActor(req as unknown as AuthenticatedRequest), req.params.id);
   if (!removed) return res.status(404).json({ error: "Entry not found." });
   return res.json({ ok: true });
@@ -254,7 +263,61 @@ projectsRouter.get("/projects/diaries", async (req, res) => {
   return res.json({ diaries, limit, offset });
 });
 
-projectsRouter.post("/projects/diaries", async (req, res) => {
+/**
+ * APPROVING a diary is manager+. EDITING one is not. — AUDIT L81.
+ *
+ * This is a FIELD-level gate, and the distinction is the whole of it. Crew keep
+ * full write access to a diary's content: notes, summary, the full report, the
+ * safety checklist, the sections, the report period. What they may not do is
+ * move it to `approved`.
+ *
+ * The reason is that the two are different acts on a seven-year compliance
+ * record. A submitted diary is a claim; an approved one is the record. The
+ * supervisor dashboard computes an "approval rate" from this field and presents
+ * it as oversight, and a rate that counts the author's own approvals is a
+ * misleading number on a document somebody may have to stand behind. Timesheets
+ * are gated the same way and for the same reason.
+ *
+ * WHY IT ALLOWLISTS `draft` RATHER THAN REFUSING `approved`
+ *
+ * An exact `status === "approved"` test is correct today and stops being correct
+ * the moment the enum grows a third value, silently and with no failing test —
+ * a new terminal state the portal treats as oversight would be the same hole
+ * under another name. So the gate permits the one status that asserts nothing
+ * (`draft`, which is where a diary already is) and sends every other value,
+ * known or not, through the manager check. It fails CLOSED on anything new.
+ *
+ * An absent `status` is the common case — a content edit — and passes straight
+ * through, which is the half that stops this becoming "diary editing is now
+ * manager-only". Both halves are asserted on the same route in the same test;
+ * see routes/crew-permissions-db.test.ts, where a gate that locked the whole
+ * route would fail the first row.
+ *
+ * It is applied to POST as well as PATCH, deliberately and beyond the letter of
+ * the decision, because `DiarySchema.status` is REQUIRED on create: without it
+ * a crew member refused the transition could simply create the diary already
+ * approved, and the PATCH gate would be decoration. Both clients send
+ * `status: "draft"` on create today (apps/mobile/app/diary/[siteId].tsx), so
+ * nothing in the product is affected. Flagged for the owner in the PR body.
+ */
+const DIARY_STATUS_ASSERTING_NOTHING = "draft";
+const managerToAttest = requireAtLeast("manager");
+
+const requireManagerToAttestDiaryStatus: RequestHandler = (req, res, next) => {
+  const body: unknown = req.body;
+  const status =
+    body !== null && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>).status
+      : undefined;
+  // No status in the body at all: a content edit, which is crew's daily work.
+  if (status === undefined) return next();
+  // Still a draft: nothing is being attested to.
+  if (status === DIARY_STATUS_ASSERTING_NOTHING) return next();
+  // `approved`, or any value the enum grows later. Fails closed.
+  return managerToAttest(req, res, next);
+};
+
+projectsRouter.post("/projects/diaries", requireManagerToAttestDiaryStatus, async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const parsed = DiarySchema.safeParse(req.body ?? {});
   if (!parsed.success) {
@@ -276,7 +339,7 @@ projectsRouter.post("/projects/diaries", async (req, res) => {
   return res.status(201).json({ diary });
 });
 
-projectsRouter.patch("/projects/diaries/:id", async (req, res) => {
+projectsRouter.patch("/projects/diaries/:id", requireOwnRecord("diary"), requireManagerToAttestDiaryStatus, async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const parsed = DiaryPatchSchema.safeParse(req.body ?? {});
   if (!parsed.success) {
@@ -311,7 +374,7 @@ projectsRouter.post("/projects/templates", async (req, res) => {
   return res.status(201).json({ template });
 });
 
-projectsRouter.patch("/projects/templates/:id", async (req, res) => {
+projectsRouter.patch("/projects/templates/:id", requireOwnRecord("diaryTemplate"), async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const parsed = TemplatePatchSchema.safeParse(req.body ?? {});
   if (!parsed.success) {
@@ -322,7 +385,7 @@ projectsRouter.patch("/projects/templates/:id", async (req, res) => {
   return res.json({ template });
 });
 
-projectsRouter.delete("/projects/templates/:id", async (req, res) => {
+projectsRouter.delete("/projects/templates/:id", requireOwnRecord("diaryTemplate"), async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const removed = await deleteTemplate(actor, req.params.id);
   if (!removed) return res.status(404).json({ error: "Template not found." });
@@ -340,7 +403,7 @@ const InviteSchema = z.object({
   role: z.enum(["manager", "viewer", "crew"]).default("crew"),
 });
 
-projectsRouter.post("/projects/sites/:siteId/invites", async (req, res) => {
+projectsRouter.post("/projects/sites/:siteId/invites", requireAtLeast("manager"), async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
 
   if (await isRateLimitedByAccount(actor.email, "bulk-invite", LIMITS.bulkInvitePerAccount.max, LIMITS.bulkInvitePerAccount.windowMs)) {
@@ -387,7 +450,7 @@ projectsRouter.post("/projects/sites/:siteId/invites", async (req, res) => {
   return res.status(201).json({ results });
 });
 
-projectsRouter.get("/projects/sites/:siteId/invites", async (req, res) => {
+projectsRouter.get("/projects/sites/:siteId/invites", requireAtLeast("manager"), async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const invites = await listSiteInvites(actor, req.params.siteId);
   if (invites === null) {
@@ -396,7 +459,7 @@ projectsRouter.get("/projects/sites/:siteId/invites", async (req, res) => {
   return res.json({ invites });
 });
 
-projectsRouter.delete("/projects/sites/:siteId/invites/:inviteId", async (req, res) => {
+projectsRouter.delete("/projects/sites/:siteId/invites/:inviteId", requireAtLeast("manager"), async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const removed = await deleteSiteInvite(actor, req.params.siteId, req.params.inviteId);
   if (!removed) return res.status(404).json({ error: "Invite not found." });
@@ -405,7 +468,16 @@ projectsRouter.delete("/projects/sites/:siteId/invites/:inviteId", async (req, r
 
 // ─── Site members ─────────────────────────────────────────────────────────────
 
-projectsRouter.get("/projects/sites/:siteId/members", async (req, res) => {
+// manager+, to match what actually happens rather than what the decision's
+// headline rule implies. The decision gives crew everything a manager has
+// except three named things, and a site's member roster is not one of them —
+// but listSiteMembers() refuses through canManageSite(), which admits owners,
+// managers, and a crew/viewer who personally owns the site. So an auth-only
+// gate here would state "any member" and behave as "managers only". A gate that
+// says something untrue is the defect this phase is about, so the gate states
+// the effective requirement. If crew should see the roster, the change is in
+// projectsStore.canManageSite, not here — flagged in the PR body.
+projectsRouter.get("/projects/sites/:siteId/members", requireAtLeast("manager"), async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const members = await listSiteMembers(actor, req.params.siteId);
   if (members === null) {
@@ -414,7 +486,7 @@ projectsRouter.get("/projects/sites/:siteId/members", async (req, res) => {
   return res.json({ members });
 });
 
-projectsRouter.delete("/projects/sites/:siteId/members/:email", async (req, res) => {
+projectsRouter.delete("/projects/sites/:siteId/members/:email", requireAtLeast("manager"), async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const removed = await removeSiteMember(actor, req.params.siteId, req.params.email);
   if (!removed) return res.status(404).json({ error: "Member not found." });
@@ -427,6 +499,11 @@ const AcceptInviteSchema = z.object({
   token: z.string().min(1),
 });
 
+// Deliberately NOT requireOwnRecord("site"). Progress is a shared attribute of
+// the site, not an authored record: `owner_email` on project_sites is the
+// manager who created it, and crew create none, so an ownership gate here would
+// refuse crew every progress update and delete a working field capability
+// rather than close a gap. RECORD_CLASS calls this `shared-site-attribute`.
 projectsRouter.patch("/projects/sites/:id/progress", async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
   const raw = req.body?.progressPercent;

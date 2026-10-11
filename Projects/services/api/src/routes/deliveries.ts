@@ -1,11 +1,19 @@
 import { Router } from "express";
+import { asyncSafeRouter } from "../middleware/asyncRouter";
 import { z } from "zod";
-import { requireAuth, AuthenticatedRequest } from "../middleware/auth";
+import { FIELD_ACCESS, AuthenticatedRequest } from "../middleware/auth";
+import { requireOwnRecord } from "../middleware/recordOwnership";
 import { listDeliveries, createDelivery, updateDelivery, deleteDelivery } from "../storage/deliveriesStore";
 import { rateLimit } from "../middleware/rateLimit";
 
-export const deliveriesRouter: Router = Router();
-deliveriesRouter.use(requireAuth);
+export const deliveriesRouter: Router = asyncSafeRouter();
+// Explicit requirement for this router's own paths — AUDIT L66. This line used
+// to be a PATHLESS `use(requireAuth)`, the same shape that made projects.ts
+// refuse 31 routes belonging to other routers. It did no harm here only because
+// everything mounted after it happens to require authentication anyway, which
+// is luck rather than design. Scoped now. Operational work, so the requirement
+// is identity, not rank: see FIELD_ACCESS.
+deliveriesRouter.use("/deliveries", ...FIELD_ACCESS);
 
 function getActor(req: AuthenticatedRequest) {
   return { email: req.auth.email, role: req.auth.role, companyId: req.auth.companyId, companyRole: req.auth.companyRole };
@@ -45,7 +53,7 @@ deliveriesRouter.post("/deliveries", rateLimit("deliveries-post", 60, 60 * 60 * 
   }
 });
 
-deliveriesRouter.patch("/deliveries/:id", async (req, res) => {
+deliveriesRouter.patch("/deliveries/:id", requireOwnRecord("delivery"), async (req, res) => {
   try {
     const parsed = DeliveryPatchSchema.safeParse(req.body ?? {});
     if (!parsed.success) return res.status(400).json({ error: "Invalid delivery patch.", details: parsed.error.flatten() });
@@ -58,7 +66,7 @@ deliveriesRouter.patch("/deliveries/:id", async (req, res) => {
   }
 });
 
-deliveriesRouter.delete("/deliveries/:id", async (req, res) => {
+deliveriesRouter.delete("/deliveries/:id", requireOwnRecord("delivery"), async (req, res) => {
   try {
     const removed = await deleteDelivery(getActor(req as unknown as AuthenticatedRequest), req.params.id);
     if (!removed) return res.status(404).json({ error: "Delivery not found." });

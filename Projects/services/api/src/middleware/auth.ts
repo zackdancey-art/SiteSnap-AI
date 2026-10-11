@@ -79,6 +79,34 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
   return next();
 }
 
+/**
+ * What an OPERATIONAL route requires: an authenticated member of a company, at
+ * any company role. Diaries, photographs, incidents, inspections, deliveries,
+ * timesheets, entry templates and location are the field product, and a crew
+ * member is the person who does that work — so these routes gate on identity
+ * and the stores gate on tenancy, and rank does not come into it.
+ *
+ * WHY THIS IS AN ARRAY HOLDING ONE HANDLER, AND NOT `requireAtLeast("crew")`
+ *
+ * `requireAtLeast("crew")` would read like the explicit requirement this is, and
+ * it would be a gate that cannot refuse anything. crew is rank 0, and
+ * verifyAuthToken ALWAYS derives a companyRole — an absent or unrecognised
+ * claim falls back to companyRoleFromLegacy(claims.role), never to undefined —
+ * so every request requireAuth accepts already satisfies it. A check that
+ * cannot fail is worse than no check, because it looks like protection in
+ * review and in a diff (docs/VACUITY-AUDIT.md is the standing record of what
+ * that costs here). The honest statement of "any authenticated member" is
+ * requireAuth, named so that a reader can tell a deliberate decision from an
+ * omission.
+ *
+ * It is an array so that a router states its requirement in ONE place —
+ * `router.use("/incidents", ...FIELD_ACCESS)` — rather than repeating a
+ * handler on every route, where the next route added is the one that forgets.
+ * AUDIT L66 is what happens when a router's role requirement is expressed
+ * anywhere other than against its own paths.
+ */
+export const FIELD_ACCESS: readonly RequestHandler[] = [requireAuth];
+
 // ── Company-role middleware ──────────────────────────────────────────────────
 const ROLE_RANK: Record<CompanyRole, number> = { crew: 0, viewer: 1, manager: 2, owner: 3 };
 

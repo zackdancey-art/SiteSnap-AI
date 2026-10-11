@@ -1,9 +1,17 @@
 import { Router } from "express";
+import { asyncSafeRouter } from "../middleware/asyncRouter";
 import { z } from "zod";
-import { requireAuth, AuthenticatedRequest } from "../middleware/auth";
+import { FIELD_ACCESS, AuthenticatedRequest } from "../middleware/auth";
+import { requireOwnRecord } from "../middleware/recordOwnership";
 import { listTimecards, createTimecard, deleteTimecard } from "../storage/crewStore";
 
-export const crewRouter: Router = Router();
+export const crewRouter: Router = asyncSafeRouter();
+// Explicit requirement for this router's own paths — AUDIT L66. Scoped to the
+// prefix rather than pathless, because a pathless `use` here would also run for
+// every router mounted after this one in routes/index.ts; that is exactly how
+// projects.ts came to refuse 31 routes it had never heard of. Operational work,
+// so the requirement is identity, not rank: see FIELD_ACCESS.
+crewRouter.use("/crew", ...FIELD_ACCESS);
 
 function getActor(req: unknown) {
   const r = req as AuthenticatedRequest;
@@ -112,7 +120,7 @@ const TimecardSchema = z
     }
   });
 
-crewRouter.get("/crew/timecards", requireAuth, async (req, res) => {
+crewRouter.get("/crew/timecards", async (req, res) => {
   try {
     const siteId = typeof req.query.siteId === "string" ? req.query.siteId : undefined;
     const timecards = await listTimecards(getActor(req), siteId);
@@ -123,7 +131,7 @@ crewRouter.get("/crew/timecards", requireAuth, async (req, res) => {
   }
 });
 
-crewRouter.post("/crew/timecards", requireAuth, async (req, res) => {
+crewRouter.post("/crew/timecards", async (req, res) => {
   try {
     const parsed = TimecardSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -148,7 +156,7 @@ crewRouter.post("/crew/timecards", requireAuth, async (req, res) => {
   }
 });
 
-crewRouter.delete("/crew/timecards/:id", requireAuth, async (req, res) => {
+crewRouter.delete("/crew/timecards/:id", requireOwnRecord("timesheet"), async (req, res) => {
   try {
     const removed = await deleteTimecard(getActor(req), req.params.id);
     if (!removed) return res.status(404).json({ error: "Timecard not found." });

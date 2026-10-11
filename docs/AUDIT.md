@@ -2138,6 +2138,19 @@ difference between the test and the product.
 red-on-revert verified**. The pathless gate itself is **open and deliberately unfixed, pending the
 owner's decision on the crew permission model** — raised as a Phase 1 stop condition.
 
+**Disposition, second half:** **Closed** on `feat/crew-permissions`, 11 October 2026. The owner made
+the decision the first disposition was waiting on — crew view and edit everything a manager can,
+except the supervisor dashboard, inviting anyone, removing a site and changing company settings — and
+the gate is now `projectsRouter.use("/projects", ...FIELD_ACCESS)`, scoped to the paths this router
+serves. Crew was **not** promoted to viewer; each route that needs more than identity states its own
+requirement. The carve-out above is deleted, because with the blanket gate gone the accept route
+needs identity rather than an exception. The same pathless shape in `deliveries.ts` and
+`templates.ts` — harmless only by position — was scoped in the same commit; `company.ts` is the one
+remaining instance and is recorded separately as L82. Red-on-revert verified by reinstating the
+blanket gate: four failures, including the regression test that names the pathless-versus-scoped
+mechanism directly. The permission table itself is produced against Postgres in CI
+(`routes/crew-permissions-db.test.ts`); this machine has no Postgres and could not run it.
+
 ---
 
 ### L67 — The mobile invite screen reported a successful re-send as a failure, which is the entire "I cannot re-invite an address" complaint — HIGH (correctness; the reported symptom, and the API was never at fault)
@@ -2457,3 +2470,622 @@ still caught by the owner-count check, so the hole is self-removal rather than l
 change: the param is normalised once at the top of each route and both comparisons use `sameEmail`.
 A sweep for the same pattern across the API found no other occurrence reading an address off a
 request — every remaining `email ===` compares two stored or token-derived values.
+
+### L79 — The portal's Team and Settings screens call company-scoped endpoints unconditionally, so a crew member meets an error rather than a refusal — MEDIUM (reportability; the L73 habit in a new place)
+
+Found while measuring Phase 1b, not asked for. With the projects gate scoped, crew reach the portal
+and every sidebar destination answers — except two.
+
+`app/team/page.tsx` already guards its *list* calls with `isManager`, but calls
+`fetchCompanyProfile()` unconditionally on mount. `GET /company/profile` is viewer+, so for crew it
+answers 403, and the screen renders its generic load failure. `app/settings/page.tsx` has the same
+shape: `GET /account/settings` is `requireAuth` and answers 200 for crew, but the company half of
+the page reads `/company/profile` and fails.
+
+The defect is not the 403 — the 403 is correct and is one of the three decided exceptions. The
+defect is that a refusal is reported as a breakage, which is precisely the habit L73 named. A crew
+member sees "failed to load" on two of the seven screens they are offered and has no way to know
+whether the product is broken or they are not allowed.
+
+**Closed in Phase 1b**, by the owner's decision, which took a different shape for each screen
+because the two screens are not the same kind of thing.
+
+**Team is gone for crew** — the same treatment as the supervisor dashboard, and for the same reason:
+the whole screen is company administration, so there is no personal half worth rendering. It is
+filtered out of `components/Sidebar.tsx` by a `hiddenFromCrew` flag **and** refused by
+`app/team/page.tsx` on its own, so typing the URL reaches a refusal card rather than the page. The
+nav filter is presentation; the screen's own guard is the thing that holds when someone guesses.
+
+**Settings stays and works.** Crew need their password, their notifications and sign out, and all of
+that is theirs. Only the Organisation section is withheld: it is dropped from the section list, so a
+crew member is not offered a tab that would refuse them, and the panel is guarded as well.
+
+The part of this finding that was actually the defect — the unconditional call — is fixed in both
+places by `canReadCompanyProfile` in `lib/useRole.ts`, which mirrors `requireAtLeast("viewer")` on
+`GET /company/profile`. The page asks whether the route will answer *before* calling it, rather than
+calling, catching a 403 and relabelling it "failed to load". A gentler error message would not have
+been the fix, because nothing was failing.
+
+Measured rather than reasoned, since "the request is no longer fired" is not a claim a screenshot
+can make: with a request-logging stub on the portal's configured API port, loading `/settings` as
+crew produced exactly one call, `GET /api/account/settings` — their own account, which they are
+entitled to — and loading the same build as a manager produced that call **and**
+`GET /api/company/profile`. The absent request is the evidence; the two roles differ by exactly the
+one call.
+
+### L80 — `projectsStore.canManageSite` admits a crew or viewer who personally owns a site, so "manage" means a role on some paths and ownership on others — MEDIUM (authorization; two definitions of the same word)
+
+`storage/projectsStore.ts:1191` resolves management rights as owner/manager **or** the person
+recorded as the site's creator. A company owner later demoted to crew still satisfies it for every
+site they created, and so does a crew member who created a site before `POST /projects/sites` became
+manager+.
+
+The consequence is that a route gated only on identity would *state* "any company member" and
+*behave* as "managers, plus whoever happens to have created this row" — a gate that says something
+untrue. Phase 1b closed the reachable half by putting `requireAtLeast("manager")` on the three site
+invitation routes and on `GET`/`DELETE /projects/sites/:siteId/members`, so the store's ownership
+clause can no longer be the thing that grants access on those paths.
+
+The store predicate itself is **unchanged**. Narrowing it to role alone would remove rights from any
+site whose creator is no longer a manager, which is a data-affecting change in a compliance-evidence
+product and is not a thing to do unattended.
+
+### L81 — Any authenticated company member can approve a site diary, including the crew member who wrote it — MEDIUM (compliance; an approval that does not mean what the record implies)
+
+`PATCH /projects/diaries/:id` accepts `status: "approved"` and carries no role gate beyond identity,
+before Phase 1b and after it. Crew could not reach it before only because the pathless gate refused
+them the whole router (L66); now that the gate is scoped, they can, and the Phase 1b permission
+table records `crew 200` on it as measured behaviour.
+
+The decision this phase implements says crew get diaries read and write, so this is arguably
+correct. But *approval* is not editing: a site diary marked approved is a supervisory attestation on
+a record kept for seven years, and self-approval by its author is the thing an approval step exists
+to prevent. The portal's dashboard computes an "approval rate" from this field and presents it as
+oversight.
+
+**Closed in Phase 1b**, after the owner was asked and decided: approving a diary is manager+, on the
+same reasoning as timesheets — a submitted record is a claim, an approved one is the record.
+
+The gate is **on the `status` field, not on the route**, and that distinction is the whole of it.
+Crew keep every other right on a diary: notes, photographs, weather, crew count, creating one,
+correcting one. Only the transition to `approved` is refused. A gate on the route would have passed
+any test that only asserted a 403, while turning "crew may keep a diary" into "crew may not use
+diaries" — a worse defect than the one being fixed. Both rows are therefore asserted on the same
+route in the same test, in `routes/crew-permissions-db.test.ts` and again in-memory in
+`routes/invite-accept-access.test.ts`.
+
+It **fails closed by construction** rather than by inspection: `requireManagerToAttestDiaryStatus`
+allowlists `draft`, the one value that attests to nothing, and sends every other value — including
+one a later migration adds to the enum — through `requireAtLeast("manager")`. A third status is
+refused by default and has to be deliberately admitted.
+
+`POST /projects/diaries` is gated by the same middleware, which is **beyond the letter of the
+decision** and is recorded here as such. `DiarySchema.status` is required on create, so without it a
+refused crew member could create the diary already approved and the PATCH gate would be decoration.
+Both clients send `draft` on create, so no behaviour a user can see changes.
+
+Two things the sweep settled, so the next reader does not have to repeat it. Diary status is exactly
+`draft | approved` — there is no other terminal state. And no other status enum in the API needs the
+same gate: incidents (`open | closed`) and inspections (`pending | complete`) are presented nowhere
+in the portal, sites' `active | completed | on-hold` is not oversight, and timecards carry no status
+field at all, so there is no timesheet approval here to gate. See L86 for the one transition this
+gate's shape leaves open.
+
+### L82 — `routes/company.ts` carries the same pathless `use` shape as L66, harmless today only because of mount order — LOW (latent; one reordering away from L66)
+
+`companyRouter.use(requireAuth)` at `routes/company.ts:17` has no path argument, so like the gate in
+L66 it runs for every request reaching `apiRouter` at or after it. It is harmless for two reasons
+that are both accidents of arrangement rather than properties of the code: `companyRouter` is
+mounted **last** in `routes/index.ts`, so nothing follows it to be affected; and the middleware is
+`requireAuth`, not a rank gate, so its worst effect on an unmatched path is turning a 404 into a 401.
+
+Neither reason survives a reordering, and L66 is the demonstration that mount order is not something
+a reviewer checks. Phase 1b scoped the pathless `use` in `projects.ts`, `deliveries.ts` and
+`templates.ts`; `company.ts` was left alone because it is outside the phase's file set and changing
+it alters 401-vs-404 behaviour on unmatched paths, which is observable.
+
+### L83 — The portal's `useRole()` resolves an absent `companyRole` to `viewer` — LOW (fail-open default in a permission helper)
+
+`lib/useRole.ts:57` reads `user?.companyRole ?? "viewer"`. The profile is rehydrated from
+`localStorage`, so a session stored by a build predating the field has no role at all and is treated
+as viewer by `isAtLeast`.
+
+Phase 1b did not change it, and the new `canSeeSupervisorDashboard` predicate deliberately reads the
+**raw** value rather than this default, so the dashboard decision does not inherit a default written
+for another purpose. The predicate withholds only a role known to be `crew`, which is fail-*open* in
+the other direction and is argued at its definition: refusing a manager their dashboard because
+their saved session predates the field would be invisible and unfixable by anyone who did not think
+to sign out and back in. The API refuses the dashboard's route independently, which is what makes
+either choice survivable.
+
+Recorded because a reader who finds `?? "viewer"` while auditing permissions should find this note
+rather than conclude it is the whole story.
+
+### L84 — `POST /projects/sites` is manager+: a deliberate fourth exception, not drift — DECISION (recorded so it is not "fixed" back)
+
+Not a defect. This entry exists because the next person to read the Phase 1b decision will find four
+exceptions where the decision names three, and the honest conclusion from the code alone is that one
+of them is a mistake.
+
+The decision was: crew view and edit everything a manager can, except the supervisor dashboard, with
+three exceptions — crew cannot invite anyone, cannot delete a site, and cannot change company
+settings. Measuring it surfaced a fourth route that did not fit either side cleanly, `POST
+/projects/sites`. It was put to the owner and **confirmed as a deliberate fourth exception**:
+creating a site is setup work rather than field work, and until the sites bin exists (Phase 6) an
+accidentally created site is permanent.
+
+So the gate on that route is intended. Do not relax it to match the written "three exceptions"
+without going back to the owner — the written three are the decision as first stated, and this is
+the decision as finally made. `DELETE` on a site remains refused under exception 2, independently.
+
+### L85 — The portal's diary Approve button swallows its own failure: `catch (e) { console.error(e); }` — MEDIUM (reportability; the L73 habit in a fourth place)
+
+`app/reports/page.tsx`'s `handleApprove` sends the PATCH, and on any error logs to the console and
+clears the spinner. Nothing reaches the person. The button simply stops spinning and the row does
+not change, which is indistinguishable from a slow network, a bug, and a refusal.
+
+Phase 1b made this unreachable for the roles the API refuses — the button is no longer rendered for
+crew or viewer, via `canApproveDiary` — but that is avoidance, not a fix. Every other failure on
+that path still lands in the same silent branch: an expired session, a diary deleted by someone
+else, a 500. The gate removes the one case that was about to become common; it does not make the
+control honest.
+
+Not fixed here because the shape of the fix is the L73 one — route the error through the shared
+error channel the other screens now use — and doing that on one button in a permissions change
+would leave the reports page half converted. It belongs with the rest of L73's remaining call sites.
+
+### L86 — The diary gate allowlists `draft`, so crew can still move an approved diary back to draft — LOW (a consequence of L81's fix, surfaced for decision rather than taken unilaterally)
+
+`requireManagerToAttestDiaryStatus` permits `status: "draft"` for anybody and gates every other
+value at manager+. That is what lets crew create and correct diaries, which is the point. It also
+means the reverse transition — approved back to draft — is open to crew, and mobile offers it:
+`handleRevertToDraft` in `app/diary/[siteId].tsx`, which prompts for an audit reason and records it
+in the diary's edit log.
+
+This is a different transition from the one the owner named, so it was **deliberately left
+ungated** rather than tightened in passing: the instruction for this phase was to gate approval and
+to report anything else rather than extend the refusal unasked. It is recorded because it is a
+direct consequence of the implementation's shape, not an independent discovery — an allowlist of
+`draft` could not have produced any other result.
+
+The argument for tightening it: an approval that the approved party can unilaterally undo is a
+weaker attestation than the compliance record implies, and the edit-log entry is a record of the
+reversal, not a control on it. The argument against: a crew member who spots an error in a diary
+that was approved too early currently has a way to correct it that leaves a reasoned trail, and
+removing that leaves them with no way at all until a manager is reachable.
+
+The change, if the owner wants it, is one asymmetry rather than a redesign: allow `draft` on POST
+only, and refuse any `status` on PATCH. Owner's call.
+
+### L87 — The in-memory projects store had a `site_members` escape hatch the Postgres store did not, and one test was passing on it while asserting a cross-company read — MEDIUM (test integrity; a green assertion measuring the opposite of its name)
+
+`projectsStore.canAccessRow` — the predicate the corrected crew decision replaced — admitted a row
+when the actor was a member of its site, by consulting an in-memory `memberSiteIds` set. That set
+was keyed on `site_id` and `member_email` **only**. It never looked at `company_id`, so in the
+in-memory store a `site_members` row granted access to a site belonging to a different company.
+
+The Postgres store has no equivalent: `project_sites` is FORCE RLS, so `withTenant` on the actor's
+own company returns zero rows regardless of any membership row. The two stores therefore disagreed,
+and the disagreement was load-bearing for a test.
+
+`routes/invites.test.ts`'s "invited member sees the site in their sites list" (then at line 266)
+registered a member, accepted a site invitation, and then re-queried `GET /projects/sites` with the
+token from **registration** rather than the fresh token `POST /projects/invites/accept` returns.
+`registerAndLogin` passes no `companyName`, so every registration mints its own company — meaning
+the stale token's `companyId` was the member's own empty company, not the inviting one. The test was
+asserting that a token scoped to company A can see a site in company B. It passed only because of
+the escape hatch above, and it would have failed the first time it ran against Postgres.
+
+Fixed in the crew-permissions branch: the test uses the token the accept handler returns, and the
+opposite control is asserted on the same route in the same test — the stale token must **not** see
+the site. Without that second half the first assertion would pass equally well if `/projects/sites`
+had started returning every site in the database. The escape hatch went with `canAccessRow`;
+`storage/recordScope.ts` now answers read and write separately and neither consults `site_members`.
+
+### L88 — `updateSiteProgress` refused every crew member in the in-memory store and allowed every crew member in Postgres — MEDIUM (two products; whichever one you tested was not the one that shipped)
+
+`projectsStore.updateSiteProgress` (`storage/projectsStore.ts:1766`). The in-memory path narrowed
+crew to sites they own. Crew own none — they cannot create a site, which is exception 2 of the
+approved permission table — so the condition was unsatisfiable and the in-memory store refused
+every crew progress update. The Postgres path below it (now line 1786) has no ownership clause at
+all and allowed them all.
+
+Neither behaviour was chosen. The in-memory one is a side effect of reusing one predicate for read
+and write, and it is the one the whole in-memory suite measures, so the suite was describing a
+product that does not exist in production.
+
+Resolved in favour of the Postgres behaviour, which is also the correct one: progress is a shared
+attribute of the site, not an authored record. `project_sites.owner_email` is the manager who
+created the site, so an ownership gate there would refuse crew every progress update and delete a
+working field capability rather than close a gap. `RECORD_CLASS` in `storage/recordScope.ts` calls
+this a `shared-site-attribute` and `canEditRow` admits anyone in the company; both paths now ask it.
+`PATCH /projects/sites/:id/progress` carries a comment saying it is deliberately **not** gated.
+
+### L89 — Two Postgres update paths had no authorship check at all, while their in-memory twins did — HIGH (authorization; a crew member could rewrite anybody's incident or signed inspection in production)
+
+`incidentStore.updateIncident` (`storage/incidentStore.ts:188`) and
+`inspectionStore.updateInspection` (`storage/inspectionStore.ts:264`). Each has an in-memory branch
+that checked the row's owner and a Postgres branch whose `WHERE` was `id = $1 AND company_id = $2
+AND deleted_at IS NULL` and nothing more. So in production any authenticated member of a company
+could `PATCH` any incident or any inspection in it. For inspections that includes one that has
+already been signed: `voidStaleSignaturesOnClient` voids the signature when content changes, so the
+edit is recorded, but the edit itself was never refused.
+
+This is L65's shape for the fourth and fifth time — the in-memory store and the Postgres store
+answering an authorization question differently — and it is the reason the approved permission
+table could not see it. Every write that table measured was a crew member writing their **own**
+row, which both branches allow, so thirteen green writes said nothing about the thirteen refusals
+that should have existed beside them.
+
+Fixed: both paths now append `editOwnershipSql(actor, kind, params)`, and the thirteen `PATCH`/
+`DELETE` routes carry `requireOwnRecord(kind)` so the refusal is a 403 at the route rather than the
+404 a narrowed `UPDATE` produces. Both layers stay: deleting the middleware degrades 403 to 404, it
+does not open the row.
+
+### L90 — The timesheet query ORed in `site_members`, so a crew member on a shared site could read a colleague's pay — HIGH (privacy; pay information disclosed by a clause written for site assignment)
+
+`crewStore`'s scope clause (now the comment at `storage/crewStore.ts:30`). `crew_timecards` carries
+`owner_email`, and the clause admitted a row when the actor owned it **or** was a member of its
+site. On any site with more than one crew member that is every timecard on the site: hours, start
+and end times, break minutes, overtime and trade, for everybody.
+
+The owner's decision names this record as the exception in the other direction — "Timesheets are
+the exception I am naming: crew see and edit only their own. That is pay information, not a shared
+site record." `RECORD_CLASS` calls it a `personal-record`, `readVisibility` returns `own-rows` for
+crew, and the membership branch is gone. A manager still sees everyone's, which is the whole point
+of the record existing.
+
+The clause was not malicious or careless — it was written for a site-assignment model that the
+product does not have, and it is the same half-wiring the read-side scoping bug came from. That is
+the argument for keeping the rule in one named place; see the header of `storage/recordScope.ts`.
+
+### L91 — `POST /inspections/:id/signatures/:sigId/void` has no gate of any kind, and `inspection_signatures` has no author column to build one from — MEDIUM (compliance; the one control on a signed record is open to everybody) — OWNER'S DECISION NEEDED
+
+`routes/inspections.ts:229`. The route sits behind `FIELD_ACCESS` (`requireAuth` only) and calls
+`voidSignature(getActor(req), req.params.sigId, reason)` with no role gate and no ownership gate. So
+any authenticated member of the company can void any signature on any inspection in it.
+
+Voiding is the heaviest action available on a signed compliance record — it is what turns a signed
+inspection back into an unsigned one — and it is the one write on the inspection surface that was
+left out of the ownership sweep, deliberately, because **there is nothing to gate on**.
+`inspection_signatures` records `signer_name` as free text and no `owner_email`. Authorship cannot
+be expressed, so `requireOwnRecord` has no lookup to perform and `canEditRow` has no row shape to
+evaluate.
+
+Three possible answers, and the choice is the owner's because each changes what a crew member can
+do in the field:
+
+1. **Manager+.** One line, no migration, consistent with diary approval being manager+ (L81): if
+   crew cannot attest, crew cannot un-attest. Costs a crew member the ability to correct a
+   mis-signature on the spot.
+2. **The signer, by identity.** Needs a migration to add `signed_by_email` and a backfill decision
+   for existing rows, which is a compliance-evidence question, not a schema one. Left alone under
+   the standing rule that existing records are not backfilled without being told.
+3. **Leave it open and rely on the void reason and the audit trail.** Defensible while every user
+   is in the same small company; it is a record of who voided it, not a control on whether they may.
+
+Recorded unfixed. Option 1 is the cheap one and is what the rest of the attestation surface already
+does, but tightening it was not in this phase's instruction and it is not a consequence of anything
+this phase changed.
+
+### L92 — The report period window anchors on the latest entry the caller can see, not on a date — MEDIUM (correctness; "this month" means a different month per caller and per site)
+
+`routes/ai.ts:208`, `filterEntriesByPeriod`. The function sorts the entries it is given, takes the
+**last** one, and builds the window from that: `daily` keeps the entries sharing that entry's date,
+`weekly` keeps that date minus six days, `monthly` keeps that date's calendar month.
+
+So the period is a function of the data, not of the request. A site whose last entry was in August
+produces an "August monthly report" in October with no indication that it is not October's, and a
+site with no entries in the requested period silently produces a report for whenever its last
+activity was. There is no `from`/`to` on the request and no way to ask for a month that has passed.
+
+It also means the window moves with the caller's visibility — which is precisely what the corrected
+crew decision just changed. Before it, a crew member's `listEntries` returned only their own rows,
+so the anchor was their own last entry; now it is the company's. The same request from the same
+person on the same day could have produced a different month's report yesterday.
+
+**Not fixed.** Report periods are Phase 3 of the owner's plan, and this is that phase's first
+question rather than a defect to patch here: a real fix adds an explicit date range to the request
+and changes what every caller sends.
+
+### L93 — The twelve-photograph ceiling takes the twelve **oldest** photographs in the period — MEDIUM (feature degradation; a monthly report's images are all from the first days of the month)
+
+`routes/ai.ts:348`, `buildVisionInputs`, `maxImages = 12` at line 351. The entries it receives come
+from `filterEntriesByPeriod`, which returns them **ascending** by date. The loop walks entries in
+that order and stops once twelve images are attached.
+
+So on any site that logs more than twelve photographs in the period — a week of normal capture on a
+two-crew site — every image the model sees is from the earliest entries, and the reported progress
+is the progress at the start of the window. Nothing in the output says photographs were dropped.
+For a product whose headline claim is a narrative written from the site's photographs, this is the
+most consequential of the report findings.
+
+Two smaller defects in the same function: the `break` at line 356 leaves the inner photo loop only,
+so the outer entry loop keeps running once the ceiling is reached, re-breaking per entry; and the
+per-image instruction tells the model to cite the image as `'Photo ' + includedImages`, a number
+assigned by attachment order, which does not correspond to anything the reader of the report can
+see.
+
+**Not fixed.** The twelve-photograph ceiling is named as Phase 8 work ("report safeguards, twelve-
+photograph ceiling, cost modelling"), and which twelve to keep is a cost decision, not a bug fix —
+spreading them across the window, or raising the ceiling, changes the per-report token bill.
+
+### L94 — `totalPhotosAttached` and the per-entry `photoCount` sum disagree, and the model is told both — MEDIUM (correctness of the generated document; the AI reports photographs it was not shown)
+
+`routes/ai.ts:632`. `totalPhotosAttached: imageCount` is what `buildVisionInputs` actually attached:
+at most twelve, minus anything `normalizeBase64Image` could not resolve. The `entries` array in the
+same payload carries `photoCount: (entry.photos || []).length` per entry — the **full** count, with
+no cap and no drop-outs.
+
+A month with forty-seven photographs is therefore described to the model as
+`totalPhotosAttached: 12` beside per-entry counts summing to forty-seven, with no statement of which
+twelve. The model has been observed to reconcile that by describing photographs it cannot see, which
+on a seven-year compliance record is worse than reporting fewer.
+
+**Not fixed** — same phase as L93, and the honest fix depends on L93's answer: if the ceiling stays,
+the payload needs to say which entries the images came from and that the rest were omitted.
+
+### L95 — `normalizeBase64Image` returns `null` on five different failures and every one of them is silent — MEDIUM (observability; a photograph that never reached the AI is indistinguishable from one that was not taken)
+
+`routes/ai.ts:307`. The function returns `null` when: the base64 payload is a `data:` URL with no
+comma-separated body; there is neither a base64 payload nor a `storageKey`; the `storageKey` does
+not yield an upload id; the key is not in the canonical `uploads/<id>-<filename>` form; or the
+upload does not belong to the actor's company. The last two are the H7 cross-tenant guard and are
+correct refusals. The caller — `buildVisionInputs` line 358 — does `if (!imageUrl) continue;` for
+all five.
+
+Only one path logs anything, and it is the one that is least likely: a `console.warn` inside the
+`catch` around `mediaStorage.readFile` (line 342). A photograph refused by the ownership check, or
+one whose `storageKey` is simply the wrong shape, produces no log line, no counter, and nothing in
+the response. The report is generated, returns 200, and reads as though those photographs were never
+taken.
+
+This is the same shape as C1's provenance half: a silent downgrade of the headline feature. It is
+also the finding most likely to be masking the others — L93 and L94's numbers cannot be interpreted
+without knowing how many images were dropped rather than capped.
+
+**Not fixed.** The fix is a count per reason, surfaced in the response and the generation log line,
+which belongs with the report-safeguards phase and with C1's provenance work rather than here.
+
+### L96 — The report payload drops the author of every entry, so the generated diary cannot attribute anything — MEDIUM (compliance; a site diary that does not say who recorded what)
+
+`routes/ai.ts:743`, the mapping inside `resolveDiaryRequest`. Every `EntryRecord` carries
+`ownerEmail` — it is on the row, it is mapped by `mapEntry`, and `listEntries` returns it. The
+mapping that builds the AI payload lists `date`, `locationAddress`, `weather`, `crewCount`, `notes`,
+`photos` and `timestamp`, and `ownerEmail` is not among them.
+
+Before the corrected crew decision this cost little: a crew member's `listEntries` returned only
+their own rows, so every entry in their report was theirs by construction. It now returns the whole
+company's, so a single monthly report routinely contains entries recorded by several different
+people and says so nowhere. The document a dispute would be settled with cannot answer who wrote
+which line.
+
+Note that the fix has a privacy dimension rather than being purely additive: `ownerEmail` is an
+email address, and the standing telemetry rule for this product is identifiers and counts, no
+personal content. A display name, or the `workerName` already on the timecard, is the likelier
+right field — which is a decision, not a one-line patch.
+
+**Not fixed**, recorded for the report phase.
+
+### L97 — Five entry fields the capture form collects are dropped before the report sees them — MEDIUM (feature gap; safety fields are captured, stored, and then excluded from the document they exist for)
+
+`routes/ai.ts:743`. `swmsRef`, `hazardNotes`, `toolboxTalk`, `notesMode` and `hourlyNotes` are all
+on `EntryRecord` (`storage/projectsStore.ts:44-50`), all persisted, all mapped back by `mapEntry`
+(lines 314-316 and following) — and none of them is in the mapping that builds the AI payload.
+
+The first three are the safety record: the SWMS reference, the hazard notes, and whether a toolbox
+talk was held. They are the fields a regulator asks about, the form prompts for them, and they do
+not reach the generated diary at all. The last two are the shape of the notes: `notesMode` says
+whether the entry was captured as free text or hour by hour, and `hourlyNotes` holds the hourly
+breakdown — so for an entry captured hourly, the payload's `notes` field is the free-text one, which
+may be empty, and the actual content is dropped.
+
+The second half is the more serious of the two: it is not a missing enrichment, it is the entry's
+own content going missing. An hourly-notes entry can reach the model as effectively blank.
+
+**Not fixed** — these belong with the report payload work, and `hourlyNotes` needs a decision about
+how it is rendered into the prompt rather than just being passed through.
+
+### L98 — `listEntries`' default `limit = 200` is applied before the period filter, which is L45's fifty-entry truncation in a second place — MEDIUM (silent truncation; the same shape as a defect already fixed once)
+
+`routes/ai.ts:737` calls `listEntries(actor, siteId)` with no limit, taking the default
+`limit = 200` (`storage/projectsStore.ts:457`). The query is `ORDER BY timestamp DESC LIMIT 200`
+(line 480), and `filterEntriesByPeriod` then narrows that 200 to the period. So the period chooses
+from the two hundred most recent entries, not from the site's entries.
+
+**Asked and answered: this is a second instance of the same shape, not the same defect.** The two
+are worth distinguishing because the relationship is more awkward than either answer alone:
+
+- L45's truncation was `z.array(DiaryEntrySchema).max(50)` on the **request schema** — a cap on
+  entries the *client* sent, which the portal did not know about. It was fixed by having the server
+  load the entries itself.
+- This one is a cap inside that server-side load. So the L45 fix did not remove the truncation, it
+  **moved** it: from the client's payload to the server's query, and from 50 to 200. The code path
+  this finding is about is the one L45's fix introduced as the remedy.
+
+The impact is narrower than L45's, and the direction matters. Because the `ORDER BY` is `DESC` and
+the window anchors on the **latest** entry (L92), truncation drops the oldest rows, which are
+usually outside the period anyway. It bites when the anchored period itself holds more than two
+hundred entries — and that got considerably more reachable this phase: `listEntries` is now
+company-wide for crew rather than own-rows, so a site with several people capturing daily can clear
+two hundred entries in a month where before only one person's rows counted.
+
+**Not fixed.** The right fix is bounded by L92 — once a report takes an explicit date range, the
+query should filter by that range in SQL rather than paginate and then filter, which removes the cap
+as a concept instead of raising the number. Raising 200 to some larger number would hide the same
+defect for longer, which is what happened the first time.
+
+---
+
+### L99 — a predicate naming a column that does not exist, and the route answered nothing at all — HIGH (found by CI on `feat/crew-permissions`; two defects, one of them systemic)
+
+Two findings. The first is a one-line typo-class bug that had been live for months. The second is the
+reason nobody noticed, and it applies to forty-one routes rather than one.
+
+#### The statement
+
+`PATCH /api/projects/sites/:id/progress` ran, in `storage/projectsStore.ts`:
+
+```sql
+UPDATE project_sites SET progress_percent = $2
+WHERE id = $1 AND company_id = $3 AND deleted_at IS NULL RETURNING *
+```
+
+`project_sites` has no `deleted_at` column. Postgres rejected the statement outright:
+
+```
+ERROR:  column "deleted_at" does not exist at character 93
+```
+
+So **every** progress update against Postgres has failed since the predicate was written — which
+`git log -S 'company_id = $3 AND deleted_at IS NULL RETURNING'` pins to commit `1141657`
+("feat(api): company + role-based access model (Parts 1-3)"), long before this branch. It is a
+pre-existing production defect, not a regression; this branch is simply the first thing ever to
+execute that route against a real database, because the in-memory suite cannot.
+
+**The suspicion that `recordScope.ts`'s SQL emitter was adding a soft-delete clause is wrong, and
+was checked rather than accepted.** `deleted_at` appears exactly once in `projectsStore.ts` and zero
+times in `recordScope.ts`, whose two emitters (`readVisibilitySql`, `editOwnershipSql`) have one
+possible output each: `owner_email = $n`. The predicate was a hand-written literal.
+
+Which tables actually have the column, since the same mistake is available anywhere:
+
+| has `deleted_at` | does not |
+|---|---|
+| `crew_timecards`, `incidents`, `inspections`, `material_deliveries` (all four at CREATE time) | `auth_invites`, `auth_password_reset_tokens`, `auth_pending_registrations`, `auth_users`, `companies`, `company_backfill_conflicts`, `entry_templates`, `inspection_signatures`, `inspection_templates`, `project_diaries`, `project_entries`, `project_sites`, `project_templates`, `push_tokens`, `site_invites`, `site_members`, `uploads`, `worker_locations` |
+
+Every other `deleted_at` reference in the API source targets one of the four that has it. This was
+the only one pointing at a table that does not.
+
+`SiteRecord.deletedAt` was a phantom field: declared on the type, never written by any code path,
+never read by `mapSite`, and guarded once in the in-memory branch (`if (!existing ||
+existing.deletedAt)`) where it could only ever be undefined. Sites are **hard** deleted in both
+stores — `memory.sites.delete(siteId)` and `DELETE FROM project_sites`. A declared field that
+nothing populates is how a predicate like this comes to look plausible in review.
+
+**Fixed** by removing all three manifestations — the type field, the dead in-memory guard, and the
+predicate — not by adding the column. No migration. Soft-delete for sites belongs to **Phase 6**
+with the bin and the 90-day purge, where it arrives as a migration plus a mapper plus a list filter,
+the way the other four record types already have it.
+
+#### The third consequence of L88
+
+L88 recorded that this one route refuses every crew member in memory and allows every crew member in
+Postgres, and that **neither behaviour was chosen**. This is its third consequence: the in-memory
+path answered `404` (visible twice in the same CI log) while Postgres hung, so the divergence hid a
+hard SQL error behind a plausible-looking status code for the entire life of the defect. The test
+that found it is the first to drive this route against Postgres at all.
+
+#### The route sent no response — and this is the systemic half
+
+The database rejected the statement at `22:41:30.648`. The test's `fetch` gave up at `22:46:31` —
+**five minutes later, on a client timeout.** The access log line reads:
+
+```
+PATCH /projects/sites/.../progress - - - - ms
+```
+
+No status, no duration, because `httpLogger` records on response finish and the response never
+finished. The mechanism, confirmed rather than assumed:
+
+1. `express@4.22.1` does not await route handlers. It forwards an error only when a handler throws
+   **synchronously** or calls `next(err)`; the promise an `async` handler returns is discarded.
+2. `routes/projects.ts`'s progress handler was `async` with a bare `await updateSiteProgress(...)`
+   and no `try`/`catch`, so the store's rejection became the handler's rejected return value.
+3. Nothing wrote to `res`. The socket stayed open.
+4. The process survived rather than crashing because `bootstrap()` registers
+   `process.on("unhandledRejection", ...)` (`server.ts:244`) which logs and captures to Sentry but —
+   unlike the `uncaughtException` handler immediately above it — **does not shut down**. Registering
+   any listener also suppresses Node's default `--unhandled-rejections=throw`.
+
+So **Sentry received an event and the person received a spinner that never resolves.** That is the
+exact failure shape this project has been closing everywhere else, reached from the server side.
+
+A sweep of all **109 route registrations** across the fourteen route files classified each `await` as
+inside or outside a `try`:
+
+| shape | count |
+|---|---|
+| `async`, no `try` at all — a store rejection hangs the request | **34** |
+| `async`, `try` present but at least one `await` outside it | **7** |
+| `async`, every `await` inside a `try` | 36 |
+| synchronous | 6 |
+| **total examined** | **109** |
+
+**Forty-one of 109 could hang.** The thirty-four bare ones: `auth.ts:563,615,621,632,708,759`;
+`projects.ts:177,182,201,207,217,223,231,241,252,258,320,342,354,360,367,377,388,406,453,462,480,489,507,519`;
+`push.ts:26,39,45`; `uploads.ts:80`. The seven partials are all the same shape and were
+spot-checked as genuine rather than inferred — `await isRateLimitedByIp(req, ...)` sitting in front
+of the `try`, Redis-backed and able to reject: `auth.ts:259,375,687,722,778,882` and
+`uploads.ts:113`.
+
+**Fixed** with `middleware/asyncRouter.ts` — `asyncSafeRouter()`, a drop-in `express.Router()`
+replacement that routes a handler's rejection to `next(err)` — applied to all fourteen route files.
+Chosen over forty-one `try`/`catch` blocks because that fixes forty-one routes and nothing about the
+forty-second; the next route anyone writes is safe by default, and a structural test refuses a bare
+`Router()` in a route file.
+
+**The Sentry constraint holds.** `Sentry.setupExpressErrorHandler(app)` sits in front of the fallback
+error middleware, so anything reaching `next(err)` is reported as a server error. That is only safe
+because **no authorisation refusal in this API is an exception** — verified exhaustively:
+`res.status(403).json(...)` at `middleware/auth.ts:118,129,147`, `middleware/recordOwnership.ts:93`
+and `routes/projects.ts:420,423,457,484,541`; `routes/auth.ts:641`; and `assertSameCompany`
+(`utils/companyScope.ts`) writes its own 404 and returns `false`. The single `throw` in middleware
+(`recordOwnership.ts:82`, an unmapped `RecordKind`) runs at factory time, not per request. So
+forwarding rejections cannot turn a refusal into a reported 500.
+
+#### What the test proves, and what it deliberately does not
+
+`routes/async-route-errors.test.ts`, three tests:
+
+- The mechanism, both routers side by side on the same handler and the same error: the bare path
+  produces no response, the wrapped path a 500 from the fallback handler.
+- The real route, with `updateSiteProgress` forced to reject: a response must **arrive at all**
+  within 2 s, with an unpatched 200 as the positive control before it and another after, so the
+  assertion cannot pass against a route that is broken, deleted or unmounted.
+- Structurally, that no route file calls bare `Router()`, plus a pin on Express major 4 so an upgrade
+  to 5 (which forwards rejections itself) has to decide whether the wrapper still earns its place.
+
+Red-on-revert measured: with `routes/projects.ts` put back to `Router()`, the suite fails in
+**2.08 s** naming the cause, where the original defect took five minutes to report a client timeout.
+
+The property under test is weaker and more fundamental than any status code, and that is the point: a
+test that awaits a status and gets **no response at all** reports a timeout, minutes later, and names
+the timeout rather than the route. Every other assertion in this suite is of the form "this route
+answers N" and none of them can fail this way.
+
+#### The related finding that is NOT fixed
+
+`bootstrap()`'s `unhandledRejection` handler does not exit. For a rejection that escapes a request
+(now much rarer) that is a reasonable choice; for one that leaves a request hanging it converted a
+fast crash-and-restart into a silent five-minute stall. Whether it should `shutdown` like its
+`uncaughtException` neighbour is a deployment decision, not a code cleanup — recorded here, not
+changed.
+
+#### Postscript — a pin that had never been taken
+
+Fixing the hang let the write sequence in `crew-permissions-db.test.ts` reach its end for the first
+time, and it immediately failed its own population pin: `14 !== 13`.
+
+The fourteenth step is `delete that entry` (`DELETE /projects/entries/:id`), the last in the
+sequence — and **the population had not changed.** `git log -S` places all fourteen step labels and
+the pin itself in one commit, `897fc80`: `EXPECTED_WRITE_STEPS = 13` was written against a
+fourteen-step sequence and was wrong from the moment it was written. The approve-diary → edit-diary
+swap in `5d845ef` replaced a step without adding one.
+
+It stayed invisible because step 13 is the progress update. The statement errored, the route answered
+nothing, the run died on a client timeout, step 14 never executed and the assertion was never
+reached. **A pin written by counting by hand, never once measured, read as green for the life of the
+branch** — the same shape as the vacuity findings it was built to prevent, one level up: the guard
+was sound and the number in it was never checked against a run.
+
+Raised to 14, with the reasoning at the line.
+
+A second harness defect surfaced with it, and is worth more than the number. The completeness test
+reported `the write half did not run — 0 !== 13` for a sequence that had just executed fourteen steps
+in both roles, because test 5 asserted its count *before* recording its rows — so a changed
+population and a sequence that genuinely never ran produced the identical message. Those are two
+problems with two different fixes. The recording loop now runs ahead of every assertion about it, and
+the completeness test checks "recorded nothing" and "count missed the pin" separately, with a message
+each. The guard itself has now refused to report a pass on an unexecuted table twice and is unchanged
+in strength.

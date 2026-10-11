@@ -59,6 +59,10 @@
     "lib/signature-input.ts",
     "lib/signature-input.test.ts",
     "lib/invite-refusal.ts",
-    "lib/invite-refusal.test.ts"
+    "lib/invite-refusal.test.ts",
+    "lib/permissions.ts",
+    "lib/permissions.test.ts",
+    "lib/session-routing-audit.ts",
+    "lib/session-routing-audit.test.ts"
   ]
 }

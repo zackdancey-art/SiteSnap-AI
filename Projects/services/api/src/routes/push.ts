@@ -1,10 +1,17 @@
 import { Router } from "express";
+import { asyncSafeRouter } from "../middleware/asyncRouter";
 import { z } from "zod";
-import { requireAuth, AuthenticatedRequest } from "../middleware/auth";
+import { FIELD_ACCESS, AuthenticatedRequest } from "../middleware/auth";
 import { rateLimit } from "../middleware/rateLimit";
 import { upsertPushToken, deletePushToken, getTokensForUser } from "../storage/pushStore";
 
-export const pushRouter: Router = Router();
+export const pushRouter: Router = asyncSafeRouter();
+// Explicit requirement for this router's own paths — AUDIT L66. Scoped to the
+// prefix rather than pathless, because a pathless `use` here would also run for
+// every router mounted after this one in routes/index.ts; that is exactly how
+// projects.ts came to refuse 31 routes it had never heard of. Operational work,
+// so the requirement is identity, not rank: see FIELD_ACCESS.
+pushRouter.use("/push", ...FIELD_ACCESS);
 
 function getActor(req: unknown) {
   const r = req as AuthenticatedRequest;
@@ -18,7 +25,6 @@ const RegisterSchema = z.object({
 
 pushRouter.post(
   "/push/tokens",
-  requireAuth,
   rateLimit("push-register", 10, 60 * 60 * 1000),
   async (req, res) => {
     const parsed = RegisterSchema.safeParse(req.body ?? {});
@@ -30,13 +36,13 @@ pushRouter.post(
   }
 );
 
-pushRouter.delete("/push/tokens/:token", requireAuth, async (req, res) => {
+pushRouter.delete("/push/tokens/:token", async (req, res) => {
   const removed = await deletePushToken(getActor(req), decodeURIComponent(req.params.token));
   if (!removed) return res.status(404).json({ error: "Token not found." });
   return res.json({ ok: true });
 });
 
-pushRouter.get("/push/tokens", requireAuth, async (req, res) => {
+pushRouter.get("/push/tokens", async (req, res) => {
   const tokens = await getTokensForUser(getActor(req));
   return res.json({ tokens });
 });

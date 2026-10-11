@@ -1,6 +1,8 @@
 import { Router } from "express";
+import { asyncSafeRouter } from "../middleware/asyncRouter";
 import { z } from "zod";
-import { requireAuth, AuthenticatedRequest } from "../middleware/auth";
+import { FIELD_ACCESS, AuthenticatedRequest } from "../middleware/auth";
+import { requireOwnRecord } from "../middleware/recordOwnership";
 import {
   listTemplates, createTemplate, deleteTemplate,
   listInspections, createInspection, updateInspection, deleteInspection, getInspection,
@@ -10,7 +12,13 @@ import {
   InspectionSignatureRole,
 } from "../storage/signatureStore";
 
-export const inspectionsRouter: Router = Router();
+export const inspectionsRouter: Router = asyncSafeRouter();
+// Explicit requirement for this router's own paths — AUDIT L66. Scoped to the
+// prefix rather than pathless, because a pathless `use` here would also run for
+// every router mounted after this one in routes/index.ts; that is exactly how
+// projects.ts came to refuse 31 routes it had never heard of. Operational work,
+// so the requirement is identity, not rank: see FIELD_ACCESS.
+inspectionsRouter.use(["/inspections", "/inspection-templates"], ...FIELD_ACCESS);
 
 function getActor(req: unknown) {
   const r = req as AuthenticatedRequest;
@@ -90,7 +98,7 @@ const SignatureVoidSchema = z.object({
 
 // ─── Templates ──────────────────────────────────────────────────────────────
 
-inspectionsRouter.get("/inspection-templates", requireAuth, async (req, res) => {
+inspectionsRouter.get("/inspection-templates", async (req, res) => {
   try {
     const templates = await listTemplates(getActor(req));
     return res.json({ templates });
@@ -100,7 +108,7 @@ inspectionsRouter.get("/inspection-templates", requireAuth, async (req, res) => 
   }
 });
 
-inspectionsRouter.post("/inspection-templates", requireAuth, async (req, res) => {
+inspectionsRouter.post("/inspection-templates", async (req, res) => {
   try {
     const parsed = TemplateSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -114,7 +122,7 @@ inspectionsRouter.post("/inspection-templates", requireAuth, async (req, res) =>
   }
 });
 
-inspectionsRouter.delete("/inspection-templates/:id", requireAuth, async (req, res) => {
+inspectionsRouter.delete("/inspection-templates/:id", requireOwnRecord("inspectionTemplate"), async (req, res) => {
   try {
     const removed = await deleteTemplate(getActor(req), req.params.id);
     if (!removed) return res.status(404).json({ error: "Template not found." });
@@ -127,7 +135,7 @@ inspectionsRouter.delete("/inspection-templates/:id", requireAuth, async (req, r
 
 // ─── Inspections ─────────────────────────────────────────────────────────────
 
-inspectionsRouter.get("/inspections", requireAuth, async (req, res) => {
+inspectionsRouter.get("/inspections", async (req, res) => {
   try {
     const siteId = typeof req.query.siteId === "string" ? req.query.siteId : undefined;
     const inspections = await listInspections(getActor(req), siteId);
@@ -138,7 +146,7 @@ inspectionsRouter.get("/inspections", requireAuth, async (req, res) => {
   }
 });
 
-inspectionsRouter.post("/inspections", requireAuth, async (req, res) => {
+inspectionsRouter.post("/inspections", async (req, res) => {
   try {
     const parsed = InspectionSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -155,7 +163,7 @@ inspectionsRouter.post("/inspections", requireAuth, async (req, res) => {
   }
 });
 
-inspectionsRouter.patch("/inspections/:id", requireAuth, async (req, res) => {
+inspectionsRouter.patch("/inspections/:id", requireOwnRecord("inspection"), async (req, res) => {
   try {
     const parsed = InspectionPatchSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -170,7 +178,7 @@ inspectionsRouter.patch("/inspections/:id", requireAuth, async (req, res) => {
   }
 });
 
-inspectionsRouter.delete("/inspections/:id", requireAuth, async (req, res) => {
+inspectionsRouter.delete("/inspections/:id", requireOwnRecord("inspection"), async (req, res) => {
   try {
     const removed = await deleteInspection(getActor(req), req.params.id);
     if (!removed) return res.status(404).json({ error: "Inspection not found." });
@@ -183,7 +191,7 @@ inspectionsRouter.delete("/inspections/:id", requireAuth, async (req, res) => {
 
 // ─── Signatures ─────────────────────────────────────────────────────────────
 
-inspectionsRouter.post("/inspections/:id/signatures", requireAuth, async (req, res) => {
+inspectionsRouter.post("/inspections/:id/signatures", async (req, res) => {
   try {
     const parsed = SignatureCreateSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -209,7 +217,7 @@ inspectionsRouter.post("/inspections/:id/signatures", requireAuth, async (req, r
   }
 });
 
-inspectionsRouter.get("/inspections/:id/signatures", requireAuth, async (req, res) => {
+inspectionsRouter.get("/inspections/:id/signatures", async (req, res) => {
   try {
     const signatures = await listSignatures(getActor(req), req.params.id);
     return res.json({ signatures });
@@ -219,7 +227,7 @@ inspectionsRouter.get("/inspections/:id/signatures", requireAuth, async (req, re
   }
 });
 
-inspectionsRouter.post("/inspections/:id/signatures/:sigId/void", requireAuth, async (req, res) => {
+inspectionsRouter.post("/inspections/:id/signatures/:sigId/void", async (req, res) => {
   try {
     const parsed = SignatureVoidSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
