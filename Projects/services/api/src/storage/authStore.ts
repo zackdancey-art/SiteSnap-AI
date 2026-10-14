@@ -770,32 +770,48 @@ export async function deletePasswordResetToken(token: string) {
   await getPgPool().query(`DELETE FROM auth_password_reset_tokens WHERE token = $1`, [token]);
 }
 
-export async function updateUserPassword(email: string, passwordHash: string) {
+/**
+ * Set a new password hash and end every session on the account.
+ *
+ * RETURNS THE NEW GENERATION, and the caller needs it. The increment revokes
+ * the credential the caller is holding RIGHT NOW — including the one they just
+ * changed their password with, on the device in their hand. So
+ * `/auth/change-password` mints a replacement at this value and hands it back;
+ * without the number it would have to re-read the row to find it, and a
+ * re-read is a second chance to read a stale cache and mint a token that is
+ * refused on arrival.
+ *
+ * `null` means there was no such account and nothing was written.
+ */
+export async function updateUserPassword(email: string, passwordHash: string): Promise<number | null> {
   if (!useDatabase()) {
     await ensureMemoryLoaded();
     const user = memoryUsers.get(email);
     if (!user) {
-      return;
+      return null;
     }
+    const next = user.tokenGeneration + 1;
     memoryUsers.set(email, {
       ...user,
       passwordHash,
-      tokenGeneration: user.tokenGeneration + 1,
+      tokenGeneration: next,
     });
     await persistMemory();
     invalidateSessionIdentity(email);
-    return;
+    return next;
   }
   // The increment is the point, not a side effect: changing a password and
   // leaving every other session signed in is not what anyone means by it, and
   // it is the one place where the person acting has already proved they are the
   // account holder (change-password verifies the current password first).
-  await getPgPool().query(
+  const result = await getPgPool().query<{ token_generation: number }>(
     `UPDATE auth_users SET password_hash = $2, token_generation = token_generation + 1
-     WHERE email = $1`,
+     WHERE email = $1 RETURNING token_generation`,
     [email, passwordHash]
   );
   invalidateSessionIdentity(email);
+  if (result.rowCount === 0) return null;
+  return result.rows[0].token_generation;
 }
 
 export async function updateUserProfile(

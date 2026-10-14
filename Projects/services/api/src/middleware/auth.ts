@@ -91,6 +91,29 @@ function extractBearerToken(req: Request): string | null {
   return token;
 }
 
+export type Credential = { token: string; transport: "bearer" | "cookie" };
+
+/**
+ * Where a credential comes from, defined once.
+ *
+ * `requireAuth` is not the only route that has to answer this: `/auth/refresh`
+ * deliberately does NOT sit behind `requireAuth` (AUDIT L74 — a token that has
+ * just expired must be able to refresh itself, and `requireAuth` refuses it by
+ * definition), so it reads the credential itself. Two hand-rolled readers would
+ * drift, and the one that drifted would be the one that stopped accepting the
+ * portal's cookie — a browser cannot send a bearer header it has no way to read.
+ *
+ * Bearer wins over the cookie when both are present, as it always has: a
+ * request carrying an explicit Authorization header means it.
+ */
+export function readCredential(req: Request): Credential | null {
+  const bearer = extractBearerToken(req);
+  if (bearer) return { token: bearer, transport: "bearer" };
+  const cookie = readSessionCookie(req);
+  if (cookie) return { token: cookie, transport: "cookie" };
+  return null;
+}
+
 /**
  * The message for a token that is cryptographically fine but no longer names a
  * usable session — the account is gone, or a revocation has moved past it. It is
@@ -133,12 +156,12 @@ const SESSION_UNAVAILABLE_MESSAGE =
  * wrong, and the reasoning is at SESSION_UNAVAILABLE.
  */
 export async function requireAuth(req: Request, res: Response, next: NextFunction) {
-  const bearer = extractBearerToken(req);
-  const token = bearer ?? readSessionCookie(req);
-  if (!token) {
+  const credential = readCredential(req);
+  if (!credential) {
     return res.status(401).json({ error: "Missing bearer token.", code: AUTH_ERROR_CODES.NO_CREDENTIAL });
   }
-  const claims = verifyAuthToken(token);
+  const bearer = credential.transport === "bearer" ? credential.token : null;
+  const claims = verifyAuthToken(credential.token);
   if (!claims) {
     // One answer for every unacceptable token. See AUTH_ERROR_CODES.
     return res.status(401).json({ error: SESSION_EXPIRED_MESSAGE, code: AUTH_ERROR_CODES.SESSION_EXPIRED });
