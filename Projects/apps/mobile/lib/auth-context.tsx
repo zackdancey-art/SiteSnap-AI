@@ -27,6 +27,22 @@ interface AuthContextType {
   logout: () => Promise<void>;
   updateProfile: (patch: Partial<User>) => Promise<void>;
   refreshToken: () => Promise<string | null>;
+  /**
+   * Store a token the app was HANDED, rather than one it went and fetched.
+   *
+   * Exists for POST /api/auth/change-password, which now answers with a
+   * replacement. A password change revokes every token on the account — that is
+   * what changing a password means — and that includes the one in this app's
+   * storage, on the device the person changed it from. Without adopting the
+   * replacement, the very next request 401s and they are signed out seconds
+   * after a successful change.
+   *
+   * refreshToken() cannot do this job: it sends the OLD token, which is exactly
+   * the one the change just revoked, so it would 401 and report the session
+   * expired. The new credential only arrives in the change-password response,
+   * so adopting it is the only route.
+   */
+  adoptToken: (token: string) => Promise<void>;
 }
 
 // Decode token expiry without full verification (verification happens server-side)
@@ -218,9 +234,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       });
       // A 401 from the refresh endpoint is the most direct evidence there is
-      // that the session is over - and it is also why refreshing cannot save
-      // an expired token: /api/auth/refresh sits behind requireAuth, so the
-      // same check that refused the original request refuses this one.
+      // that the session is over.
+      //
+      // It used to be weaker than that. /api/auth/refresh sat behind
+      // requireAuth, so it refused every expired token — the exact tokens it
+      // existed to replace — and a 401 here meant only "your token has run
+      // out", not "your session has". AUDIT L74: it now verifies with a grace
+      // window past expiry, so a token that lapsed while the phone was in a
+      // pocket or out of coverage is still renewable, and a 401 means the
+      // session is genuinely over: revoked, past the idle window, or for an
+      // account that no longer exists.
       if (res.status === 401) notifySessionExpired();
       if (!res.ok) return null;
       const data = (await res.json()) as { token?: string; user?: { email?: string; name?: string; role?: "worker" | "supervisor" | "admin"; companyRole?: "owner" | "manager" | "viewer" | "crew" } };
@@ -242,6 +265,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch {
       return null;
     }
+  };
+
+  const adoptToken = async (next: string): Promise<void> => {
+    await AsyncStorage.setItem("sitesnap.token", next);
+    setToken(next);
+    // The session was never in doubt here — the caller is holding a 200 — but
+    // clearing the latch keeps this path identical to refreshToken()'s, so a
+    // stale "session expired" banner from an earlier failure cannot outlive a
+    // credential that works.
+    clearSessionExpired();
   };
 
   const logout = async () => {
@@ -314,7 +347,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ isAuthenticated, user, lastEmail, loading, token, login, logout, updateProfile, refreshToken }}>
+    <AuthContext.Provider value={{ isAuthenticated, user, lastEmail, loading, token, login, logout, updateProfile, refreshToken, adoptToken }}>
       {children}
     </AuthContext.Provider>
   );

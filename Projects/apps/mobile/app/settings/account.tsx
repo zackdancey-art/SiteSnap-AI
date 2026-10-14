@@ -25,7 +25,7 @@ import Colors from "@/constants/colors";
  * bypass is not a guard.
  */
 export default function AccountSettingsScreen() {
-  const { user } = useAuth();
+  const { user, adoptToken } = useAuth();
   const [changingPassword, setChangingPassword] = useState(false);
   const [pwCurrent, setPwCurrent] = useState("");
   const [pwNew, setPwNew] = useState("");
@@ -61,9 +61,24 @@ export default function AccountSettingsScreen() {
         method: "POST",
         body: JSON.stringify({ currentPassword: pwCurrent, newPassword: pwNew }),
       });
+      const data = (await res.json()) as { error?: string; token?: string };
       if (!res.ok) {
-        const data = (await res.json()) as { error?: string };
         throw new Error(data.error || "Failed to change password.");
+      }
+      // ADOPT THE REPLACEMENT TOKEN BEFORE ANYTHING ELSE.
+      //
+      // Changing a password revokes every token on the account, this device's
+      // included — that is what people mean by changing a password, and the API
+      // now delivers it. The response carries the one credential that still
+      // works; storing it is what keeps a successful change from signing the
+      // person out of the app a moment later.
+      //
+      // Guarded rather than assumed: an app updated ahead of the API (an `eas
+      // update` lands on next launch, a Render deploy takes minutes) will see a
+      // response with no token, from a server that also did not revoke
+      // anything, and must carry on exactly as before.
+      if (data.token) {
+        await adoptToken(data.token);
       }
       // Clear BEFORE the alert so the guard stops treating the form as dirty the
       // moment the change lands. That is sufficient on its own: collapsing the
