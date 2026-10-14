@@ -563,15 +563,24 @@ projectsRouter.post("/projects/invites/accept", async (req, res) => {
   // Issue a fresh token so the caller's updated role takes effect immediately
   // without requiring a separate login step.
   //
-  // THIS TOKEN IS NOW LOAD-BEARING, WHERE IT USED TO BE A CONVENIENCE
+  // THIS TOKEN IS A CONVENIENCE, AND SAYING SO IS THE POINT
   //
-  // acceptSiteInvite -> setUserCompany has just incremented this user's token
-  // generation: their companyId changed, so the tokens on their other devices
-  // address the wrong tenant and must stop working. That means the credential
-  // the caller made THIS request with is, by the time we answer, no longer
-  // accepted. If they keep using it, every following request is a 401. So the
-  // replacement is not an optimisation any more -- it is the only thing that
-  // keeps a successful acceptance from presenting as an immediate sign-out.
+  // An earlier revision of this branch had `setUserCompany` increment the
+  // token generation, on the reasoning that a changed companyId makes the
+  // tokens on the holder's other devices address the wrong tenant. That made
+  // this replacement load-bearing -- and it also meant the caller's CURRENT
+  // credential stopped being accepted at the moment they used it, including at
+  // `/auth/refresh`, which is the mobile client's only recovery path. An
+  // invitee accepting an invitation landed on the login screen. Measured, not
+  // theorised.
+  //
+  // Under the model now in force (see THE SESSION MODEL at
+  // `storage/authStore.ts`) that cannot happen: the stale claim is never
+  // consulted for a decision, because `requireAuth` takes the acting company
+  // and rank from the row. The caller's existing token keeps working through
+  // the acceptance and afterwards. So this token is a cache refresh, not a
+  // rescue: the client that stores it stops carrying claims it knows are
+  // behind, which is worth doing and is not worth revoking anything for.
   //
   // It is minted from the RECORD, not from `result` and not from the claims.
   // `result` carries what the handler intended to write; the record carries

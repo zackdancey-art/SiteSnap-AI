@@ -171,55 +171,90 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     return res.status(401).json({ error: SESSION_EXPIRED_MESSAGE, code: AUTH_ERROR_CODES.SESSION_EXPIRED });
   }
 
-  // `req.auth` stays TOKEN-derived, deliberately. Every route and store below
-  // reads its actor from here, and swapping in the freshly read identity would
-  // change the tenant and rank a request executes under part-way through the
-  // request's own lifetime, in a middleware, invisibly. The generation check
-  // above is what keeps the two in agreement: a claim that no longer matches
-  // the record is refused rather than silently corrected, because a claim
-  // change increments the generation (password, company, company role).
-  (req as AuthenticatedRequest).auth = claims;
+  // ── req.auth is RECORD-derived, not token-derived ─────────────────────────
+  //
+  // This is the line the whole session model turns on: see THE SESSION MODEL at
+  // `storage/authStore.ts`'s SessionIdentity. The token proved who the caller
+  // is; the row decides what they may do. Every route and store below reads its
+  // actor from here, so taking companyId/companyRole/role from the row is what
+  // makes a demotion or a removal take effect within the cache TTL instead of
+  // whenever the holder's token happens to expire.
+  //
+  // It also means a stale claim never has to be refused. It is simply never
+  // consulted — which is why `setUserCompany` and `setUserCompanyRole` do not
+  // need to revoke anything, and why an invitee's pre-acceptance token keeps
+  // working through the acceptance instead of ending at a login screen.
+  //
+  // `email` comes from the row too, for consistency, and provably cannot
+  // differ: `findUserByEmail` matches the email exactly, so a row was only
+  // found because it is byte-identical to the claim.
+  const identity = result.identity;
+  const effective: AuthClaims = {
+    email: identity.email,
+    fullName: identity.fullName,
+    role: identity.role,
+    companyId: identity.companyId,
+    companyRole: identity.companyRole,
+    iat: claims.iat,
+    exp: claims.exp,
+    // The higher of the two. Normally the row's. The token's can lead it when
+    // revoke-all ran on another instance whose cache this one has not caught up
+    // with yet — minting a replacement at the lower value would produce a token
+    // the originating instance refuses.
+    tokenGeneration: Math.max(claims.tokenGeneration, identity.tokenGeneration),
+  };
+  (req as AuthenticatedRequest).auth = effective;
   (req as AuthenticatedRequest).authTransport = bearer ? "bearer" : "cookie";
 
-  // ── Sliding renewal, for the cookie transport only ────────────────────────
+  // ── Repair and sliding renewal, for the cookie transport only ─────────────
   //
-  // AUDIT L76: the portal signs people out every seven days, at the moment the
-  // token expires, with no renewal anywhere. The mobile app has sliding
-  // renewal of its own (it holds the token and can re-store one); a browser
-  // cannot, because the cookie is httpOnly by design. So the renewal has to
-  // happen here, on the way through, past half-life.
+  // WHY THIS IS COOKIE-ONLY, AND WHY THAT IS NOT A HALF-MECHANISM
   //
-  // Half-life rather than near-expiry so that a person who uses the portal
-  // weekly is never close to the edge, and so a renewal that fails to reach
-  // the browser has three and a half days of further attempts.
+  // A bearer caller gets no repair, and needs none. The stale claim it is
+  // holding is never used for a decision — `effective` above came from the row
+  // — so the request is already answered with the right authority. Handing the
+  // mobile client a replacement token would need a response header carrying it,
+  // which was considered and declined; without one the client has no way to
+  // pick a re-minted token up, and it does not need one. It renews on its own
+  // schedule through /auth/refresh, which mints from the row for the same
+  // reason. So: cookie callers are repaired, bearer callers are simply correct.
   //
-  // Bearer requests are excluded: re-minting for them would set a cookie on a
-  // client that does not read cookies, and the mobile client renews through
-  // /auth/refresh with its own token in hand.
-  if (!bearer) {
+  // For the portal the repair is real, because a Set-Cookie does land. Three
+  // things drive it:
+  if (!bearer && !result.stale) {
     const { tokenTtlSeconds } = getSessionTimings();
     const age = Math.floor(Date.now() / 1000) - claims.iat;
-    // Not renewed from a stale read. A stale identity is good enough to let a
-    // request through — refusing would be the fleet-wide sign-out this design
-    // exists to avoid — but not good enough to stamp into a token that then
-    // carries it for another seven days. The next request with a healthy store
-    // renews instead, and there are days of slack to do it in.
-    if (age > tokenTtlSeconds / 2 && !result.stale) {
-      // Minted from the RECORD, not from the claims being replaced. Copying the
-      // claims forward would mean a role change never propagated: a crew member
-      // demoted today would keep their old companyRole for as long as they kept
-      // using the portal. The marginal cost is zero — the row is already read,
-      // for the generation check above.
-      const identity = result.identity;
+    // (1) The claims in the cookie disagree with the row. The request itself is
+    // already correct, but leaving the cookie wrong means the portal keeps
+    // presenting stale claims and this comparison fires on every request. Write
+    // the truth into it once instead.
+    const staleClaims =
+      claims.companyId !== effective.companyId ||
+      claims.companyRole !== effective.companyRole ||
+      claims.role !== effective.role ||
+      claims.tokenGeneration !== effective.tokenGeneration;
+    // (2) Past half-life. AUDIT L76: the portal signed people out every seven
+    // days, at the moment the token expired, with no renewal anywhere. Half-life
+    // rather than near-expiry so a weekly user is never close to the edge and a
+    // renewal that fails to reach the browser has days of further attempts.
+    const pastHalfLife = age > tokenTtlSeconds / 2;
+    // (3) Never from a stale read (the `!result.stale` above). A stale identity
+    // is good enough to let a request through — refusing would be the
+    // fleet-wide sign-out this design exists to avoid — but not good enough to
+    // stamp into a cookie that then carries it for another seven days.
+    if (staleClaims || pastHalfLife) {
+      // Minted from the RECORD. Copying the claims forward would defeat the
+      // point of both branches above. The marginal cost is zero: the row is
+      // already in hand.
       setSessionCookie(
         res,
         createAuthToken({
-          email: identity.email,
-          fullName: identity.fullName,
-          role: identity.role,
-          companyId: identity.companyId,
-          companyRole: identity.companyRole,
-          tokenGeneration: identity.tokenGeneration,
+          email: effective.email,
+          fullName: effective.fullName,
+          role: effective.role,
+          companyId: effective.companyId,
+          companyRole: effective.companyRole,
+          tokenGeneration: effective.tokenGeneration,
         }),
       );
     }
