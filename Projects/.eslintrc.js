@@ -208,6 +208,22 @@ module.exports = {
       //                   API, which is the whole point of a permission table,
       //                   so there is no tenanted query for withTenant to wrap.
         "services/api/src/routes/crew-permissions-db.test.ts",
+      //   routes/sessions-and-tokens-db.test.ts
+      //                   migrations and the drain as above, plus two reads a
+      //                   store deliberately cannot give it: that
+      //                   `auth_users.token_generation` EXISTS with the right
+      //                   type before any assertion depends on it (a missing
+      //                   column reads as undefined, and `undefined < 1` is
+      //                   false - a revoked token waved through with every test
+      //                   green, which is the L11 shape), and the column's value
+      //                   after a revocation, to tell "the route answered
+      //                   correctly" apart from "the route wrote the number".
+      //                   Reading it through loadSessionIdentity would be
+      //                   reading the cache the test is trying to get behind.
+      //                   `auth_users` is not RLS-forced and carries no
+      //                   company_id predicate, so there is no tenant context
+      //                   for withTenant to set here. Exact filename again.
+        "services/api/src/routes/sessions-and-tokens-db.test.ts",
       ],
       rules: {
         "no-restricted-imports": [
