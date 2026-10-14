@@ -46,7 +46,9 @@ import type { Pool } from "pg";
 import { createApp } from "../server";
 import { getPgPool } from "../storage/postgres";
 import { withTenant } from "../storage/tenant";
+import { createUser, deleteUserAccount } from "../storage/authStore";
 import { createAuthToken } from "../utils/authToken";
+import { hashPassword } from "../utils/password";
 import { signUploadPath } from "../utils/signedUrl";
 
 if (!process.env.TEST_DATABASE_URL) {
@@ -85,8 +87,10 @@ if (!process.env.TEST_DATABASE_URL) {
   const probeRole = `media_probe_${runId.replace(/[^a-z0-9]/gi, "")}`;
   const probePassword = `Media_${Date.now()}_7kQw`;
 
-  const tokenA = createAuthToken({ email: `owner-a-${runId}@media.local`, fullName: "Owner A", companyId: COMPANY_A, companyRole: "owner", tokenGeneration: 0 });
-  const tokenB = createAuthToken({ email: `owner-b-${runId}@media.local`, fullName: "Owner B", companyId: COMPANY_B, companyRole: "owner", tokenGeneration: 0 });
+  const EMAIL_A = `owner-a-${runId}@media.local`;
+  const EMAIL_B = `owner-b-${runId}@media.local`;
+  const tokenA = createAuthToken({ email: EMAIL_A, fullName: "Owner A", companyId: COMPANY_A, companyRole: "owner", tokenGeneration: 0 });
+  const tokenB = createAuthToken({ email: EMAIL_B, fullName: "Owner B", companyId: COMPANY_B, companyRole: "owner", tokenGeneration: 0 });
 
   const BYTES_A = Buffer.from(`company-a-photograph-${runId}`);
   const BYTES_B = Buffer.from(`company-b-photograph-${runId}`);
@@ -145,6 +149,22 @@ if (!process.env.TEST_DATABASE_URL) {
     pool = getPgPool();
     await applyMigrations(pool);
 
+    // Both owners need an auth_users row. `requireAuth` reads the row on every
+    // authenticated request and takes the acting company from it rather than
+    // from the token's claims (THE SESSION MODEL, storage/authStore.ts), so a
+    // token minted for an email with no row is a dead session and every upload
+    // below would 401 — which, in a cross-tenant isolation test, would look
+    // exactly like the isolation working.
+    //
+    // The company on the row has to match the company in the token, or the
+    // row would silently override it and both halves of the test would run as
+    // the same tenant. Phones are run-scoped because auth_users.phone is
+    // unique, and both rows are deleted in `after`.
+    const hash = await hashPassword(`Media_${runId}_pw1!`);
+    const phoneBase = String(Date.now()).slice(-8);
+    await createUser(EMAIL_A, hash, `+619${phoneBase}1`, "Owner A", "admin", COMPANY_A, "owner");
+    await createUser(EMAIL_B, hash, `+619${phoneBase}2`, "Owner B", "admin", COMPANY_B, "owner");
+
     const app = createApp();
     server = http.createServer(app);
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -164,6 +184,8 @@ if (!process.env.TEST_DATABASE_URL) {
 
   after(async () => {
     try { await probe.end(); } catch { /* ignore */ }
+    await deleteUserAccount(EMAIL_A).catch(() => {});
+    await deleteUserAccount(EMAIL_B).catch(() => {});
     await pool.query(`REVOKE ALL ON uploads FROM ${probeRole}`).catch(() => {});
     await pool.query(`DROP ROLE IF EXISTS ${probeRole}`).catch(() => {});
     for (const company of [COMPANY_A, COMPANY_B]) {
