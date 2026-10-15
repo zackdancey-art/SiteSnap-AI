@@ -6,7 +6,7 @@ import { CompanyRole, soloCompanyIdForEmail } from "../utils/authToken";
 import { Actor, isCrew } from "./actor";
 import { canEditRow, canReadRow, editOwnershipSql, readVisibilitySql } from "./recordScope";
 import { FileBackedStore } from "./fileStore";
-import { findUserByEmail, setUserCompany } from "./authStore";
+import { findUserByEmail, setUserCompany, invalidateSessionIdentity } from "./authStore";
 import { withTenant } from "./tenant";
 import { DiaryProvenance } from "../services/diaryProvenance";
 import { normalizeEmail, sameEmail } from "../utils/emailAddresses";
@@ -1731,6 +1731,28 @@ export async function acceptSiteInvite(
     }
 
     await client.query("COMMIT");
+    // EVICT THE CACHED IDENTITY, OR THE ACCEPTANCE DOES NOT TAKE EFFECT.
+    //
+    // `requireAuth` takes the acting companyId and companyRole from the user
+    // row, not from the token's claims, and it reads that row through
+    // `loadSessionIdentity`, which caches for SESSION_IDENTITY_TTL_MS. The
+    // `UPDATE auth_users` above is raw SQL inside this transaction, so unlike
+    // `setUserCompany` — which the in-memory path at `applyCompanyMembership`
+    // uses, and which evicts for itself — nothing here tells that cache its
+    // entry is now wrong.
+    //
+    // The accepting request is itself authenticated, so the entry is not merely
+    // possibly stale: `requireAuth` populated it moments ago, from the row as it
+    // stood BEFORE this write. Without this line the invitee keeps acting as
+    // their old solo company for up to a minute after a successful acceptance —
+    // every company-scoped read misses, every row they write lands in the wrong
+    // tenant, and the replacement token the route hands back cannot help,
+    // because the cache outranks its claims. The two store paths disagreed and
+    // the one that runs in production was the wrong one: AUDIT L65's shape.
+    //
+    // After COMMIT, deliberately. Evicting before it would let a concurrent
+    // request re-read and re-cache the pre-commit row.
+    invalidateSessionIdentity(actorEmail);
     return {
       siteId: invite.site_id,
       siteName,

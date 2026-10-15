@@ -73,6 +73,7 @@ if (!process.env.TEST_DATABASE_URL) {
   const CASED = `inv-id-cased-${runId}@example.test`;
   const TARGET = `inv-id-target-${runId}@example.test`;
   const BYSTANDER = `inv-id-other-${runId}@example.test`;
+  const ACCEPTER = `inv-id-accepter-${runId}@example.test`;
   const PASSWORD = "Password123!";
 
   let server: http.Server;
@@ -167,7 +168,7 @@ if (!process.env.TEST_DATABASE_URL) {
 
   after(async () => {
     await new Promise<void>((resolve) => server?.close(() => resolve()));
-    for (const email of [OWNER, CASED, TARGET, BYSTANDER]) {
+    for (const email of [OWNER, CASED, TARGET, BYSTANDER, ACCEPTER]) {
       await deleteUserAccount(email).catch(() => {});
     }
     await pool?.end().catch(() => {});
@@ -216,6 +217,65 @@ if (!process.env.TEST_DATABASE_URL) {
     );
     assert.equal(refused.status, 403, "a genuinely wrong address must still be refused");
     assert.equal(refused.body.code, "invite_wrong_user");
+  });
+
+  /**
+   * The acceptance has to be in force on the NEXT request, and this is the only
+   * test that measures that rather than the write.
+   *
+   * `requireAuth` takes the acting company from the user row, through
+   * `loadSessionIdentity`, which caches for 60 seconds. The Postgres accept path
+   * stamps `auth_users` with raw SQL inside its transaction; the in-memory path
+   * goes through `setUserCompany`, which evicts for itself. So the two paths
+   * disagreed, and the one that runs in production was the wrong one — AUDIT
+   * L65's shape, again. The symptom was not a failed acceptance: the write
+   * landed, the route answered 200 with the right companyId, and then the
+   * invitee spent up to a minute acting as their old solo company — reads
+   * missing every row in the company they had just joined, writes landing in the
+   * wrong tenant, and the replacement token the route hands back unable to help,
+   * because the cache outranks its claims.
+   *
+   * Three things make this able to fail:
+   *
+   *   - The read BEFORE the acceptance is not just a control. It is what puts
+   *     the pre-acceptance row in the cache, so the staleness is established
+   *     rather than hoped for. (The accept request is itself authenticated and
+   *     would do the same, but relying on that would make this test depend on
+   *     middleware ordering.)
+   *   - Nothing here calls `resetSessionIdentityCacheForTests()`. A reset
+   *     between the two reads would make this pass against the defect.
+   *   - The read AFTER uses the SAME token, not the replacement. The old token
+   *     still claims the solo company, so a pass means authority really did come
+   *     from the row; using the fresh token would have proved only that the
+   *     route can mint one.
+   */
+  test("an acceptance is in force on the invitee's next request, not a minute later", async () => {
+    const accepterToken = await register(ACCEPTER, "Invite Accepter");
+    const token = await inviteToken(ACCEPTER);
+
+    const before = await seed<{ sites: Array<{ id: string }> }>(
+      "GET", "/projects/sites", undefined, accepterToken
+    );
+    assert.ok(
+      !before.body.sites.some((s) => s.id === siteId),
+      `the invitee could already see the inviting company's site before accepting, so the read below proves nothing: ${JSON.stringify(before.body.sites.map((s) => s.id))}`
+    );
+
+    const accepted = await seed<{ token?: string; companyId: string | null }>(
+      "POST", "/projects/invites/accept", { token }, accepterToken
+    );
+    assert.equal(
+      accepted.body.companyId, ownerCompanyId,
+      "the acceptance did not attach the invitee to the inviting company, so nothing below is about the cache"
+    );
+
+    const after = await seed<{ sites: Array<{ id: string }> }>(
+      "GET", "/projects/sites", undefined, accepterToken
+    );
+    assert.ok(
+      after.body.sites.some((s) => s.id === siteId),
+      `the invitee still cannot see the site they just joined: the acceptance wrote the row but the cached identity was not evicted, so they act as their previous company until it expires. Sites seen: ${JSON.stringify(after.body.sites.map((s) => s.id))}`
+    );
   });
 
   test("the wrong-recipient refusal names both addresses and leaves the invitation usable", async () => {

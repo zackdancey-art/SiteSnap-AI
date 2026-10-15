@@ -3225,3 +3225,60 @@ hiding the site.
 change). Whether company-wide site visibility is the right product rule is a separate question and
 is **not** reopened here — it is a recorded deliberate decision, and the comment at `listSites`
 states the reasoning.
+
+### L102 — The Postgres accept path stamps `auth_users` without evicting the cached identity, so an invitee acts as their previous company for a minute — HIGH (tenant correctness; the L65 shape, seventh instance)
+
+`requireAuth` takes the acting `companyId`, `companyRole` and `role` from the user row rather than
+from the token's claims (L100's model: *the token proves who you are, the record decides what you may
+do*). It reads that row through `loadSessionIdentity`, which caches for `SESSION_IDENTITY_TTL_MS`
+= 60 seconds. Every function in `authStore.ts` that changes a claim calls `invalidateSessionIdentity`
+for itself, precisely so a caller cannot forget.
+
+`acceptSiteInvite`'s Postgres path does not go through any of them. It stamps the row with raw SQL
+inside its own transaction:
+
+```
+UPDATE auth_users SET company_id = $2, company_role = $3 WHERE email = $1 AND (...)
+```
+
+Nothing told the cache. The in-memory path, `applyCompanyMembership`, calls `setUserCompany`, which
+evicts — **so the two store paths disagreed and the one that runs in production was the wrong one.**
+That is L65's shape for the seventh time, and the sixth instance (AUDIT:2749) was recorded four days
+earlier.
+
+**The symptom is not a failed acceptance.** The write lands. The route answers 200 with the right
+`companyId`, and mints a replacement token carrying it. Then, for up to a minute:
+
+- every company-scoped read the invitee makes misses, because `req.auth.companyId` is still the solo
+  company auto-created at their registration — rows that exist answer 404, and lists answer 200 with
+  nothing in them;
+- every row the invitee *writes* is stamped with the solo company id, so it lands in the wrong tenant
+  and stays there after the cache expires;
+- the replacement token cannot help, because the cache outranks its claims. This is the model working
+  exactly as designed, consuming a stale read.
+
+Found through `crew-permissions-db.test.ts`, which went red in CI with seven failures while the
+in-memory suite stayed green — the signature of a store-path divergence. The crew member in that
+suite is attached by the real invitation journey, and the accepting request is itself authenticated,
+so the pre-acceptance row is in the cache **by construction** rather than by luck. Both halves of the
+table then fail: crew assertions because crew act as the wrong company, and *owner* assertions
+because rows the crew member seeded for the comparison were written into the wrong company and the
+owner's read of them is a truthful 404 on a row that is really there. Hence "404 on rows that exist,
+including for the owner" — the owner's gate was never the problem.
+
+The precondition test could not catch it: it verifies the two **tokens** carry the two roles, and
+they do. Nothing in the file inspected what `requireAuth` resolved them to.
+
+**Fixed** by evicting after `COMMIT` — deliberately after, so a concurrent request cannot re-read and
+re-cache the pre-commit row — with the reasoning written at the call site. A regression test in
+`invite-accept-identity-db.test.ts` measures the acceptance on the invitee's **next** request using
+the **old** token and with no cache reset between the two reads; all three of those are load-bearing,
+and the test is annotated to say so.
+
+**Disposition:** FIXED on `feat/sessions-and-tokens`, 16 October 2026. **API and test only — no
+mobile or portal file changed**, so the OTA already prepared for this branch is unaffected.
+
+**Still open, and it is the same argument the Phase 2 cost-out made:** one grep for writes to
+`auth_users` outside `authStore.ts` found exactly one, and it was this defect. The only structural
+guard against the eighth instance is making the in-memory path unreachable in CI (option A in the
+cost-out) rather than discovering each divergence when a DB suite happens to exercise it.

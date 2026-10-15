@@ -392,4 +392,39 @@ cost it quietly.
 
 ---
 
+## What CI found that this machine could not — L102
+
+Item 1 of "What cannot be verified without you" was right, and it cashed in immediately. CI went red
+on `crew-permissions-db.test.ts` with seven failures: a 404 on rows that exist, including for the
+owner. The in-memory suite stayed green at 211/193/0/18, which is the signature of a store-path
+divergence rather than a logic error.
+
+**Cause.** `acceptSiteInvite`'s Postgres path stamps `auth_users` with raw SQL inside its
+transaction. The in-memory path calls `setUserCompany`, which evicts the cached session identity for
+itself. Nothing evicted it on the Postgres path, so `requireAuth` kept resolving the invitee to the
+solo company for up to the 60-second TTL — reads missing, writes landing in the wrong tenant, and the
+replacement token powerless, because under this model the cache outranks the claims. **The two store
+paths disagreed and the one that runs in production was the wrong one: L65's shape, seventh
+instance.** Full entry at AUDIT L102.
+
+**Why the owner failed too.** Not a gate. The crew member seeded the comparison rows, those rows were
+written under the wrong `company_id`, and the owner's read of them was a truthful 404. The owner's
+side of the table was never broken.
+
+**Why the suite's own precondition did not catch it.** It asserts the two *tokens* carry the two
+roles, and they do. Nothing in the file inspected what `requireAuth` resolved those tokens to — which
+is the one thing this phase changed.
+
+Fixed by evicting after `COMMIT`, with a regression test in `invite-accept-identity-db.test.ts` that
+measures the acceptance on the invitee's next request, on the old token, with no cache reset. **API
+and test only; no mobile or portal file changed** — `git diff --name-only | grep -c '^Projects/apps/mobile/'`
+→ `0` — so the bundle prepared for this branch is still the post-merge mobile code.
+
+This is the strongest form of the cost-out's argument that it is possible to make: the seventh
+divergence was predicted in general terms on 15 October and arrived as a specific one on 16 October,
+in a security-adjacent path, and was caught by a DB suite only because that suite happened to attach
+its crew member through the real invitation journey.
+
+---
+
 *Co-Authored-By: Claude Opus 5*
