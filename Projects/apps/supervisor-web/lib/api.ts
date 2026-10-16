@@ -76,6 +76,38 @@ export function isAuthenticated(): boolean {
   return !!getSavedUser();
 }
 
+/**
+ * The `code` values on a 401 that mean the SESSION is over.
+ *
+ * A 401 does not mean one thing, and keying a sign-out off the status alone is
+ * a defect. POST /api/auth/change-password answers 401 for a mistyped CURRENT
+ * password: an authenticated request, a live session, a wrong value in the
+ * body. This file used to clear local state and send the browser to `/` for
+ * that — signing someone out of the portal, losing whatever they had open,
+ * because they fat-fingered their own password into a form.
+ *
+ * The API discriminates (services/api/src/middleware/auth.ts, AUTH_ERROR_CODES)
+ * and this is the portal's half of that contract. The mobile client holds the
+ * same list in apps/mobile/lib/session.ts; the three cannot be a shared
+ * constant because @sitesnap/shared emits types only, so they are kept in step
+ * by name and by this comment.
+ */
+const SESSION_ERROR_CODES: readonly string[] = ["session_expired", "no_credential"];
+
+/**
+ * An ABSENT or non-string code reads as a session failure, deliberately, and
+ * for the same reason as on mobile. Every 401 in this API was session-shaped
+ * before the codes existed, the portal can be newer than the deployed API (a
+ * Vercel deploy and a Render deploy are not atomic), and a session the portal
+ * wrongly believes is dead costs one sign-in — while one it wrongly believes
+ * is live costs a user staring at a page that silently does nothing. Fail
+ * towards sign-in.
+ */
+function isSessionErrorCode(code: unknown): boolean {
+  if (typeof code !== "string" || code === "") return true;
+  return SESSION_ERROR_CODES.includes(code);
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${API_URL}${path}`, {
     method,
@@ -83,16 +115,18 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     headers: { "Content-Type": "application/json" },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
-  if (res.status === 401) {
-    clearLocalSession();
-    window.location.href = "/";
-    throw new Error("Unauthorized");
-  }
   if (!res.ok) {
+    // Read the body ONCE, before branching: a Response body cannot be consumed
+    // twice, and the 401 branch now needs the `code` out of it.
     const text = await res.text();
-    let msg = text;
-    try { msg = (JSON.parse(text) as { error?: string }).error ?? text; } catch { /* */ }
-    throw new Error(msg || `Request failed (${res.status})`);
+    let parsed: { error?: string; code?: string } = {};
+    try { parsed = JSON.parse(text) as { error?: string; code?: string }; } catch { /* not JSON */ }
+    if (res.status === 401 && isSessionErrorCode(parsed.code)) {
+      clearLocalSession();
+      window.location.href = "/";
+      throw new Error("Unauthorized");
+    }
+    throw new Error(parsed.error || text || `Request failed (${res.status})`);
   }
   return res.json() as Promise<T>;
 }

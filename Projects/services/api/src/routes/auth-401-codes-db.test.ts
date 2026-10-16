@@ -109,7 +109,7 @@ if (!process.env.TEST_DATABASE_URL) {
 
   /** A token whose payload is intact and whose signature is not ours. */
   const forgedTokenFor = (email: string): string => {
-    const valid = createAuthToken({ email, fullName: "Codes A", companyId: COMPANY, companyRole: "owner" });
+    const valid = createAuthToken({ email, fullName: "Codes A", companyId: COMPANY, companyRole: "owner", tokenGeneration: 0 });
     const [payload, signature] = valid.split(".");
     // Same length, different bytes: verifyAuthToken rejects a length mismatch
     // before it reaches timingSafeEqual, and a length mismatch is a different
@@ -118,7 +118,7 @@ if (!process.env.TEST_DATABASE_URL) {
     return `${payload}.${flipped}`;
   };
 
-  type Answer = { status: number; body: { error?: string; code?: string; ok?: boolean } };
+  type Answer = { status: number; body: { error?: string; code?: string; ok?: boolean; token?: string } };
 
   const changePassword = async (
     token: string | null,
@@ -167,7 +167,7 @@ if (!process.env.TEST_DATABASE_URL) {
   });
 
   test("a dead session and a mistyped password are both 401 and are told apart by code", async () => {
-    const token = createAuthToken({ email: EMAIL_A, fullName: "Codes A", companyId: COMPANY, companyRole: "owner" });
+    const token = createAuthToken({ email: EMAIL_A, fullName: "Codes A", companyId: COMPANY, companyRole: "owner", tokenGeneration: 0 });
 
     // (1) Live session, wrong credential in the BODY. The client must keep its
     // own message here; routing this to sign-in signs someone out for a typo.
@@ -190,10 +190,33 @@ if (!process.env.TEST_DATABASE_URL) {
     assert.equal(ok.status, 200, `change-password refused a correct password: ${JSON.stringify(ok.body)}`);
     assert.equal(ok.body.ok, true);
 
+    // ADOPT THE REPLACEMENT, BECAUSE A REAL CLIENT DOES.
+    //
+    // The change at (3) incremented the account's token generation, which is
+    // what changing a password means — every token on the account stops being
+    // accepted, including `token`, the one that just made the request. So (4)
+    // below cannot reuse it: `requireAuth` would answer session_expired before
+    // the route ever looked at the password, and the assertion about the
+    // PASSWORD would be measuring the session instead.
+    //
+    // Adopting the replacement is the fix rather than reordering (4) above (3),
+    // because reordering would dodge the revocation and leave the file passing
+    // against a route that had stopped issuing a replacement at all. This is the
+    // same move commit 7710b16 made in the mobile client
+    // (`apps/mobile/app/settings/account.tsx`), and asserting the token is
+    // present makes this test fail if that half of the contract is ever removed
+    // — which would sign every device out on a password change.
+    assert.ok(
+      ok.body.token,
+      "change-password returned no replacement token, so every client is signed out by a successful change"
+    );
+    const adopted = ok.body.token;
+
     // And the password really changed in Postgres, not just in a reply: the old
-    // one is now the wrong credential, with the body-credential code again.
-    const stale = await changePassword(token, CURRENT_PASSWORD, `Next_${runId}_4A`);
-    assert.equal(stale.status, 401);
+    // one is now the wrong credential, with the body-credential code again. On a
+    // live session, so a 401 here can only be about the password.
+    const stale = await changePassword(adopted, CURRENT_PASSWORD, `Next_${runId}_4A`);
+    assert.equal(stale.status, 401, `expected the OLD password to be refused on a live session: ${JSON.stringify(stale.body)}`);
     assert.equal(stale.body.code, "invalid_credentials");
   });
 
@@ -218,7 +241,7 @@ if (!process.env.TEST_DATABASE_URL) {
     // Positive control on the same route: a token this secret signed, not yet
     // expired, is accepted. Without it this test would pass if requireAuth
     // rejected everything.
-    const live = createAuthToken({ email: EMAIL_B, fullName: "Codes B", companyId: COMPANY, companyRole: "owner" });
+    const live = createAuthToken({ email: EMAIL_B, fullName: "Codes B", companyId: COMPANY, companyRole: "owner", tokenGeneration: 0 });
     const ok = await changePassword(live, CURRENT_PASSWORD, `Next_${runId}_4B`);
     assert.equal(ok.status, 200, `change-password refused a valid token: ${JSON.stringify(ok.body)}`);
     assert.equal(ok.body.ok, true);

@@ -2379,9 +2379,17 @@ recorded separately because it is still true after that fix: the app now routes 
 of blaming the feature, which is the correct behaviour in the absence of a working refresh, but it
 is a sign-in rather than a refresh.
 
-**Disposition:** Open, recorded 10 October 2026. Closing it means a refresh endpoint that accepts an
-expired-but-validly-signed token within some grace window, which is a security decision about how
-long a stolen token stays useful — the owner's call, not a defect fix. Related: L76.
+**Disposition:** FIXED on `feat/sessions-and-tokens`, 15 October 2026, with the grace window decided
+by the owner. `/auth/refresh` no longer sits behind `requireAuth`; it reads the credential itself
+(`readCredential`, shared with the middleware so the two cannot drift apart over the portal's
+cookie) and verifies it with `verifyAuthTokenForRefresh`, which accepts a token up to
+`REFRESH_GRACE_SECONDS` past `exp`. That number is derived, not configured —
+`AUTH_SESSION_MAX_IDLE_SECONDS - AUTH_TOKEN_TTL_SECONDS`, clamped at 0 — so the grace cannot
+outlive the session. The route still refuses everything else it refused before: a bad signature, a
+malformed payload, an unknown role, a token past the idle window, and a revoked one (see L100).
+Asserted in `routes/sessions-and-tokens-db.test.ts` ("a token that has just expired can refresh; one
+past the idle window cannot"), including that the same token is still refused on an ordinary
+request — the grace is refresh-only, not a longer TTL under another name. Related: L76, L100.
 
 ### L75 — `POST /auth/revoke-all` mints a new token and invalidates nothing — MEDIUM (security; a control that reports success without acting)
 
@@ -2394,9 +2402,23 @@ it does not do — the remedy after a lost phone.
 Found while establishing why the Phase 1 deploy invalidated sessions: this is the route that would
 have done it deliberately, and it cannot.
 
-**Disposition:** Open, recorded 10 October 2026. The cheap fix is a `tokenVersion` integer on
-`auth_users`, stamped into the claims and compared in `verifyAuthToken`; that is a migration and a
-claims change, so it is the owner's to schedule rather than something to slip into a defect branch.
+**Disposition:** FIXED on `feat/sessions-and-tokens`, 15 October 2026, by the mechanism this entry
+predicted — with one correction worth recording, because the correction is the whole of L100. The
+counter is `auth_users.token_generation`, which **already existed**: migration 012 added it in June
+and production has carried it ever since, defaulting to 0 on every row. So there was no migration to
+schedule; the column was there and nothing read it. `createAuthToken` now requires the generation as
+a parameter with no default (a mint site defaulting it to 0 for a row at 3 would produce a sign-in
+that cannot sign in), `requireAuth` and `/auth/refresh` both compare it, and `revoke-all` increments
+the row and hands back a replacement minted at the new value — "all" includes the credential that
+pressed the button, which is why the route returns one. A password change increments it too.
+
+The correction: the counter means **exactly one thing, "this token is revoked"**, and nothing else.
+It is NOT a staleness marker for the claims. See L100.
+
+Asserted in `routes/sessions-and-tokens-db.test.ts` and its in-memory twin: another device's token
+stops working, the acting device keeps working on the replacement, the revoked token cannot refresh
+itself back to life, and `auth_users.token_generation` is read directly to prove the route wrote the
+number rather than answering correctly from a cache.
 
 ### L76 — The auth token's TTL is seven days, read once at module load, with no sliding refresh — MEDIUM (every user meets L73's symptom weekly)
 
@@ -2411,10 +2433,23 @@ same wall roughly weekly**, and until this branch the app's answer was "Failed t
 On a compliance-evidence product the person is standing on a site holding a phone, and the thing
 that failed is the record they are being asked to keep.
 
-**Disposition:** Partly addressed on `fix/rollout-defects`, 10 October 2026. The symptom is now
-correct — a dead session routes to sign-in and says so. The weekly interruption itself is open and
-needs either a longer TTL, a sliding expiry, or a working refresh (L74). All three are owner
-decisions about the length of time a stolen token stays useful.
+**Disposition:** FIXED on `feat/sessions-and-tokens`, 15 October 2026, by the third of the three
+options: a working refresh. The TTL is still seven days and is still read once at module load, and
+that no longer matters, because the TTL is no longer what has to change. A person using the app
+renews through `/auth/refresh` (L74) before and after `exp`; a person who stops using it is signed
+out somewhere between 23 and 30 days later, depending on where in the seven-day cycle they stopped.
+Renewal happens at expiry rather than continuously, which is what makes that a range and not a
+number — recorded here because it will look like an off-by-a-week bug to the next reader.
+
+The 30 days is not a new figure either: it is `COOKIE_MAX_AGE_MS`, imported rather than copied. The
+portal had been telling browsers to keep the session for 30 days while the token inside it was
+honoured for 7. Two numbers that disagreed are now one number.
+
+Portal sessions additionally repair in place: a cookie past its half-life, or carrying claims that
+disagree with the row, is replaced by `Set-Cookie` on any ordinary request. **On mobile there is
+deliberately no equivalent, and that is not a half-mechanism** — a bearer client has no way to pick
+up a re-minted token without a response header, which was considered and declined, and it does not
+need one, because under L100's model the stale claim is never consulted for a decision.
 
 ### L77 — The inspection signature sheet's Save control answered nothing at all, twice over — HIGH (silent failure on a compliance record)
 
@@ -3089,3 +3124,255 @@ problems with two different fixes. The recording loop now runs ahead of every as
 the completeness test checks "recorded nothing" and "count missed the pin" separately, with a message
 each. The guard itself has now refused to report a pass on an unexecuted table twice and is unchanged
 in strength.
+
+### L100 — One counter cannot mean both "this token is revoked" and "this token's claims are stale"; the design I was given tried to make it mean both — DECISION (owner's, taken 15 October 2026) + MEDIUM (the defect the contradiction shipped as)
+
+Recorded because the resolution is a rule about what the system *is*, and the failure mode it
+prevents is a future session quietly undoing it.
+
+#### How it surfaced
+
+The approved Phase 2 design said `token_generation` increments on four events: a password change, a
+`revoke-all`, `setUserCompany`, and `setUserCompanyRole`. The first two revoke. The second two were
+there for a different reason — a demotion or a company move makes the claims in an existing token
+*wrong*, and incrementing forced the holder back through `/auth/refresh` to re-mint them.
+
+Implemented literally, the in-memory suite went from green to **nine failures**. Measured, not
+estimated, and then read one at a time: **eight of the nine were the same case** — a token whose
+claims had gone stale through an ordinary, innocent company write, now refused as though it had been
+revoked.
+
+Two of those eight were real user journeys, not test artefacts:
+
+- **An invitee accepting an invitation landed on the login screen.** `POST /projects/invites/accept`
+  calls `setUserCompany`; the token the invitee was holding one instruction earlier was revoked by
+  their own acceptance.
+- **A demoted crew member was signed out mid-shift, with capture still queued offline.** A manager
+  changing somebody's role from the portal ended that person's session on a site, holding a phone.
+
+#### The statement, as the owner dictated it
+
+> **The token proves who you are. The record decides what you may do.**
+
+`token_generation` means exactly one thing: *this token is revoked*. Password change and revoke-all
+increment it. `setUserCompany` and `setUserCompanyRole` **do not**. Authority — `companyId`,
+`companyRole`, `role` — comes from the row `requireAuth` was already reading on every request; the
+claims are a cache of it, and the record always wins.
+
+What follows, and is now true:
+
+- A demotion or removal takes effect within the 60-second identity-cache window, with **no sign-out
+  and no interruption**. The person keeps working; their authority changes under them.
+- A stale claim never needs to 401, because it is never consulted for a decision.
+- `/auth/refresh` keeps working for exactly the tokens it exists to serve (L74).
+- Revocation stays absolute: refused everywhere, including at refresh.
+
+#### The failure mode this entry exists to prevent
+
+`requireAuth` reads the row, builds the effective claims from it, and then **compares them against
+the token's claims** — and the comparison's only purpose is to decide whether to re-mint the
+portal's cookie. A future reader will notice that the token already carries `companyRole`, conclude
+that the comparison is redundant work on every request, and optimise it away. That would silently
+restore a stale-authority window: the token's claims would start being trusted again, and a demoted
+user would keep their old rank until their token happened to expire. The rule is written at the
+definition (`SessionIdentity` in `storage/authStore.ts`, under THE SESSION MODEL) and at the line
+that depends on it (`middleware/auth.ts`), in those terms, for that reason.
+
+#### Where the old premise is still written down
+
+`apps/mobile/lib/data-context.tsx`'s `acceptInvite` doc comment says every route derives the acting
+company from the bearer token's *claims*. That was true when it was written and is now false.
+**Disposition:** OPEN — a comment, not behaviour, and deliberately not swept into this branch;
+correct it the next time that file is opened for a reason.
+
+**Disposition:** DECIDED and implemented on `feat/sessions-and-tokens`, 15 October 2026. Of the eight
+claim-stale failures, **five went green again with no edit to the test** — which was the owner's own
+check that the model was right rather than merely convenient. The other three could not, and each
+was a finding in itself: one test's title and subject *were* the old model (inverted, with a rank
+control added so "the row decides" is still shown able to refuse); one used the member's own stale
+token as a stand-in for "a different company" (replaced with a real second registration, which
+cannot be weakened by any future change to how claims are read); and one is L101.
+
+### L101 — Removing a site member is not a site-visibility control, and a test asserted that it was — MEDIUM (test integrity; the L87 shape in the test next door to L87's fix)
+
+`invites.test.ts`'s "supervisor can remove a member" made two assertions. The first — that
+`DELETE /projects/sites/:id/members/:email` answers 200 — is sound. The second was that the removed
+member can no longer see the site, and **that is not a guarantee this API makes.**
+
+`projectsStore.listSites` returns every site in the company to every member, including crew,
+deliberately and with a comment at the function saying so: a crew member who cannot see the site
+they are standing on cannot file anything against it. The read gate is `readVisibility("site")` in
+`recordScope.ts`, and it is **company** membership, not site membership. `removeSiteMember` deletes
+one `site_members` row and nothing else.
+
+So why was the assertion green? Because the re-query used the removed member's own token, and under
+the old model that token's claims resolved to the solo company auto-created at their registration —
+a company with no sites in it. **The test was measuring an empty company, not a removal.** It only
+became visible when authority moved to the row (L100) and the token started resolving to the real
+company.
+
+This is the same vacuity shape as L87, in the test file immediately next door to the one L87's fix
+reached, found by the same mechanism: a negative assertion whose "nothing" had a second possible
+cause, and the harmless cause was the one actually in play.
+
+Repaired rather than deleted, because the route does do something worth asserting: the test now
+checks `GET /projects/sites/:id/members` before and after, so the removal is observed where it
+actually happens, and asserts explicitly that site visibility **stays** company-scoped afterwards —
+turning the wrong assertion into a correct one that would fail if site removal ever did start
+hiding the site.
+
+**Disposition:** FIXED on `feat/sessions-and-tokens`, 15 October 2026 (test only; no behaviour
+change). Whether company-wide site visibility is the right product rule is a separate question and
+is **not** reopened here — it is a recorded deliberate decision, and the comment at `listSites`
+states the reasoning.
+
+### L102 — The Postgres accept path stamps `auth_users` without evicting the cached identity, so an invitee acts as their previous company for a minute — HIGH (tenant correctness; the L65 shape, seventh instance)
+
+`requireAuth` takes the acting `companyId`, `companyRole` and `role` from the user row rather than
+from the token's claims (L100's model: *the token proves who you are, the record decides what you may
+do*). It reads that row through `loadSessionIdentity`, which caches for `SESSION_IDENTITY_TTL_MS`
+= 60 seconds. Every function in `authStore.ts` that changes a claim calls `invalidateSessionIdentity`
+for itself, precisely so a caller cannot forget.
+
+`acceptSiteInvite`'s Postgres path does not go through any of them. It stamps the row with raw SQL
+inside its own transaction:
+
+```
+UPDATE auth_users SET company_id = $2, company_role = $3 WHERE email = $1 AND (...)
+```
+
+Nothing told the cache. The in-memory path, `applyCompanyMembership`, calls `setUserCompany`, which
+evicts — **so the two store paths disagreed and the one that runs in production was the wrong one.**
+That is L65's shape for the seventh time, and the sixth instance (AUDIT:2749) was recorded four days
+earlier.
+
+**The symptom is not a failed acceptance.** The write lands. The route answers 200 with the right
+`companyId`, and mints a replacement token carrying it. Then, for up to a minute:
+
+- every company-scoped read the invitee makes misses, because `req.auth.companyId` is still the solo
+  company auto-created at their registration — rows that exist answer 404, and lists answer 200 with
+  nothing in them;
+- every row the invitee *writes* is stamped with the solo company id, so it lands in the wrong tenant
+  and stays there after the cache expires;
+- the replacement token cannot help, because the cache outranks its claims. This is the model working
+  exactly as designed, consuming a stale read.
+
+Found through `crew-permissions-db.test.ts`, which went red in CI with seven failures while the
+in-memory suite stayed green — the signature of a store-path divergence. The crew member in that
+suite is attached by the real invitation journey, and the accepting request is itself authenticated,
+so the pre-acceptance row is in the cache **by construction** rather than by luck. Both halves of the
+table then fail: crew assertions because crew act as the wrong company, and *owner* assertions
+because rows the crew member seeded for the comparison were written into the wrong company and the
+owner's read of them is a truthful 404 on a row that is really there. Hence "404 on rows that exist,
+including for the owner" — the owner's gate was never the problem.
+
+The precondition test could not catch it: it verifies the two **tokens** carry the two roles, and
+they do. Nothing in the file inspected what `requireAuth` resolved them to.
+
+**Fixed** by evicting after `COMMIT` — deliberately after, so a concurrent request cannot re-read and
+re-cache the pre-commit row — with the reasoning written at the call site. A regression test in
+`invite-accept-identity-db.test.ts` measures the acceptance on the invitee's **next** request using
+the **old** token and with no cache reset between the two reads; all three of those are load-bearing,
+and the test is annotated to say so.
+
+**Disposition:** FIXED on `feat/sessions-and-tokens`, 16 October 2026. **API and test only — no
+mobile or portal file changed**, so the OTA already prepared for this branch is unaffected.
+
+**The completeness claim this entry first made was scoped circularly, and is replaced.** It read:
+"one grep for writes to `auth_users` outside `authStore.ts` found exactly one, and it was this
+defect." That rests on every function *inside* `authStore.ts` evicting for itself — which was design
+intent, not measurement, and the defect was precisely a caller going around the function. Enumerated
+instead, every statement anywhere in the repository that writes `company_id`, `company_role` or
+`role` on `auth_users`:
+
+| where | writes a claim | evicts |
+|---|---|---|
+| `storage/authStore.ts:406` `revokeAllSessions` | generation | yes (:410) |
+| `storage/authStore.ts:455` `updateUserSettings` | no — `settings` only | n/a |
+| `storage/authStore.ts:524` `createUser` | `role`, `company_id`, `company_role` | **no** |
+| `storage/authStore.ts:808` `updateUserPassword` | generation | yes (:812) |
+| `storage/authStore.ts:836` `updateUserProfile` | `role` | yes (:848) |
+| `storage/authStore.ts:1009` `setUserCompany` | `company_id`, `company_role` | yes (:1014) |
+| `storage/authStore.ts:1051` `setUserCompanyRole` | `company_role` | yes (:1056) |
+| `storage/authStore.ts:1102` `deleteUserAccount` | DELETE | yes (:1105) |
+| `storage/authStore.ts:1113` `resetAuthStoreForTests` | DELETE | yes, via `resetSessionIdentityCacheForTests()` (:1109) |
+| `storage/projectsStore.ts:1702` accept, Postgres path | `company_id`, `company_role` | **this defect — now yes** |
+| `storage/migrations/016_backfill_companies.sql:39,52,95,140` | `company_id` | no — see below |
+| `teardown-loadtest.ts:59` | DELETE | no — standalone script, no server process |
+
+`createUser` is the one claim-bearing writer in `authStore.ts` that does not evict. It is safe
+**today**, but only because `loadSessionIdentity` deletes its entry and returns `not_found` rather
+than caching a negative, so there is no stale "no such account" to evict — safe by a property of a
+different function, which is the same coupling that produced this finding. If a future change ever
+caches a negative, `createUser` becomes the eighth instance.
+
+**What the grep cannot see, stated rather than assumed.** *Dynamic table names:* the only
+interpolated table map is `projectsStore.ts:1869`
+(`entry|diary|diaryTemplate` → `project_entries|project_diaries|project_templates`); no branch of it
+names `auth_users`, and every other template interpolation in the stores lands in a `WHERE` clause
+(`projectsStore.ts:631,1012`, `incidentStore.ts:222`, `inspectionStore.ts:121`). *CTEs that update:*
+none — no `WITH … UPDATE`/`INSERT`/`DELETE` anywhere. *Upserts:* `ON CONFLICT` in `authStore.ts`
+appears at :567 (pending registrations) and :899 (`companies`), not on `auth_users`, so `createUser`
+is a plain INSERT. *Triggers:* none on `auth_users` (the only triggers are on
+`inspection_signatures`, `project_sites`/`_entries`/`_diaries` and `companies`), so no write can be
+amplified out of sight. *Migrations:* `016` writes `company_id` four times and does not evict; it
+runs in-process at `server.ts:205`, before `initAuthSchema()`, `createApp()` and `app.listen`, so
+within a single process the cache is necessarily empty — **the blind spot is a rolling deploy**,
+where a second instance is still serving with cached identities while the first migrates. The owner
+has not yet told me the Render instance count and I am not guessing it. *Tests:* nine files write
+`auth_users` raw (`incident-roundtrip`, `rls-h1b`, `invite-roundtrip`, `store-roundtrip`,
+`signature-roundtrip`, `rls-integration`); `invite-roundtrip.test.ts:241`
+(`UPDATE auth_users SET company_id = ''`) bypasses eviction deliberately and is the pattern to watch
+if a suite ever goes mysteriously red. *And what no grep can ever see:* a hand edit through a
+database console, and the in-memory store's persistence file.
+
+**Still open, and it is the same argument the Phase 2 cost-out made:** the only structural guard
+against the eighth instance is making the in-memory path unreachable in CI (option A in the
+cost-out) rather than discovering each divergence when a DB suite happens to exercise it.
+
+### L103 — Neither client adopts the credential an acceptance returns, and the deployed accept route returns none, so the same misfiling is possible in production with no cache involved — HIGH (tenant correctness, production; incidence UNMEASURED)
+
+**Found by asking the question of production instead of of the branch.** L102 is a sixty-second
+window on an unmerged branch. The owner asked whether the same misfiling is possible on the code
+deployed **now**, where authority comes from the token's claims and `acceptSiteInvite` mints a
+replacement token carrying the new `companyId` — which is a fix only if the clients adopt it. They
+do not.
+
+**The portal: does not adopt it, and never refreshes.** `apps/supervisor-web/lib/api.ts:204-206`
+posts the invite token and returns `AcceptedInvite`, declared at :189-195 as
+`siteId, siteName, role, companyId?, companyRole?` — there is no `token` field, so a replacement in
+the body is discarded by the type as well as by the code. `/auth/refresh` appears **nowhere** in the
+portal (grep: zero hits). The portal authenticates by cookie, and the **deployed** accept route sets
+no cookie: `setSessionCookie` occurs **0 times** in `origin/main`'s `routes/projects.ts`
+(`git show origin/main:Projects/services/api/src/routes/projects.ts | grep -c setSessionCookie` → 0).
+`app/invite/page.tsx:46-62` signs in, accepts, and redirects two seconds later — on the
+pre-acceptance cookie. Under pre-Phase-2 rules those claims **are** the authority, so until that
+person next signs in, everything they create is stamped with their previous (solo) `company_id` and
+stays that way. Nothing expires; there is no cache in the path.
+
+**Mobile: also discards it, and self-corrects by a second endpoint rather than by design.**
+`apps/mobile/lib/data-context.tsx:963-978` declares the response as `{ siteId, siteName, role }` and
+drops any `token`, then calls `await refreshToken()` before `await refresh()`. The deployed
+`/auth/refresh` (`origin/main:Projects/services/api/src/routes/auth.ts:708-719`) re-reads the row —
+`const user = await findUserByEmail(auth.email); … const companyId = user?.companyId ?? auth.companyId;`
+— so the right company arrives one round trip later. Narrow, but it closes only because a different
+endpoint happens to read the record, and not at all if `refreshToken()` fails, which in an
+offline-first app is a supported state.
+
+**Why this is not a duplicate of L102:** L102 expires after a minute. This has no cache to expire.
+The wrong `company_id` is written into the row.
+
+**Whether it has happened is a count, and the count is UNMEASURED.** It needs the production
+credential, which is not on this machine: `DATABASE_URL` exists in the gitignored
+`services/api/.env` and its value is empty — length 0, established by reading key names and value
+lengths only, never values. A read-only audit query, the fifteen judgeable tables, and the
+total-rows control that distinguishes "no mismatches" from "RLS showed me no rows" were handed to
+the owner to run against production. **No count is asserted here, in either direction. Nothing is
+to be backfilled, cleaned or repaired until the owner has seen the numbers and said so.**
+
+**Disposition:** the branch closes both halves of the server side — the accept path evicts the
+cached identity (L102) and `routes/projects.ts:595-609` mints a replacement token and calls
+`setSessionCookie`, so the portal's credential is replaced in the response instead of being ignored
+in the body. **Open on the clients:** neither client declares or reads the `token` the route
+returns, so both still depend on a second mechanism (cookie replacement, or `/auth/refresh`) rather
+than on the one the route offers.

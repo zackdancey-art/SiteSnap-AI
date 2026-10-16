@@ -35,10 +35,10 @@ test("RBAC project workflow supports supervisor approval and scoped reads", asyn
   );
 
   const workerClaims = verifyAuthToken(
-    createAuthToken({ email: workerEmail, fullName: "Worker One", role: "worker", companyId: testCompanyId, companyRole: "crew" })
+    createAuthToken({ email: workerEmail, fullName: "Worker One", role: "worker", companyId: testCompanyId, companyRole: "crew", tokenGeneration: 0 })
   );
   const supervisorClaims = verifyAuthToken(
-    createAuthToken({ email: supervisorEmail, fullName: "Supervisor One", role: "supervisor", companyId: testCompanyId, companyRole: "manager" })
+    createAuthToken({ email: supervisorEmail, fullName: "Supervisor One", role: "supervisor", companyId: testCompanyId, companyRole: "manager", tokenGeneration: 0 })
   );
 
   assert.ok(workerClaims);

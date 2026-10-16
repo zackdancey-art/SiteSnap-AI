@@ -22,6 +22,8 @@ import {
   upsertPendingRegistration,
   updateUserProfile,
   updateUserPassword,
+  loadSessionIdentity,
+  revokeAllSessions,
 } from "../storage/authStore";
 import { acceptSiteInvite, deleteAllUserProjectData } from "../storage/projectsStore";
 import { soloCompanyIdForEmail } from "../utils/authToken";
@@ -31,8 +33,14 @@ import {
   sendAccountVerification,
   sendPasswordReset,
 } from "../services/notificationService";
-import { requireAuth, AuthenticatedRequest, AUTH_ERROR_CODES } from "../middleware/auth";
-import { createAuthToken } from "../utils/authToken";
+import {
+  requireAuth,
+  AuthenticatedRequest,
+  AUTH_ERROR_CODES,
+  SESSION_EXPIRED_MESSAGE,
+  readCredential,
+} from "../middleware/auth";
+import { createAuthToken, verifyAuthTokenForRefresh } from "../utils/authToken";
 import { isDisposableEmailDomain } from "../utils/disposableDomains";
 import {
   isRateLimitedByIp,
@@ -43,23 +51,7 @@ import {
 } from "../middleware/rateLimit";
 import { hashPassword, verifyPassword } from "../utils/password";
 import { readIntEnv } from "../utils/env";
-
-const SESSION_COOKIE = "sitesnap.session";
-const COOKIE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-
-function setSessionCookie(res: Response, token: string) {
-  res.cookie(SESSION_COOKIE, token, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    maxAge: COOKIE_MAX_AGE_MS,
-    path: "/",
-  });
-}
-
-function clearSessionCookie(res: Response) {
-  res.clearCookie(SESSION_COOKIE, { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: "/" });
-}
+import { clearSessionCookie, setSessionCookie } from "../utils/sessionCookie";
 
 const router: Router = asyncSafeRouter();
 // An empty ACCOUNT_VERIFICATION_TTL_MS used to parse to 0 here, expiring every
@@ -483,6 +475,7 @@ router.post("/auth/register/verify", async (req, res) => {
         role: user.role,
         companyId: user.companyId,
         companyRole: user.companyRole,
+        tokenGeneration: user.tokenGeneration,
       }),
       user: {
         email: user.email,
@@ -539,6 +532,7 @@ async function loginHandler(req: Request, res: Response) {
       role: existing.role,
       companyId: existing.companyId,
       companyRole: existing.companyRole,
+      tokenGeneration: existing.tokenGeneration,
     });
     setSessionCookie(res, token);
     return res.json({
@@ -650,6 +644,8 @@ router.patch("/auth/profile", requireAuth, async (req: Request, res: Response) =
     const token = createAuthToken({
       email: auth.email, fullName: nextName, role: nextRole,
       companyId: auth.companyId, companyRole: auth.companyRole,
+      // No record to read, so carry forward the generation the caller presented.
+      tokenGeneration: auth.tokenGeneration,
     });
     return res.json({
       token,
@@ -663,6 +659,7 @@ router.patch("/auth/profile", requireAuth, async (req: Request, res: Response) =
   const token = createAuthToken({
     email: updated.email, fullName: updated.fullName, role: updated.role,
     companyId: updated.companyId, companyRole: updated.companyRole,
+    tokenGeneration: updated.tokenGeneration,
   });
   return res.json({
     token,
@@ -704,18 +701,112 @@ router.delete("/auth/account", requireAuth, async (req: Request, res: Response) 
   }
 });
 
-// Refresh a valid (not-expired) token — returns a new token with a fresh expiry
-router.post("/auth/refresh", requireAuth, async (req: Request, res: Response) => {
-  const auth = (req as AuthenticatedRequest).auth;
-  const user = await findUserByEmail(auth.email);
-  const email = user?.email ?? auth.email;
-  const fullName = user?.fullName ?? auth.fullName;
-  const role = user?.role ?? auth.role;
-  const companyId = user?.companyId ?? auth.companyId;
-  const companyRole = user?.companyRole ?? auth.companyRole;
-  const token = createAuthToken({ email, fullName, role, companyId, companyRole });
+/**
+ * POST /auth/refresh — exchange a token for a fresh one.
+ *
+ * AUDIT L74: THIS ROUTE DOES NOT SIT BEHIND `requireAuth`, AND THAT IS THE FIX.
+ *
+ * It used to. `requireAuth` refuses an expired token — that is its job — so the
+ * endpoint whose entire purpose is to replace a token that is running out
+ * refused exactly the tokens that needed replacing. The only tokens it would
+ * renew were ones that did not yet need renewing, and a client that was offline
+ * or asleep across the expiry boundary had no way back in but a sign-in. On a
+ * seven-day TTL that is a crew signing in every week for no reason.
+ *
+ * So it reads the credential itself and verifies with `verifyAuthTokenForRefresh`,
+ * which accepts a token whose `exp` has passed but is still inside the idle
+ * window (`utils/authToken.ts`: the window is the cookie's max age, so the
+ * grace is the difference between the two and is derived rather than invented).
+ *
+ * WHAT IT STILL REFUSES, and must:
+ *   - no credential at all;
+ *   - a tampered or forged signature, or a malformed token;
+ *   - a token past the idle window as well as its expiry — expiry with grace is
+ *     not expiry abolished;
+ *   - a token for an account that no longer exists;
+ *   - A REVOKED TOKEN. A generation behind the row is refused here exactly as
+ *     it is everywhere else. If refresh were exempt, revocation would be
+ *     theatre: the one credential a password change or a revoke-all is meant to
+ *     kill would be the one that could mint its own replacement forever.
+ *
+ * All of those answer 401 `session_expired`, in the same words, deliberately —
+ * see the note in AUTH_ERROR_CODES on what a more specific answer tells someone
+ * probing. A store that is merely unreachable answers 503, never 401: see the
+ * same note, and L73.
+ */
+router.post("/auth/refresh", async (req: Request, res: Response) => {
+  // THE ORDER OF THESE THREE CHECKS MATTERS.
+  //
+  // Per-IP first, because it needs no identity and is the only thing standing
+  // between an unauthenticated flood and the HMAC work below.
+  if (await isRateLimitedByIp(req, "refresh", LIMITS.refreshPerIp.max, LIMITS.refreshPerIp.windowMs)) {
+    return res.status(429).json({ error: "Too many refresh attempts. Please try again shortly." });
+  }
+
+  const credential = readCredential(req);
+  if (!credential) {
+    return res.status(401).json({ error: "Missing bearer token.", code: AUTH_ERROR_CODES.NO_CREDENTIAL });
+  }
+  const claims = verifyAuthTokenForRefresh(credential.token);
+  if (!claims) {
+    return res.status(401).json({ error: SESSION_EXPIRED_MESSAGE, code: AUTH_ERROR_CODES.SESSION_EXPIRED });
+  }
+
+  // Per-account AFTER verification, so the budget can only be spent by someone
+  // already holding a signed token for that account. Checking it on the claimed
+  // email before verifying would hand anyone a way to exhaust a victim's
+  // refresh allowance with garbage and strand them at the login screen — a
+  // denial of service built out of a rate limiter.
+  if (await isRateLimitedByAccount(claims.email, "refresh", LIMITS.refreshPerAccount.max, LIMITS.refreshPerAccount.windowMs)) {
+    return res.status(429).json({ error: "Too many refresh attempts. Please try again shortly." });
+  }
+
+  const result = await loadSessionIdentity(claims.email);
+  if (!result.ok) {
+    if (result.reason === "unavailable") {
+      console.error("[auth] refresh could not read the session identity", result.error);
+      return res.status(503).json({
+        error: "We could not verify your session just now. Please try again in a moment.",
+        code: AUTH_ERROR_CODES.SESSION_UNAVAILABLE,
+      });
+    }
+    return res.status(401).json({ error: SESSION_EXPIRED_MESSAGE, code: AUTH_ERROR_CODES.SESSION_EXPIRED });
+  }
+  const identity = result.identity;
+
+  // `<`, not `!==`: see the matching note in middleware/auth.ts. A token AHEAD
+  // of the row is this instance's cache lagging a revocation served elsewhere,
+  // not a forgery — the signature already proved that — and refusing it would
+  // sign someone out for the cache's mistake.
+  if (claims.tokenGeneration < identity.tokenGeneration) {
+    return res.status(401).json({ error: SESSION_EXPIRED_MESSAGE, code: AUTH_ERROR_CODES.SESSION_EXPIRED });
+  }
+
+  // Minted from the ROW, which is the whole model (THE SESSION MODEL,
+  // storage/authStore.ts). A refresh that copied the old claims forward would
+  // hand back a token as stale as the one it replaced.
+  const tokenGeneration = Math.max(claims.tokenGeneration, identity.tokenGeneration);
+  const token = createAuthToken({
+    email: identity.email,
+    fullName: identity.fullName,
+    role: identity.role,
+    companyId: identity.companyId,
+    companyRole: identity.companyRole,
+    tokenGeneration,
+  });
+  // The cookie is set for both transports, as it was before this change: the
+  // portal needs it and a bearer client simply never reads it.
   setSessionCookie(res, token);
-  return res.json({ token, user: { email, name: fullName, role, companyId, companyRole } });
+  return res.json({
+    token,
+    user: {
+      email: identity.email,
+      name: identity.fullName,
+      role: identity.role,
+      companyId: identity.companyId,
+      companyRole: identity.companyRole,
+    },
+  });
 });
 
 // Change password — requires current password verification
@@ -746,25 +837,85 @@ router.post("/auth/change-password", requireAuth, async (req: Request, res: Resp
       });
     }
     const nextHash = await hashPassword(newPassword);
-    await updateUserPassword(auth.email, nextHash);
-    return res.json({ ok: true });
+    // THE REPLACEMENT TOKEN IS NOT A COURTESY.
+    //
+    // `updateUserPassword` increments the token generation, which is the point
+    // of changing a password: every other session on the account stops working.
+    // But "every other session" includes the one making this request. Returning
+    // `{ ok: true }` and nothing else — which is what this route used to do —
+    // signs the person out of the device they just changed their password on,
+    // one request later, with no explanation. The replacement is minted at the
+    // generation the write returned, so it is the only token on the account
+    // that still works.
+    //
+    // The portal needs the Set-Cookie (its cookie is httpOnly and it cannot
+    // read the body's token); the mobile client reads `token` out of the body
+    // and stores it (apps/mobile/app/settings/account.tsx). Both halves are
+    // required, and a client that ignored the token WOULD be signed out — which
+    // is why the mobile change ships with this one.
+    const nextGeneration = await updateUserPassword(auth.email, nextHash);
+    if (nextGeneration === null) {
+      // The row vanished between the lookup above and the write. Nothing was
+      // changed, so do not hand back a credential for it.
+      return res.status(404).json({ error: "Account not found." });
+    }
+    const token = createAuthToken({
+      email: user.email,
+      fullName: user.fullName,
+      role: user.role,
+      companyId: user.companyId,
+      companyRole: user.companyRole,
+      tokenGeneration: nextGeneration,
+    });
+    setSessionCookie(res, token);
+    return res.json({ ok: true, token });
   } catch (error) {
     console.error("[auth] change-password failed", error);
     return res.status(500).json({ error: "Failed to change password." });
   }
 });
 
-// Revoke all other sessions by issuing a rotated token for the current session.
-// Without a server-side revocation list, old tokens remain valid until they expire.
+/**
+ * POST /auth/revoke-all — end every session on the account but this one.
+ *
+ * AUDIT L75: IT USED TO INVALIDATE NOTHING.
+ *
+ * The old implementation read the user row, minted a token from it, set the
+ * cookie and returned. Every word of that is a rotation of the CURRENT
+ * session's credential; not one of it touched any other session. The comment
+ * above it said so, almost — "without a server-side revocation list, old tokens
+ * remain valid until they expire" — and then the route was shipped and offered
+ * to people under a name that promises the opposite. A phone left in a taxi
+ * kept full access for up to seven days, and the person who pressed the button
+ * had been told it was handled.
+ *
+ * `revokeAllSessions` is the revocation list, in one integer on the row: it
+ * increments the generation, every token minted before it is now behind the
+ * row, and `requireAuth` and `/auth/refresh` both refuse a token that is
+ * behind. The replacement minted here is at the new generation, so the device
+ * that asked stays signed in and every other one is out at its next request.
+ */
 router.post("/auth/revoke-all", requireAuth, async (req: Request, res: Response) => {
   const auth = (req as AuthenticatedRequest).auth;
   const user = await findUserByEmail(auth.email);
-  const email = user?.email ?? auth.email;
-  const fullName = user?.fullName ?? auth.fullName;
-  const role = user?.role ?? auth.role;
-  const companyId = user?.companyId ?? auth.companyId;
-  const companyRole = user?.companyRole ?? auth.companyRole;
-  const token = createAuthToken({ email, fullName, role, companyId, companyRole });
+  if (!user) {
+    // requireAuth read a row for this email moments ago, so this is an account
+    // deleted mid-request. Minting a token for it would be minting a credential
+    // for an account that no longer exists.
+    return res.status(401).json({ error: SESSION_EXPIRED_MESSAGE, code: AUTH_ERROR_CODES.SESSION_EXPIRED });
+  }
+  const nextGeneration = await revokeAllSessions(user.email);
+  if (nextGeneration === null) {
+    return res.status(401).json({ error: SESSION_EXPIRED_MESSAGE, code: AUTH_ERROR_CODES.SESSION_EXPIRED });
+  }
+  const token = createAuthToken({
+    email: user.email,
+    fullName: user.fullName,
+    role: user.role,
+    companyId: user.companyId,
+    companyRole: user.companyRole,
+    tokenGeneration: nextGeneration,
+  });
   setSessionCookie(res, token);
   return res.json({ token });
 });

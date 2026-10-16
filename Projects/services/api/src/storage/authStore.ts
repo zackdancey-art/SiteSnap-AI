@@ -12,6 +12,13 @@ export type AuthUser = {
   companyId: string;
   companyRole: CompanyRole;
   createdAt: string;
+  /**
+   * The generation this user's tokens must carry to be accepted. Incrementing
+   * it refuses every token minted before the increment — see
+   * `loadSessionIdentity` and `revokeAllSessions` below. The column was added by
+   * migration 012 (`DEFAULT 0`) and, until this branch, read by nothing.
+   */
+  tokenGeneration: number;
 };
 
 export type PendingRegistration = {
@@ -143,7 +150,17 @@ export async function initAuthSchema() {
   `);
 }
 
-function mapUser(row: {
+/**
+ * The shape every `SELECT ${USER_COLUMNS}` returns.
+ *
+ * This was six identical inline annotations, in two different formattings,
+ * before `token_generation` had to be added to all of them. Named once, a column
+ * added to USER_COLUMNS and not to this type fails `mapUser` at typecheck;
+ * copied six times, the one site that gets missed returns `undefined` and the
+ * generation check silently compares against nothing. The duplication was the
+ * hazard, not the verbosity.
+ */
+type UserRow = {
   email: string;
   password_hash: string;
   phone: string | null;
@@ -152,7 +169,10 @@ function mapUser(row: {
   company_id: string | null;
   company_role: CompanyRole | null;
   created_at: Date;
-}): AuthUser {
+  token_generation: number;
+};
+
+function mapUser(row: UserRow): AuthUser {
   return {
     email: row.email,
     passwordHash: row.password_hash,
@@ -164,10 +184,12 @@ function mapUser(row: {
     companyId: row.company_id ?? soloCompanyIdForEmail(row.email),
     companyRole: row.company_role ?? "owner",
     createdAt: row.created_at.toISOString(),
+    tokenGeneration: row.token_generation,
   };
 }
 
-const USER_COLUMNS = "email, password_hash, phone, full_name, role, company_id, company_role, created_at";
+const USER_COLUMNS =
+  "email, password_hash, phone, full_name, role, company_id, company_role, created_at, token_generation";
 
 function mapPending(row: {
   email: string;
@@ -199,16 +221,7 @@ export async function findUserByEmail(email: string): Promise<AuthUser | null> {
     return memoryUsers.get(email) ?? null;
   }
 
-  const result = await getPgPool().query<{
-    email: string;
-    password_hash: string;
-    phone: string | null;
-    full_name: string;
-    role: "worker" | "supervisor" | "admin";
-    company_id: string | null;
-    company_role: CompanyRole | null;
-    created_at: Date;
-  }>(
+  const result = await getPgPool().query<UserRow>(
     `SELECT ${USER_COLUMNS} FROM auth_users WHERE email = $1 LIMIT 1`,
     [email]
   );
@@ -219,6 +232,191 @@ export async function findUserByEmail(email: string): Promise<AuthUser | null> {
 }
 
 /** Read the caller's personal settings bag (migration 028). `{}` if none set. */
+// ─── Session identity: what every authenticated request has to know ─────────
+
+/**
+ * THE SESSION MODEL. Read this before changing anything in this block, in
+ * `middleware/auth.ts`, or in `utils/authToken.ts`.
+ *
+ *     THE TOKEN PROVES WHO YOU ARE. THE RECORD DECIDES WHAT YOU MAY DO.
+ *
+ * The token's job is identity and integrity: an HMAC over an email, and a
+ * generation that says whether it has been revoked. Authority — companyId,
+ * companyRole, role — comes from THIS row, which `requireAuth` reads on every
+ * authenticated request. The claims inside the token are a CACHE of this row.
+ * When the two disagree, the row wins, always, with no exception and no
+ * fast path.
+ *
+ * WHY YOU MUST NOT "OPTIMISE AWAY" THE COMPARISON
+ *
+ * A future reader will notice that the token already carries companyRole, that
+ * `requireAuth` could therefore skip reading it, and that this would save a
+ * cached lookup per user per minute. Do not do it. The claim is up to seven
+ * days old. Trusting it reopens a stale-authority window of exactly that
+ * length: an owner demotes a manager, or removes someone from the company
+ * altogether, and the person keeps acting at their old rank until their token
+ * happens to expire. That is the hole crew permissions made load-bearing, and
+ * it is invisible in review because the code looks like it is checking
+ * something. The lookup is the check. If you want it cheaper, raise
+ * SESSION_IDENTITY_TTL_MS and accept a longer window knowingly.
+ *
+ * WHAT token_generation DOES AND DOES NOT MEAN
+ *
+ * It means exactly one thing: THIS TOKEN IS REVOKED. Two things increment it —
+ * a password change and `/auth/revoke-all` — and a token behind the current
+ * value is refused everywhere, `/auth/refresh` included, or revocation is
+ * theatre.
+ *
+ * It is NOT a claims version. `setUserCompany` and `setUserCompanyRole`
+ * deliberately do not touch it; each has a comment saying so. Making a claim
+ * change increment it conflates the two meanings, and because one counter
+ * cannot distinguish them, the refusal that revocation requires at
+ * `/auth/refresh` also walls out the holder who merely needs new claims. That
+ * was measured, not theorised: an invitee accepting an invitation was left at
+ * the login screen, because the mobile client's recovery from a stale claim IS
+ * `/auth/refresh`.
+ *
+ * Two jobs, one row:
+ *   - `tokenGeneration`, compared against the token's claim — revocation.
+ *   - the authority fields, which become `req.auth` and are what a renewed
+ *     token is minted from. A renewal that copied the claims out of the token
+ *     it replaced would carry a stale `companyRole` for the whole life of the
+ *     session.
+ */
+export type SessionIdentity = {
+  email: string;
+  fullName: string;
+  role: AuthUser["role"];
+  companyId: string;
+  companyRole: CompanyRole;
+  tokenGeneration: number;
+};
+
+/**
+ * Deliberately three outcomes, not two.
+ *
+ * `not_found` and `unavailable` must never collapse into one answer. The first
+ * is a dead session and belongs at 401; the second is Postgres being
+ * unreachable and belongs at 503. Answering 401 for an unreachable database
+ * would route every client in the field through the session handler and sign
+ * out the entire fleet over an infrastructure blip — the defect this codebase
+ * has now closed at the client (L73) and the logger, one layer further down.
+ * `middleware/auth.ts` is where that distinction is spent.
+ */
+export type SessionIdentityResult =
+  | { ok: true; identity: SessionIdentity; stale: boolean }
+  | { ok: false; reason: "not_found" }
+  | { ok: false; reason: "unavailable"; error: unknown };
+
+/**
+ * How long a read is reused. This is the whole cost control: without it, every
+ * authenticated request adds a database round trip to a middleware that
+ * previously did no I/O at all. With it, the amortised cost is one read per
+ * user per instance per minute.
+ *
+ * The price is paid in revocation latency, and it is the honest number to
+ * quote: a revoke-all takes effect immediately on the instance that served it
+ * (it evicts its own entry) and within SESSION_IDENTITY_TTL_MS on any other.
+ */
+const SESSION_IDENTITY_TTL_MS = 60_000;
+
+/**
+ * How long a cached identity may be served AFTER a failed read.
+ *
+ * Mostly this window is safe by construction: a revoke-all is a database write,
+ * so an unreachable database cannot have accepted one that this cache is
+ * missing. It is bounded anyway for the sequence where it is not — a revoke
+ * lands, the database dies seconds later, and the pre-revoke entry is still
+ * cached. Past this grace the answer becomes 503: "we cannot verify your
+ * session" is true, and it is not the same claim as "your session has ended".
+ */
+const SESSION_IDENTITY_STALE_GRACE_MS = 5 * 60_000;
+
+type SessionIdentityEntry = { identity: SessionIdentity; readAt: number };
+const sessionIdentityCache = new Map<string, SessionIdentityEntry>();
+
+function identityFromUser(user: AuthUser): SessionIdentity {
+  return {
+    email: user.email,
+    fullName: user.fullName,
+    role: user.role,
+    companyId: user.companyId,
+    companyRole: user.companyRole,
+    tokenGeneration: user.tokenGeneration,
+  };
+}
+
+/**
+ * Drops one user's cached identity.
+ *
+ * Called by every function in this file that changes a claim or the generation.
+ * It is called from inside those functions rather than by their callers, because
+ * a caller that forgets leaves a 60-second window in which a revocation, a
+ * demotion or a password change has silently not happened.
+ */
+export function invalidateSessionIdentity(email: string) {
+  sessionIdentityCache.delete(email);
+}
+
+export async function loadSessionIdentity(email: string): Promise<SessionIdentityResult> {
+  const now = Date.now();
+  const cached = sessionIdentityCache.get(email);
+  if (cached && now - cached.readAt < SESSION_IDENTITY_TTL_MS) {
+    return { ok: true, identity: cached.identity, stale: false };
+  }
+  try {
+    const user = await findUserByEmail(email);
+    if (!user) {
+      // A signed token for an account that no longer exists. Before this, a
+      // deleted account's tokens kept working until they expired, because
+      // nothing on the request path ever looked for the row.
+      sessionIdentityCache.delete(email);
+      return { ok: false, reason: "not_found" };
+    }
+    const identity = identityFromUser(user);
+    sessionIdentityCache.set(email, { identity, readAt: now });
+    return { ok: true, identity, stale: false };
+  } catch (error) {
+    if (cached && now - cached.readAt < SESSION_IDENTITY_TTL_MS + SESSION_IDENTITY_STALE_GRACE_MS) {
+      return { ok: true, identity: cached.identity, stale: true };
+    }
+    return { ok: false, reason: "unavailable", error };
+  }
+}
+
+/**
+ * Increments the user's token generation, refusing every token already issued.
+ *
+ * Returns the new generation so the caller can mint a replacement that carries
+ * it; `null` means there is no such user. One statement, so the read and the
+ * increment cannot interleave with another revoke.
+ */
+export async function revokeAllSessions(email: string): Promise<number | null> {
+  if (!useDatabase()) {
+    await ensureMemoryLoaded();
+    const user = memoryUsers.get(email);
+    if (!user) return null;
+    const next = user.tokenGeneration + 1;
+    memoryUsers.set(email, { ...user, tokenGeneration: next });
+    await persistMemory();
+    invalidateSessionIdentity(email);
+    return next;
+  }
+  const result = await getPgPool().query<{ token_generation: number }>(
+    `UPDATE auth_users SET token_generation = token_generation + 1
+     WHERE email = $1 RETURNING token_generation`,
+    [email]
+  );
+  invalidateSessionIdentity(email);
+  if (result.rowCount === 0) return null;
+  return result.rows[0].token_generation;
+}
+
+/** Clears every cached identity. Tests reuse emails; a leaked entry is a ghost. */
+export function resetSessionIdentityCacheForTests() {
+  sessionIdentityCache.clear();
+}
+
 export async function getUserSettings(email: string): Promise<Record<string, unknown>> {
   if (!useDatabase()) {
     await ensureMemoryLoaded();
@@ -271,16 +469,7 @@ export async function findUserByIdentifier(identifier: string, normalizedPhone: 
     return byPhone ?? null;
   }
 
-  const result = await getPgPool().query<{
-    email: string;
-    password_hash: string;
-    phone: string | null;
-    full_name: string;
-    role: "worker" | "supervisor" | "admin";
-    company_id: string | null;
-    company_role: CompanyRole | null;
-    created_at: Date;
-  }>(
+  const result = await getPgPool().query<UserRow>(
     `
     SELECT ${USER_COLUMNS}
     FROM auth_users
@@ -324,6 +513,7 @@ export async function createUser(
       companyId,
       companyRole,
       createdAt: new Date().toISOString(),
+      tokenGeneration: 0,
     });
     await persistMemory();
     return;
@@ -580,21 +770,48 @@ export async function deletePasswordResetToken(token: string) {
   await getPgPool().query(`DELETE FROM auth_password_reset_tokens WHERE token = $1`, [token]);
 }
 
-export async function updateUserPassword(email: string, passwordHash: string) {
+/**
+ * Set a new password hash and end every session on the account.
+ *
+ * RETURNS THE NEW GENERATION, and the caller needs it. The increment revokes
+ * the credential the caller is holding RIGHT NOW — including the one they just
+ * changed their password with, on the device in their hand. So
+ * `/auth/change-password` mints a replacement at this value and hands it back;
+ * without the number it would have to re-read the row to find it, and a
+ * re-read is a second chance to read a stale cache and mint a token that is
+ * refused on arrival.
+ *
+ * `null` means there was no such account and nothing was written.
+ */
+export async function updateUserPassword(email: string, passwordHash: string): Promise<number | null> {
   if (!useDatabase()) {
     await ensureMemoryLoaded();
     const user = memoryUsers.get(email);
     if (!user) {
-      return;
+      return null;
     }
+    const next = user.tokenGeneration + 1;
     memoryUsers.set(email, {
       ...user,
       passwordHash,
+      tokenGeneration: next,
     });
     await persistMemory();
-    return;
+    invalidateSessionIdentity(email);
+    return next;
   }
-  await getPgPool().query(`UPDATE auth_users SET password_hash = $2 WHERE email = $1`, [email, passwordHash]);
+  // The increment is the point, not a side effect: changing a password and
+  // leaving every other session signed in is not what anyone means by it, and
+  // it is the one place where the person acting has already proved they are the
+  // account holder (change-password verifies the current password first).
+  const result = await getPgPool().query<{ token_generation: number }>(
+    `UPDATE auth_users SET password_hash = $2, token_generation = token_generation + 1
+     WHERE email = $1 RETURNING token_generation`,
+    [email, passwordHash]
+  );
+  invalidateSessionIdentity(email);
+  if (result.rowCount === 0) return null;
+  return result.rows[0].token_generation;
 }
 
 export async function updateUserProfile(
@@ -612,18 +829,10 @@ export async function updateUserProfile(
     };
     memoryUsers.set(email, updated);
     await persistMemory();
+    invalidateSessionIdentity(email);
     return updated;
   }
-  const result = await getPgPool().query<{
-    email: string;
-    password_hash: string;
-    phone: string | null;
-    full_name: string;
-    role: "worker" | "supervisor" | "admin";
-    company_id: string | null;
-    company_role: CompanyRole | null;
-    created_at: Date;
-  }>(
+  const result = await getPgPool().query<UserRow>(
     `UPDATE auth_users
      SET
       full_name = COALESCE($2, full_name),
@@ -632,6 +841,11 @@ export async function updateUserProfile(
      RETURNING ${USER_COLUMNS}`,
     [email, patch.fullName ?? null, patch.role ?? null]
   );
+  // Invalidated but NOT incremented, and that is a decision. This is a person
+  // editing their own name; ending their sessions on their other devices for it
+  // would be hostile. Dropping the cache entry is enough — the next renewal
+  // mints the new name rather than the old one.
+  invalidateSessionIdentity(email);
   if (result.rowCount === 0) return null;
   return mapUser(result.rows[0]);
 }
@@ -737,11 +951,7 @@ export async function listCompanyMembers(companyId: string): Promise<AuthUser[]>
     await ensureMemoryLoaded();
     return Array.from(memoryUsers.values()).filter((u) => u.companyId === companyId);
   }
-  const result = await getPgPool().query<{
-    email: string; password_hash: string; phone: string | null; full_name: string;
-    role: "worker" | "supervisor" | "admin"; company_id: string | null;
-    company_role: CompanyRole | null; created_at: Date;
-  }>(`SELECT ${USER_COLUMNS} FROM auth_users WHERE company_id = $1 ORDER BY created_at ASC`, [companyId]);
+  const result = await getPgPool().query<UserRow>(`SELECT ${USER_COLUMNS} FROM auth_users WHERE company_id = $1 ORDER BY created_at ASC`, [companyId]);
   return result.rows.map(mapUser);
 }
 
@@ -759,7 +969,27 @@ export async function countCompanyOwners(companyId: string): Promise<number> {
   return Number(result.rows[0].count);
 }
 
-/** Sets a user's company + company_role (used by invite-accept and admin flows). */
+/**
+ * Sets a user's company + company_role (used by invite-accept and admin flows).
+ *
+ * DELIBERATELY DOES NOT INCREMENT THE TOKEN GENERATION.
+ *
+ * It did, briefly, and that was wrong: it conflated "this token is revoked"
+ * with "this token's claims are out of date". The second needs no revocation,
+ * because the claims are never consulted for an authority decision —
+ * `requireAuth` reads company_id and company_role from the row and the row
+ * wins. Invalidating the identity cache is the whole mechanism, and it bounds
+ * the change at the cache TTL.
+ *
+ * Incrementing here also broke the flows this is called from. Removal and
+ * invite-accept both end with the person holding a token at the old generation,
+ * and once refresh enforces the generation — which it must, or revocation is
+ * theatre — their only recovery path answers 401 as well. An invitee accepting
+ * an invitation landed on the login screen, and a demoted crew member was
+ * signed out mid-shift with capture still queued offline.
+ *
+ * See the model at `loadSessionIdentity`.
+ */
 export async function setUserCompany(
   email: string,
   companyId: string | null,
@@ -769,28 +999,40 @@ export async function setUserCompany(
     await ensureMemoryLoaded();
     const user = memoryUsers.get(email);
     if (!user) return null;
-    const updated: AuthUser = {
-      ...user,
-      companyId: companyId ?? "",
-      companyRole,
-    };
+    const updated: AuthUser = { ...user, companyId: companyId ?? "", companyRole };
     memoryUsers.set(email, updated);
     await persistMemory();
+    invalidateSessionIdentity(email);
     return updated;
   }
-  const result = await getPgPool().query<{
-    email: string; password_hash: string; phone: string | null; full_name: string;
-    role: "worker" | "supervisor" | "admin"; company_id: string | null;
-    company_role: CompanyRole | null; created_at: Date;
-  }>(
-    `UPDATE auth_users SET company_id = $2, company_role = $3 WHERE email = $1 RETURNING ${USER_COLUMNS}`,
+  const result = await getPgPool().query<UserRow>(
+    `UPDATE auth_users
+     SET company_id = $2, company_role = $3
+     WHERE email = $1 RETURNING ${USER_COLUMNS}`,
     [email, companyId, companyRole]
   );
+  invalidateSessionIdentity(email);
   if (result.rowCount === 0) return null;
   return mapUser(result.rows[0]);
 }
 
-/** Changes only a member's company_role. */
+/**
+ * Changes only a member's company_role.
+ *
+ * DELIBERATELY DOES NOT INCREMENT THE TOKEN GENERATION — invalidating the
+ * identity cache is what makes a demotion take effect, and it takes effect
+ * within that cache's TTL rather than whenever the demoted person's token
+ * happens to expire. A token minted as `manager` goes on SAYING `manager` for
+ * its whole remaining life; it stops being BELIEVED immediately, because
+ * `requireAuth` takes company_role from the row. The distinction is the entire
+ * design: see the model at `loadSessionIdentity`.
+ *
+ * The alternative — incrementing, so the token is refused outright — signs the
+ * person out. On a demotion that is a person on a site, mid-shift, with capture
+ * queued offline, being sent to a login screen because someone at a desk
+ * changed their rank. Their authority should change under them; their session
+ * should not end.
+ */
 export async function setUserCompanyRole(
   email: string,
   companyRole: CompanyRole
@@ -802,16 +1044,16 @@ export async function setUserCompanyRole(
     const updated: AuthUser = { ...user, companyRole };
     memoryUsers.set(email, updated);
     await persistMemory();
+    invalidateSessionIdentity(email);
     return updated;
   }
-  const result = await getPgPool().query<{
-    email: string; password_hash: string; phone: string | null; full_name: string;
-    role: "worker" | "supervisor" | "admin"; company_id: string | null;
-    company_role: CompanyRole | null; created_at: Date;
-  }>(
-    `UPDATE auth_users SET company_role = $2 WHERE email = $1 RETURNING ${USER_COLUMNS}`,
+  const result = await getPgPool().query<UserRow>(
+    `UPDATE auth_users
+     SET company_role = $2
+     WHERE email = $1 RETURNING ${USER_COLUMNS}`,
     [email, companyRole]
   );
+  invalidateSessionIdentity(email);
   if (result.rowCount === 0) return null;
   return mapUser(result.rows[0]);
 }
@@ -852,14 +1094,19 @@ export async function deleteUserAccount(email: string): Promise<void> {
       if (record.email === email) memoryResetTokens.delete(token);
     }
     await persistMemory();
+    invalidateSessionIdentity(email);
     return;
   }
   // Password reset tokens are deleted via CASCADE on auth_users
   await getPgPool().query(`DELETE FROM auth_pending_registrations WHERE email = $1`, [email]);
   await getPgPool().query(`DELETE FROM auth_users WHERE email = $1`, [email]);
+  // Without this the deleted account keeps authenticating from cache for up to
+  // SESSION_IDENTITY_TTL_MS.
+  invalidateSessionIdentity(email);
 }
 
 export async function resetAuthStoreForTests() {
+  resetSessionIdentityCacheForTests();
   if (useDatabase()) {
     await getPgPool().query(`DELETE FROM auth_password_reset_tokens`);
     await getPgPool().query(`DELETE FROM auth_pending_registrations`);
