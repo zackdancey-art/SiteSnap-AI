@@ -3278,7 +3278,101 @@ and the test is annotated to say so.
 **Disposition:** FIXED on `feat/sessions-and-tokens`, 16 October 2026. **API and test only — no
 mobile or portal file changed**, so the OTA already prepared for this branch is unaffected.
 
-**Still open, and it is the same argument the Phase 2 cost-out made:** one grep for writes to
-`auth_users` outside `authStore.ts` found exactly one, and it was this defect. The only structural
-guard against the eighth instance is making the in-memory path unreachable in CI (option A in the
+**The completeness claim this entry first made was scoped circularly, and is replaced.** It read:
+"one grep for writes to `auth_users` outside `authStore.ts` found exactly one, and it was this
+defect." That rests on every function *inside* `authStore.ts` evicting for itself — which was design
+intent, not measurement, and the defect was precisely a caller going around the function. Enumerated
+instead, every statement anywhere in the repository that writes `company_id`, `company_role` or
+`role` on `auth_users`:
+
+| where | writes a claim | evicts |
+|---|---|---|
+| `storage/authStore.ts:406` `revokeAllSessions` | generation | yes (:410) |
+| `storage/authStore.ts:455` `updateUserSettings` | no — `settings` only | n/a |
+| `storage/authStore.ts:524` `createUser` | `role`, `company_id`, `company_role` | **no** |
+| `storage/authStore.ts:808` `updateUserPassword` | generation | yes (:812) |
+| `storage/authStore.ts:836` `updateUserProfile` | `role` | yes (:848) |
+| `storage/authStore.ts:1009` `setUserCompany` | `company_id`, `company_role` | yes (:1014) |
+| `storage/authStore.ts:1051` `setUserCompanyRole` | `company_role` | yes (:1056) |
+| `storage/authStore.ts:1102` `deleteUserAccount` | DELETE | yes (:1105) |
+| `storage/authStore.ts:1113` `resetAuthStoreForTests` | DELETE | yes, via `resetSessionIdentityCacheForTests()` (:1109) |
+| `storage/projectsStore.ts:1702` accept, Postgres path | `company_id`, `company_role` | **this defect — now yes** |
+| `storage/migrations/016_backfill_companies.sql:39,52,95,140` | `company_id` | no — see below |
+| `teardown-loadtest.ts:59` | DELETE | no — standalone script, no server process |
+
+`createUser` is the one claim-bearing writer in `authStore.ts` that does not evict. It is safe
+**today**, but only because `loadSessionIdentity` deletes its entry and returns `not_found` rather
+than caching a negative, so there is no stale "no such account" to evict — safe by a property of a
+different function, which is the same coupling that produced this finding. If a future change ever
+caches a negative, `createUser` becomes the eighth instance.
+
+**What the grep cannot see, stated rather than assumed.** *Dynamic table names:* the only
+interpolated table map is `projectsStore.ts:1869`
+(`entry|diary|diaryTemplate` → `project_entries|project_diaries|project_templates`); no branch of it
+names `auth_users`, and every other template interpolation in the stores lands in a `WHERE` clause
+(`projectsStore.ts:631,1012`, `incidentStore.ts:222`, `inspectionStore.ts:121`). *CTEs that update:*
+none — no `WITH … UPDATE`/`INSERT`/`DELETE` anywhere. *Upserts:* `ON CONFLICT` in `authStore.ts`
+appears at :567 (pending registrations) and :899 (`companies`), not on `auth_users`, so `createUser`
+is a plain INSERT. *Triggers:* none on `auth_users` (the only triggers are on
+`inspection_signatures`, `project_sites`/`_entries`/`_diaries` and `companies`), so no write can be
+amplified out of sight. *Migrations:* `016` writes `company_id` four times and does not evict; it
+runs in-process at `server.ts:205`, before `initAuthSchema()`, `createApp()` and `app.listen`, so
+within a single process the cache is necessarily empty — **the blind spot is a rolling deploy**,
+where a second instance is still serving with cached identities while the first migrates. The owner
+has not yet told me the Render instance count and I am not guessing it. *Tests:* nine files write
+`auth_users` raw (`incident-roundtrip`, `rls-h1b`, `invite-roundtrip`, `store-roundtrip`,
+`signature-roundtrip`, `rls-integration`); `invite-roundtrip.test.ts:241`
+(`UPDATE auth_users SET company_id = ''`) bypasses eviction deliberately and is the pattern to watch
+if a suite ever goes mysteriously red. *And what no grep can ever see:* a hand edit through a
+database console, and the in-memory store's persistence file.
+
+**Still open, and it is the same argument the Phase 2 cost-out made:** the only structural guard
+against the eighth instance is making the in-memory path unreachable in CI (option A in the
 cost-out) rather than discovering each divergence when a DB suite happens to exercise it.
+
+### L103 — Neither client adopts the credential an acceptance returns, and the deployed accept route returns none, so the same misfiling is possible in production with no cache involved — HIGH (tenant correctness, production; incidence UNMEASURED)
+
+**Found by asking the question of production instead of of the branch.** L102 is a sixty-second
+window on an unmerged branch. The owner asked whether the same misfiling is possible on the code
+deployed **now**, where authority comes from the token's claims and `acceptSiteInvite` mints a
+replacement token carrying the new `companyId` — which is a fix only if the clients adopt it. They
+do not.
+
+**The portal: does not adopt it, and never refreshes.** `apps/supervisor-web/lib/api.ts:204-206`
+posts the invite token and returns `AcceptedInvite`, declared at :189-195 as
+`siteId, siteName, role, companyId?, companyRole?` — there is no `token` field, so a replacement in
+the body is discarded by the type as well as by the code. `/auth/refresh` appears **nowhere** in the
+portal (grep: zero hits). The portal authenticates by cookie, and the **deployed** accept route sets
+no cookie: `setSessionCookie` occurs **0 times** in `origin/main`'s `routes/projects.ts`
+(`git show origin/main:Projects/services/api/src/routes/projects.ts | grep -c setSessionCookie` → 0).
+`app/invite/page.tsx:46-62` signs in, accepts, and redirects two seconds later — on the
+pre-acceptance cookie. Under pre-Phase-2 rules those claims **are** the authority, so until that
+person next signs in, everything they create is stamped with their previous (solo) `company_id` and
+stays that way. Nothing expires; there is no cache in the path.
+
+**Mobile: also discards it, and self-corrects by a second endpoint rather than by design.**
+`apps/mobile/lib/data-context.tsx:963-978` declares the response as `{ siteId, siteName, role }` and
+drops any `token`, then calls `await refreshToken()` before `await refresh()`. The deployed
+`/auth/refresh` (`origin/main:Projects/services/api/src/routes/auth.ts:708-719`) re-reads the row —
+`const user = await findUserByEmail(auth.email); … const companyId = user?.companyId ?? auth.companyId;`
+— so the right company arrives one round trip later. Narrow, but it closes only because a different
+endpoint happens to read the record, and not at all if `refreshToken()` fails, which in an
+offline-first app is a supported state.
+
+**Why this is not a duplicate of L102:** L102 expires after a minute. This has no cache to expire.
+The wrong `company_id` is written into the row.
+
+**Whether it has happened is a count, and the count is UNMEASURED.** It needs the production
+credential, which is not on this machine: `DATABASE_URL` exists in the gitignored
+`services/api/.env` and its value is empty — length 0, established by reading key names and value
+lengths only, never values. A read-only audit query, the fifteen judgeable tables, and the
+total-rows control that distinguishes "no mismatches" from "RLS showed me no rows" were handed to
+the owner to run against production. **No count is asserted here, in either direction. Nothing is
+to be backfilled, cleaned or repaired until the owner has seen the numbers and said so.**
+
+**Disposition:** the branch closes both halves of the server side — the accept path evicts the
+cached identity (L102) and `routes/projects.ts:595-609` mints a replacement token and calls
+`setSessionCookie`, so the portal's credential is replaced in the response instead of being ignored
+in the body. **Open on the clients:** neither client declares or reads the `token` the route
+returns, so both still depend on a second mechanism (cookie replacement, or `/auth/refresh`) rather
+than on the one the route offers.

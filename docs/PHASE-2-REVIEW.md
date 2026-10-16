@@ -425,6 +425,56 @@ divergence was predicted in general terms on 15 October and arrived as a specifi
 in a security-adjacent path, and was caught by a DB suite only because that suite happened to attach
 its crew member through the real invitation journey.
 
+## The eighth failure, which was a different defect wearing the same symptom
+
+Seven of CI's eight failures were L102. The eighth was `auth-401-codes-db.test.js:171` — expected
+`invalid_credentials`, got `session_expired` — and it was the suite's own fault, not the route's.
+Step (3) of "a dead session and a mistyped password are both 401 and are told apart by code" changes
+the password successfully, which is now **defined** to revoke every token on the account including
+the caller's own. Step (4) then presented that same dead token to prove the old password had stopped
+working, so `requireAuth` answered before the route ever reached the password check, and the
+assertion about the **password** was silently measuring the **session**.
+
+Fixed by having the test adopt the replacement token the route hands back — the same move commit
+`7710b16` made in `apps/mobile/app/settings/account.tsx`. Deliberately **not** fixed by reordering
+step (4) above step (3): that would dodge the revocation and leave the file green against a route
+that had stopped issuing a replacement at all, which is the exact change that would sign every
+device out on a password change. The new `assert.ok(ok.body.token, …)` is what makes that
+regression fail loudly instead.
+
+**Local verification:** build clean, in-memory suite 211 tests / 193 pass / 0 fail / 18 skips, the
+DB selector still matches exactly 11 files, `ci.sh --no-db --no-redis` partial-pass. The file is
+DB-gated, so CI is the only verifier that runs it — this one is for the owner's green run, not for
+this machine's.
+
+## What the completeness claim was worth, and L103
+
+Two corrections came out of the owner's review of the L102 writeup, and both are in `docs/AUDIT.md`
+rather than only here.
+
+**The enumeration.** The original claim — one grep found exactly one `auth_users` write outside
+`authStore.ts` — assumed that every function *inside* `authStore.ts` evicts for itself, which was
+intent rather than measurement, and the defect was a caller going around the function. L102 now
+carries the full table: twelve `auth_users` write sites in all, of which ten touch session identity
+and eight evict. The two that do not are `createUser` — safe only because `loadSessionIdentity`
+refuses to cache a negative, so there is no stale "no such account" entry to evict — and migration
+`016`, safe only because migrations run in-process before `app.listen`, which leaves a rolling
+deploy as the one window I cannot close without knowing the instance count. The blind spots the grep could not see
+(dynamic table names, updating CTEs, upserts, triggers, scripts, test raw writes, console edits, the
+in-memory persistence file) are each checked and stated by name.
+
+**L103, which matters more than L102.** L102 is a sixty-second window on an unmerged branch. Asked
+whether the same misfiling is possible on the **deployed** code, the answer is yes, by a route with
+no cache in it at all: the deployed accept route returns a correct replacement token, the portal's
+`AcceptedInvite` type does not even declare a `token` field, the portal never calls `/auth/refresh`,
+and the deployed route sets no cookie — so a portal invitee keeps pre-acceptance claims until their
+next sign-in, and pre-Phase-2 those claims *are* the authority. Mobile discards the token too and
+survives only because `/auth/refresh` re-reads the row. This branch closes the server side of it
+(`routes/projects.ts:595-609`). **Whether it has already misfiled real rows is a count, it needs the
+production credential, and that credential is not on this machine** — the query and the judgeable
+table list are in the handover. No count is claimed in either direction, and nothing is to be
+repaired until the owner has seen the numbers.
+
 ---
 
 *Co-Authored-By: Claude Opus 5*
