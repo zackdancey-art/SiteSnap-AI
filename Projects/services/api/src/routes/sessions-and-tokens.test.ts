@@ -46,6 +46,7 @@ import { resetProjectStoreForTests } from "../storage/projectsStore";
 import { resetRateLimitStoreForTests } from "../middleware/rateLimit";
 import { hashPassword } from "../utils/password";
 import { getSessionTimings, AuthClaims } from "../utils/authToken";
+import { SESSION_COOKIE } from "../utils/sessionCookie";
 
 let server: http.Server;
 let baseUrl: string;
@@ -66,12 +67,27 @@ const NEXT_PASSWORD = "Sessions_pw_2B!";
  */
 const SECRET = process.env.AUTH_TOKEN_SECRET || "dev-sitesnap-secret";
 
+/**
+ * `headers` is returned, not just the status and body, because half of this
+ * API's session handling happens in a response header and none of it was
+ * asserted. Five routes write a `Set-Cookie` — login, refresh, change-password,
+ * revoke-all and `/projects/invites/accept` — and before this there was not one
+ * `set-cookie` assertion in the suite, so every one of them could have been
+ * deleted with the whole suite still green. AUDIT L104 is the standing record of
+ * which four are still in that state.
+ *
+ * `cookie` is the portal's transport. A test that drives these routes with an
+ * `Authorization` header is testing the mobile client's path; the portal's
+ * cookie is httpOnly and cannot read a token out of a response body, so for the
+ * portal a replacement credential arrives as a `Set-Cookie` or not at all.
+ */
 async function req<T = unknown>(
   method: string,
   path: string,
   body?: unknown,
-  token?: string
-): Promise<{ status: number; body: T }> {
+  token?: string,
+  cookie?: string
+): Promise<{ status: number; body: T; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const payload = body ? JSON.stringify(body) : undefined;
     const r = http.request(
@@ -81,6 +97,7 @@ async function req<T = unknown>(
         headers: {
           "Content-Type": "application/json",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(cookie ? { Cookie: cookie } : {}),
           ...(payload ? { "Content-Length": Buffer.byteLength(payload).toString() } : {}),
         },
       },
@@ -88,7 +105,7 @@ async function req<T = unknown>(
         let data = "";
         res.on("data", (chunk: string) => (data += chunk));
         res.on("end", () => {
-          try { resolve({ status: res.statusCode ?? 0, body: JSON.parse(data) as T }); }
+          try { resolve({ status: res.statusCode ?? 0, body: JSON.parse(data) as T, headers: res.headers }); }
           catch { reject(new Error(`Non-JSON (${res.statusCode}): ${data}`)); }
         });
       }
@@ -97,6 +114,28 @@ async function req<T = unknown>(
     if (payload) r.write(payload);
     r.end();
   });
+}
+
+/**
+ * The session cookie out of a response, as a browser would send it back.
+ *
+ * Returned as the raw `name=value` pair rather than a decoded token, because
+ * that is what the browser echoes and `readSessionCookie` is what decodes it —
+ * re-encoding here would test this helper's agreement with itself instead of the
+ * server's. SESSION_COOKIE is imported rather than written out so that renaming
+ * the cookie fails this test rather than making it vacuous; a bare
+ * "sitesnap.session" literal in middleware/auth.ts is what made the name worth
+ * centralising in the first place (see utils/sessionCookie.ts).
+ */
+function sessionCookieFrom(headers: http.IncomingHttpHeaders, whichRoute: string): string {
+  const raw = headers["set-cookie"] ?? [];
+  const hit = raw.find((c) => c.startsWith(`${SESSION_COOKIE}=`));
+  assert.ok(
+    hit,
+    `${whichRoute} sent no ${SESSION_COOKIE} cookie, so a portal caller never receives the credential it minted — ` +
+      `set-cookie was ${JSON.stringify(raw)}`
+  );
+  return (hit as string).split(";")[0];
 }
 
 let _phoneSeq = 0;
@@ -147,6 +186,9 @@ async function login(): Promise<string> {
 }
 
 const status = async (token: string) => (await req("GET", "/auth/me", undefined, token)).status;
+/** The same probe over the portal's transport: no Authorization header at all. */
+const cookieStatus = async (cookie: string) =>
+  (await req("GET", "/auth/me", undefined, undefined, cookie)).status;
 
 before(async () => {
   const app = createApp();
@@ -254,6 +296,79 @@ test("a password change signs out every other device and leaves this one signed 
   // And the whole reason the route returns a token: the device in your hand does
   // not get signed out for using the feature correctly.
   assert.equal(await status(changed.body.token as string), 200, "the replacement must keep the acting device signed in");
+});
+
+/**
+ * The same contract as the test above, over the OTHER transport.
+ *
+ * WHY THIS IS A SEPARATE TEST AND NOT A SECOND ASSERTION UP THERE
+ *
+ * The test above drives change-password with an `Authorization` header and
+ * asserts on `body.token`. That is the mobile client's path, and it is the only
+ * path anything asserted: `setSessionCookie(res, token)` could have been deleted
+ * from routes/auth.ts and every test in this suite — all seven in
+ * change-password.test.ts included — would still have passed. The portal's
+ * cookie is httpOnly, so it cannot read the body's token; for a portal caller
+ * the replacement arrives as a `Set-Cookie` or not at all.
+ *
+ * WHAT BREAKS IF THIS FAILS
+ *
+ * A password change increments `token_generation`, and `requireAuth` refuses a
+ * token behind the record (middleware/auth.ts:193). That `return` is BEFORE the
+ * staleClaims repair at middleware/auth.ts:247, so the repair — which does
+ * compare the generation — can never rescue a cookie that is one generation
+ * behind. Nothing else in the system defends this: without the Set-Cookie,
+ * every portal user who successfully changes their password is signed out on
+ * their next request, having done nothing wrong. This test is the only thing
+ * standing there, so it is written to fail loudly (`sessionCookieFrom` asserts
+ * and prints the actual `set-cookie`) rather than to fail as a confusing 401.
+ *
+ * WHY IT HAS NO POSTGRES TWIN, WHICH IS A DEVIATION FROM THIS FILE'S RULE
+ *
+ * Deliberate, not forgotten. The store-dependent half of this behaviour is the
+ * generation `updateUserPassword` returns, and the test above already asserts
+ * that on both stores. What is new here lives entirely in the route's response
+ * headers, which `authStore`'s DATABASE_URL branch cannot reach — so a twin
+ * would duplicate the assertion without being able to detect a divergence,
+ * which is the one thing the pair exists for.
+ */
+test("a password change replaces the portal's cookie, and the cookie that made the change stops working", async () => {
+  await seedOwner();
+
+  // Sign in for a COOKIE rather than a token: this is the portal's journey.
+  const signedIn = await req<{ token?: string }>("POST", "/auth/login", { email: OWNER, password: PASSWORD });
+  assert.equal(signedIn.status, 200, `login failed: ${JSON.stringify(signedIn.body)}`);
+  const original = sessionCookieFrom(signedIn.headers, "login");
+
+  // CONTROL, on the same route this test will later expect to refuse that
+  // cookie. Without it the 401 below passes just as well against a server that
+  // refuses every cookie it is ever sent — which is exactly how /uploads/sign
+  // shipped denying everyone with 126 tests green (docs/VACUITY-AUDIT.md, M7).
+  assert.equal(await cookieStatus(original), 200, "control: the session cookie works before the change");
+
+  const changed = await req<{ ok?: boolean; token?: string }>(
+    "POST",
+    "/auth/change-password",
+    { currentPassword: PASSWORD, newPassword: NEXT_PASSWORD },
+    undefined,
+    original
+  );
+  assert.equal(changed.status, 200, `change-password over the cookie transport failed: ${JSON.stringify(changed.body)}`);
+  assert.equal(changed.body.ok, true);
+
+  // THE ASSERTION THIS TEST EXISTS FOR.
+  const replacement = sessionCookieFrom(changed.headers, "change-password");
+  assert.notEqual(
+    replacement,
+    original,
+    "change-password echoed the cookie it was sent instead of minting one at the new generation"
+  );
+
+  // Both halves, in the same test. The replacement works...
+  assert.equal(await cookieStatus(replacement), 200, "the replacement cookie must keep the portal signed in");
+  // ...and the one that made the change does not, which is what the increment
+  // means and why the replacement is not a courtesy.
+  assert.equal(await cookieStatus(original), 401, "the cookie that changed the password must be revoked by the change");
 });
 
 test("a token that has just expired can refresh; one past the idle window cannot", async () => {

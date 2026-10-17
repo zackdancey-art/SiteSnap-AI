@@ -3376,3 +3376,76 @@ cached identity (L102) and `routes/projects.ts:595-609` mints a replacement toke
 in the body. **Open on the clients:** neither client declares or reads the `token` the route
 returns, so both still depend on a second mechanism (cookie replacement, or `/auth/refresh`) rather
 than on the one the route offers.
+
+### L104 — The cookie transport is written by five routes and was asserted by none; one is now covered and four are a known gap — MEDIUM (test integrity; the shape that produced L102 and the eighth CI failure)
+
+**Measured, not estimated.** A grep of every `*.test.ts` in `services/api` for `set-cookie`,
+`setCookie`, `getSetCookie`, `headers.get("cookie"` and `res.headers[` returned **zero hits**. The
+API has two session transports — a bearer token for the mobile client, an httpOnly cookie for the
+portal — and the entire suite exercised one of them. Every `setSessionCookie` call in the product
+could have been deleted with the suite green.
+
+**The five routes that write one.** Counted, not recalled: `/usr/bin/grep -n 'setSessionCookie('`
+over `routes/` returns exactly these five call sites and no others.
+
+| route | `setSessionCookie` | covered |
+|---|---|---|
+| `POST /auth/change-password` | `routes/auth.ts:893` | **yes**, as of this entry |
+| `POST /auth/login` | `routes/auth.ts:537` (in `loginHandler`, mounted at `:555`) | no |
+| `POST /auth/refresh` | `routes/auth.ts:799` | no |
+| `POST /auth/revoke-all` | `routes/auth.ts:942` | no |
+| `POST /projects/invites/accept` | `routes/projects.ts:609`, gated on transport | no |
+
+**`POST /auth/register/verify` is not a sixth row, and the reason is worth keeping.** It mints a
+token into its 201 body (`routes/auth.ts:469`) and calls `setSessionCookie` nowhere, so a portal
+registration finishes with an account and no session. That is already known and already compensated:
+the portal's signup page calls `login` immediately afterwards and says why at
+`apps/supervisor-web/app/signup/page.tsx:20-26` ("step 3 sets NO session cookie") and again at the
+call site, `:124-126`. It is the one route of the six candidates where the missing cookie is
+deliberate and documented on both sides, which is why it needs no test here — but if anyone ever
+adds a `setSessionCookie` to it, that comment and that extra `login` call are what must change with
+it.
+
+**Why change-password was taken first.** It is the only one of the six where the absence of the
+Set-Cookie signs a person out for using a feature correctly. A password change increments
+`token_generation`; `requireAuth` refuses a token behind the record at `middleware/auth.ts:193`, and
+that `return` is **before** the staleClaims repair at `middleware/auth.ts:247` — so the repair, which
+does compare the generation, can never reach a cookie that is one generation behind. Nothing
+downstream defends the line. The owner asked the question directly, before merging, having noticed
+that this is the same shape as L102 and as CI's eighth failure: *a route hands back a replacement
+credential and one transport never picks it up.* The code was already correct. The test was not
+there.
+
+**The test, and what it cost.** `sessions-and-tokens.test.ts` grew a `headers` field on its request
+helper (the `http.IncomingMessage` was already in hand and the headers were being discarded), an
+optional `cookie` argument so a test can drive a route the way the portal does, a
+`sessionCookieFrom` reader that imports `SESSION_COOKIE` rather than spelling it out — so renaming
+the cookie fails the test instead of making it vacuous — and one test: sign in for a cookie, prove
+the cookie works, change the password over it, require a `Set-Cookie` carrying a different token,
+then prove the replacement is accepted and the original is refused. Both controls in the same test,
+per the file's standing rule.
+
+**Red-on-revert, performed rather than asserted.** Deleting `setSessionCookie(res, token);` from
+change-password (`routes/auth.ts:893`, `:870` before this commit's comment block) fails that test — `change-password sent no sitesnap.session cookie, so a portal
+caller never receives the credential it minted — set-cookie was []` — and fails **nothing else**:
+1 failure out of 212, with all seven `change-password.test.ts` cases and the bearer-transport twin
+("a password change signs out every other device and leaves this one signed in") still green. That
+is the measurement of the gap, not a claim about it.
+
+**The inconsistency, recorded so that nobody tidies it into a defect.** `accept` gates its
+`setSessionCookie` on `authTransport === "cookie"` (`routes/projects.ts:608-610`); change-password
+calls it unconditionally. Both are correct for their route, and a consistency pass that gated
+change-password to match would sign out every portal user who changes their password. The reason
+they differ: accept hands a bearer caller a token at a *different* generation from the cookie it
+would also set, and a device holding two credentials at two generations is a defect in waiting;
+change-password's cookie and body token are the *same* token, minted once, so setting both costs
+nothing. That argument now lives as a comment at the call site, phrased as what breaks if you change
+it rather than as what it does.
+
+**Open:** the four uncovered routes above. They are cheap now that the helper carries headers — the same four
+lines of assertion each — and they are deliberately not in this commit, which was kept to the one
+route with a sign-out behind it. `/auth/reset-password` (`routes/auth.ts:1056`) also increments the
+generation and sets no cookie; that is correct and is not part of this gap, because the
+route is unauthenticated, driven by the token in an emailed link, and its own reply tells the person
+to sign in — ending every session is the point of a reset.
+

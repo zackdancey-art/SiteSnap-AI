@@ -867,6 +867,29 @@ router.post("/auth/change-password", requireAuth, async (req: Request, res: Resp
       companyRole: user.companyRole,
       tokenGeneration: nextGeneration,
     });
+    // UNCONDITIONAL, AND NOT AN OVERSIGHT. DO NOT GATE THIS ON TRANSPORT.
+    //
+    // `/projects/invites/accept` writes its Set-Cookie only when
+    // `authTransport === "cookie"`, and the two look inconsistent side by side.
+    // A consistency pass that gates this one to match would sign out every
+    // portal user who changes their password: the cookie they arrived with is
+    // one generation behind the moment `updateUserPassword` returns, and
+    // `requireAuth` refuses a token behind the record (middleware/auth.ts:193)
+    // BEFORE it reaches the staleClaims repair (middleware/auth.ts:247) — so
+    // nothing downstream can rescue it. The Set-Cookie is the only thing there.
+    //
+    // The reason accept can gate it and this cannot: accept hands a bearer
+    // caller a token at a DIFFERENT generation from the cookie it would also
+    // set, and a device holding two credentials at two generations is a bug
+    // waiting to be found. Here the cookie and `token` in the body are the SAME
+    // token, minted once above, so setting both costs nothing and risks nothing.
+    //
+    // Guarded by "a password change replaces the portal's cookie, and the cookie
+    // that made the change stops working" in sessions-and-tokens.test.ts.
+    // Verified red-on-revert: deleting this line fails that test and NOTHING
+    // else — all seven change-password.test.ts cases and the bearer-transport
+    // twin stay green, which is why the test had to be written before this
+    // comment could claim anything.
     setSessionCookie(res, token);
     return res.json({ ok: true, token });
   } catch (error) {
