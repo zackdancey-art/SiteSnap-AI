@@ -33,6 +33,36 @@ export const LIMITS = {
     max: envInt("RATE_LIMIT_LOGIN_PER_IP", 300),
     windowMs: envInt("RATE_LIMIT_LOGIN_PER_IP_WINDOW_MS", 15 * 60 * 1000),
   },
+  /**
+   * Token refresh: per-account and per-IP.
+   *
+   * /auth/refresh mints a credential, so it is worth a budget: a stolen token
+   * inside its grace window can otherwise be turned into an unbroken chain of
+   * fresh ones for as long as nobody revokes it, and a client stuck in a
+   * refresh loop can do the same thing by accident.
+   *
+   * Both are deliberately generous, because the cost of being wrong is
+   * asymmetric. A refresh that is refused is a person signed out of a working
+   * app: the mobile client refreshes on launch, when a token is within its
+   * expiry window, and as the retry behind any 401. Sixty in a quarter of an
+   * hour is one every fifteen seconds sustained — more than any honest client
+   * needs and well short of what farming tokens in bulk requires. The per-IP
+   * figure has to clear a whole crew sharing one site connection or one
+   * carrier NAT, so it is an order of magnitude higher.
+   *
+   * The account budget is only reachable with a token that has already
+   * VERIFIED, so it cannot be used to lock someone out of refreshing by
+   * spending their allowance with garbage; see the ordering comment on the
+   * route.
+   */
+  refreshPerAccount: {
+    max: envInt("RATE_LIMIT_REFRESH_PER_ACCOUNT", 60),
+    windowMs: envInt("RATE_LIMIT_REFRESH_PER_ACCOUNT_WINDOW_MS", 15 * 60 * 1000),
+  },
+  refreshPerIp: {
+    max: envInt("RATE_LIMIT_REFRESH_PER_IP", 600),
+    windowMs: envInt("RATE_LIMIT_REFRESH_PER_IP_WINDOW_MS", 15 * 60 * 1000),
+  },
   // Registration initiate: per-IP (one network can onboard a whole crew)
   registerPerIp: {
     max: envInt("RATE_LIMIT_REGISTER_PER_IP", 30),

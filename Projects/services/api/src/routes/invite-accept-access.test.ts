@@ -379,7 +379,25 @@ test("the diary gate reads the status field and not the path, so crew keep diari
   assert.equal(stillAlive.status, 200, "a 403 must not have cost the crew member their session");
 });
 
-test("after acceptance the pre-acceptance token is still unprivileged, and /auth/refresh is what lifts it", async () => {
+/**
+ * THE INVERSION OF THIS TEST IS THE POINT.
+ *
+ * Until this branch it asserted that a pre-acceptance token stayed
+ * UNPRIVILEGED after acceptance, and that `/auth/refresh` was the only thing
+ * that lifted it. That was a faithful test of a real defect: authorisation
+ * read the token's claims, so an invitee's own credential kept saying "no
+ * company, crew rank" until they replaced it, and nothing recovered on its own
+ * because the refusal was a 403 and the mobile client's retry only fires on
+ * 401.
+ *
+ * THE SESSION MODEL (`storage/authStore.ts`) closes that: authority comes from
+ * the row, so the claim is never consulted and never has to be corrected. The
+ * assertions below are the same measurements with the expectations flipped,
+ * which is the strongest regression test available for the new model — if a
+ * future change restores claim-derived authority, this file goes red on the
+ * exact route and rank the defect was reported on.
+ */
+test("after acceptance the pre-acceptance token is immediately privileged, because authority comes from the row", async () => {
   const ownerToken = await registerUser("owner3@l66.test", "Owner", { companyName: "L66 Co 3" });
   const orphanToken = await registerOrphanedInvitee("orphan3@l66.test", "Orphan");
 
@@ -399,31 +417,47 @@ test("after acceptance the pre-acceptance token is still unprivileged, and /auth
   assert.ok(freshToken, "acceptance must reissue a token");
   assert.notEqual(freshToken, orphanToken, "the reissued token must not be the one presented");
 
-  // THE DEFECT, stated as an assertion: authorisation reads the token's claims,
-  // never the user row, so the token the invitee was holding when they accepted
-  // is still scoped to no company and crew rank. A client that keeps it sees an
-  // empty app and cannot tell why. Nothing recovers from this on its own — the
-  // refusal is 403, and the refresh-and-retry inside the mobile client's apiJson
-  // only triggers on 401.
+  // THE PROPERTY: the credential the invitee was already holding works, at the
+  // rank the row now carries, with no replacement and no extra round trip. Its
+  // claims still say "no company, crew" — they are seven days from expiry and
+  // nothing rewrites them — and that is exactly why this is the assertion
+  // worth making: it can only pass if `requireAuth` ignored them.
   const stale = await req<{ error?: string }>("GET", "/company/profile", undefined, orphanToken);
   assert.equal(
-    stale.status, 403,
-    `the pre-acceptance token must still be refused: ${stale.status} ${JSON.stringify(stale.body)}`
+    stale.status, 200,
+    `the pre-acceptance token must be honoured at the row's rank: ${stale.status} ${JSON.stringify(stale.body)}`
   );
 
-  // POSITIVE CONTROL, same route, same run: the route is reachable with the
-  // right claims. Without this the 403 above is equally consistent with
-  // /company/profile being broken, removed, or refusing every caller alive.
+  // CONTROL, same route, same run: the reissued token reaches it too. Without
+  // this the 200 above is equally consistent with /company/profile having lost
+  // its gate and admitting every caller alive — and the rank control is the
+  // next assertion, not this one.
   const withFresh = await req("GET", "/company/profile", undefined, freshToken);
   assert.equal(
     withFresh.status, 200,
     `control: the reissued token must reach the same route: ${withFresh.status} ${JSON.stringify(withFresh.body)}`
   );
 
-  // Why the staleness is invisible to the obvious check: /auth/me answers from
-  // the user ROW, so it reports the new company even through the stale token.
-  // The profile screen looks correct while every authorising route disagrees.
-  // Anyone diagnosing this by calling /auth/me will conclude there is no bug.
+  // THE RANK CONTROL, in the same test, because "the row decides" is only a
+  // security property if the row can still say no. An account whose row says
+  // crew is refused the same route the manager row above reached — so the 200s
+  // are about this user's rank and not about the gate having been removed.
+  const crewOnlyToken = await registerOrphanedInvitee("crew3@l66.test", "Crew");
+  const crewInvite = await inviteCompanyMember(ownerToken, "crew3@l66.test", "crew");
+  const crewAccept = await req("POST", "/projects/invites/accept", { token: crewInvite }, crewOnlyToken);
+  assert.equal(crewAccept.status, 200, `seed: the crew invitee must be able to accept: ${JSON.stringify(crewAccept.body)}`);
+  const crewRefused = await req<{ error?: string }>("GET", "/company/profile", undefined, crewOnlyToken);
+  assert.equal(
+    crewRefused.status, 403,
+    `a crew row must still be refused the company profile: ${crewRefused.status} ${JSON.stringify(crewRefused.body)}`
+  );
+
+  // /auth/me has always answered from the user ROW. Under the old model that
+  // made the defect invisible to the obvious check — the profile screen looked
+  // correct while every authorising route disagreed, so anyone diagnosing it
+  // with /auth/me concluded there was no bug. Under the new model it is simply
+  // the same source of truth as everything else, which is the point: there is
+  // now one answer to "what may this caller do", not two.
   const me = await req<{ user: { companyId: string } }>("GET", "/auth/me", undefined, orphanToken);
   assert.equal(me.status, 200);
   assert.equal(
@@ -431,10 +465,13 @@ test("after acceptance the pre-acceptance token is still unprivileged, and /auth
     "/auth/me reads the row, so it must report the joined company even on the stale token"
   );
 
-  // THE MECHANISM THE MOBILE CLIENT NOW RELIES ON: /auth/refresh takes the
-  // stale token — it is valid, merely under-privileged — re-reads the row, and
-  // mints claims carrying the company. data-context's acceptInvite calls this
-  // immediately after accepting, before reading any data.
+  // /auth/refresh still works on that token, and still mints claims carrying
+  // the company — it is now a cache refresh rather than a rescue. It stays
+  // asserted because the mobile client calls it immediately after accepting
+  // (data-context's acceptInvite) and because it is the 401 retry path in
+  // apiJson: if it ever stopped accepting a token like this one, an invitee
+  // would be returned to the login screen, which is the regression that made
+  // this whole model necessary.
   const refreshed = await req<{ token?: string }>("POST", "/auth/refresh", undefined, orphanToken);
   assert.equal(refreshed.status, 200, `refresh must accept the stale token: ${JSON.stringify(refreshed.body)}`);
   assert.ok(refreshed.body.token, "refresh must return a token");

@@ -5,9 +5,10 @@ import path from "path";
 import { AddressInfo } from "net";
 import { after, test } from "node:test";
 import { createApp } from "../server";
-import { initAuthSchema, resetAuthStoreForTests } from "../storage/authStore";
+import { createUser, initAuthSchema, resetAuthStoreForTests } from "../storage/authStore";
 import { initProjectSchema, resetProjectStoreForTests } from "../storage/projectsStore";
 import { createAuthToken } from "../utils/authToken";
+import { hashPassword } from "../utils/password";
 
 const originalCwd = process.cwd();
 
@@ -32,7 +33,30 @@ test("HTTP API flow persists site and entry data and generates diary by siteId",
   try {
     const port = (server.address() as AddressInfo).port;
     const baseUrl = `http://127.0.0.1:${port}`;
-    const token = createAuthToken({ email: "flow@example.com", fullName: "Flow User", role: "supervisor", companyId: "flow-test-company", companyRole: "owner" });
+    // THE ROW IS NOW REQUIRED, NOT OPTIONAL.
+    //
+    // This test used to mint a token for an email with no auth_users row and
+    // drive the whole flow with it. That worked while authorisation read the
+    // token's claims: a valid signature was a valid session, and the user
+    // needed only to exist in the token. `requireAuth` now reads the row on
+    // every authenticated request — authority comes from it, not from the
+    // claims (THE SESSION MODEL, storage/authStore.ts) — so a token for a
+    // non-existent user is a dead session and answers 401.
+    //
+    // Seeding the user is the correct fix rather than a concession to the
+    // middleware: a bearer token that no account backs is exactly what this
+    // API should refuse, and `projects.e2e.test.ts` has always set its
+    // fixtures up this way.
+    await createUser(
+      "flow@example.com",
+      await hashPassword("Password123!"),
+      "+14155550199",
+      "Flow User",
+      "supervisor",
+      "flow-test-company",
+      "owner",
+    );
+    const token = createAuthToken({ email: "flow@example.com", fullName: "Flow User", role: "supervisor", companyId: "flow-test-company", companyRole: "owner", tokenGeneration: 0 });
     const headers = {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,

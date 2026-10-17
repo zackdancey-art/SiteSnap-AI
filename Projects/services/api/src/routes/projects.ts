@@ -5,6 +5,8 @@ import { verifyProvenance } from "../services/diaryProvenance";
 import { FIELD_ACCESS, requireAtLeast, AuthenticatedRequest } from "../middleware/auth";
 import { requireOwnRecord } from "../middleware/recordOwnership";
 import { createAuthToken } from "../utils/authToken";
+import { findUserByEmail } from "../storage/authStore";
+import { setSessionCookie } from "../utils/sessionCookie";
 import {
   acceptSiteInvite,
   isAcceptInviteSuccess,
@@ -560,15 +562,51 @@ projectsRouter.post("/projects/invites/accept", async (req, res) => {
   }
   // Issue a fresh token so the caller's updated role takes effect immediately
   // without requiring a separate login step.
+  //
+  // THIS TOKEN IS A CONVENIENCE, AND SAYING SO IS THE POINT
+  //
+  // An earlier revision of this branch had `setUserCompany` increment the
+  // token generation, on the reasoning that a changed companyId makes the
+  // tokens on the holder's other devices address the wrong tenant. That made
+  // this replacement load-bearing -- and it also meant the caller's CURRENT
+  // credential stopped being accepted at the moment they used it, including at
+  // `/auth/refresh`, which is the mobile client's only recovery path. An
+  // invitee accepting an invitation landed on the login screen. Measured, not
+  // theorised.
+  //
+  // Under the model now in force (see THE SESSION MODEL at
+  // `storage/authStore.ts`) that cannot happen: the stale claim is never
+  // consulted for a decision, because `requireAuth` takes the acting company
+  // and rank from the row. The caller's existing token keeps working through
+  // the acceptance and afterwards. So this token is a cache refresh, not a
+  // rescue: the client that stores it stops carrying claims it knows are
+  // behind, which is worth doing and is not worth revoking anything for.
+  //
+  // It is minted from the RECORD, not from `result` and not from the claims.
+  // `result` carries what the handler intended to write; the record carries
+  // what the database actually has. AUDIT L65 was accept reporting success for
+  // attaching nobody to anything, and a token asserting a membership the row
+  // disagrees with is the same lie one layer along. Reading the row is free
+  // here -- it is the same query the generation needs.
   const reqAuth = (req as unknown as AuthenticatedRequest).auth;
-  const effectiveCompanyId = result.companyId ?? reqAuth.companyId;
-  const effectiveCompanyRole = result.companyRole ?? reqAuth.companyRole;
+  const record = await findUserByEmail(reqAuth.email);
+  const effectiveCompanyId = record?.companyId ?? result.companyId ?? reqAuth.companyId;
+  const effectiveCompanyRole = record?.companyRole ?? result.companyRole ?? reqAuth.companyRole;
   const freshToken = createAuthToken({
     email: reqAuth.email,
-    fullName: reqAuth.fullName,
-    role: reqAuth.role,
+    fullName: record?.fullName ?? reqAuth.fullName,
+    role: record?.role ?? reqAuth.role,
     companyId: effectiveCompanyId,
     companyRole: effectiveCompanyRole,
+    tokenGeneration: record?.tokenGeneration ?? reqAuth.tokenGeneration,
   });
+  // The portal cannot read the token out of the body -- its session cookie is
+  // httpOnly, which is the whole point of it -- so for a cookie caller the
+  // replacement has to arrive as a Set-Cookie or not at all. Bearer callers get
+  // it in the body, as they always have; setting a cookie for them as well
+  // would leave the device holding two credentials at two generations.
+  if ((req as unknown as AuthenticatedRequest).authTransport === "cookie") {
+    setSessionCookie(res, freshToken);
+  }
   return res.json({ token: freshToken, siteId: result.siteId, siteName: result.siteName, role: result.role, companyId: effectiveCompanyId, companyRole: effectiveCompanyRole });
 });

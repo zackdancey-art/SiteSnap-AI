@@ -297,16 +297,37 @@ test("invited member sees the site in their sites list", async () => {
   assert.ok(sitesR.body.sites.some((s) => s.id === siteId && s.name === "Member Site"),
     "member should see the invited site");
 
-  // The other control, on the same route in the same test: the stale token is
-  // scoped to the member's own empty company, so it must NOT see the site.
-  // Without this, the assertion above would pass equally well if /projects/sites
-  // had started returning every site in the database.
+  // The other control, on the same route in the same test, so the assertion
+  // above cannot be satisfied by /projects/sites returning every site in the
+  // database: an account in a DIFFERENT company must not see this site.
+  //
+  // This control used to be the member's own pre-acceptance token, on the
+  // reasoning that its claims were scoped to the member's own empty company.
+  // That stopped being a cross-company control the moment authority moved to
+  // the user row (THE SESSION MODEL, `storage/authStore.ts`): the stale token
+  // now resolves to the joined company, correctly, and so it sees the site.
+  // A separate registration is what the control was always reaching for, and
+  // unlike the stale token it cannot be weakened by a change to how claims are
+  // read — it is a different company id in the database.
+  const outsiderToken = await registerAndLogin("outsider@example.com", "+447911000140", "Outsider");
+  const outsiderR = await req<{ sites: Array<{ id: string }> }>(
+    "GET", "/projects/sites", undefined, outsiderToken
+  );
+  assert.equal(outsiderR.status, 200);
+  assert.ok(!outsiderR.body.sites.some((s) => s.id === siteId),
+    "another company must not see this company's site");
+
+  // AND the stale token now reaches the site, which is the model working
+  // rather than a leak: the row says this person is in the company, so they
+  // are, whatever their week-old claims say. Asserted rather than left
+  // implicit, because a future change that reinstated claim-derived authority
+  // would otherwise only show up as an invitee stuck on a login screen.
   const staleR = await req<{ sites: Array<{ id: string }> }>(
     "GET", "/projects/sites", undefined, memberToken
   );
   assert.equal(staleR.status, 200);
-  assert.ok(!staleR.body.sites.some((s) => s.id === siteId),
-    "the pre-accept token's company must not see another company's site");
+  assert.ok(staleR.body.sites.some((s) => s.id === siteId),
+    "the pre-accept token must see the site, because the row and not the claim decides");
 });
 
 test("supervisor can revoke an invite", async () => {
@@ -369,17 +390,54 @@ test("supervisor can remove a member", async () => {
   const memberToken = await registerAndLogin("leaveme@example.com", "+447911000095", "Leave");
   await seed("POST", "/projects/invites/accept", { token: listR.body.invites[0].token }, memberToken);
 
+  // POSITIVE CONTROL FIRST: they are on the site before the removal, so the
+  // absence asserted below is a removal and not a membership that never
+  // existed.
+  const beforeR = await req<{ members: Array<{ memberEmail: string }> }>(
+    "GET", `/projects/sites/${siteId}/members`, undefined, supToken
+  );
+  assert.equal(beforeR.status, 200);
+  assert.ok(beforeR.body.members.some((m) => m.memberEmail === "leaveme@example.com"),
+    "precondition: the member must be on the site before it can be removed from it");
+
   const removeR = await req(
     "DELETE", `/projects/sites/${siteId}/members/leaveme@example.com`,
     undefined, supToken
   );
   assert.equal(removeR.status, 200);
 
-  // Member should no longer see the site
-  const sitesR = await req<{ sites: Array<{ id: string }> }>(
+  const afterR = await req<{ members: Array<{ memberEmail: string }> }>(
+    "GET", `/projects/sites/${siteId}/members`, undefined, supToken
+  );
+  assert.equal(afterR.status, 200);
+  assert.ok(!afterR.body.members.some((m) => m.memberEmail === "leaveme@example.com"),
+    "the removed member must be off the site's member list");
+
+  // WHAT THIS TEST USED TO ASSERT, AND WHY IT WAS WRONG
+  //
+  // It asserted that the removed member could no longer SEE the site, via
+  // GET /projects/sites. That is not a guarantee this API makes, and the
+  // assertion was green for an unrelated reason: it re-queried with the
+  // member's pre-acceptance token, whose claims were scoped to the member's
+  // own auto-created company, so the list was empty whatever the removal did.
+  // The same vacuity shape as AUDIT L87, in the test next door that the L87
+  // fix did not reach — and it only became visible once authority moved to
+  // the user row and the token started resolving to the real company.
+  //
+  // `projectsStore.listSites` returns every site in the company to every role
+  // including crew, deliberately and with a comment saying so: a crew member
+  // who cannot see the site they are standing on cannot file anything against
+  // it. Site membership is not the read gate; company membership is. So
+  // removing someone from a site does not and should not hide the site, and
+  // the honest assertion is the member list above. Removing someone's site
+  // VISIBILITY means removing them from the company — DELETE
+  // /company/members/:email, which is a different route at a different rank.
+  const stillVisible = await req<{ sites: Array<{ id: string }> }>(
     "GET", "/projects/sites", undefined, memberToken
   );
-  assert.ok(!sitesR.body.sites.some((s) => s.id === siteId), "removed member should not see the site");
+  assert.equal(stillVisible.status, 200);
+  assert.ok(stillVisible.body.sites.some((s) => s.id === siteId),
+    "site visibility is company-scoped, so site removal alone must not hide it");
 });
 
 // ─── Role-mapping contract (invite role → invitee company_role) ───────────────
