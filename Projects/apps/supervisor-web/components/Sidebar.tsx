@@ -3,7 +3,7 @@
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
-import { logout } from "@/lib/api";
+import { logout, SIGN_OUT_SCOPE_NOTICE } from "@/lib/api";
 import { useRole } from "@/lib/useRole";
 
 /**
@@ -47,6 +47,7 @@ export default function Sidebar({ userName }: { userName: string }) {
   const nav = NAV.filter((item) => !item.hiddenFromCrew || !isCrew);
 
   const handleLogout = async () => {
+    if (!confirm(SIGN_OUT_SCOPE_NOTICE)) return;
     await logout();
     router.replace("/");
   };
