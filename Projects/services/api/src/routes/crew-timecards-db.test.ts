@@ -236,6 +236,30 @@ if (!process.env.TEST_DATABASE_URL) {
     }
   };
 
+  /**
+   * The whole row as the database holds it, read with the tenant context RLS
+   * needs. `SELECT *` rather than a column list on purpose: the assertions
+   * below are about columns an edit must NOT have touched, and naming them in
+   * SQL would put a hand-written literal in the one place this repo has already
+   * been bitten by one (a `deleted_at` predicate on a table without the
+   * column). The row's keys are read as JavaScript properties instead.
+   */
+  const readRowDirect = async (id: string): Promise<Record<string, unknown> | null> => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(`SELECT set_config('app.company_id', $1, true)`, [companyId]);
+      const r = await client.query<Record<string, unknown>>(
+        `SELECT * FROM ${TIMECARDS_TABLE} WHERE id = $1`,
+        [id]
+      );
+      await client.query("COMMIT");
+      return r.rows[0] ?? null;
+    } finally {
+      client.release();
+    }
+  };
+
   // ── The measurement ────────────────────────────────────────────────────────
   //
   // One row per probe, holding what the route ACTUALLY answered. The table
@@ -600,6 +624,116 @@ if (!process.env.TEST_DATABASE_URL) {
     assert.equal((await approve(real.id, "approved")).status, 200, "the control approval failed");
     await seed("POST", `/crew/timecards/${real.id}/approval`, { status: "pending" }, ownerToken);
     assert.equal((await req("DELETE", `/crew/timecards/${real.id}`, undefined, crewToken)).status, 200, "the control delete failed");
+  });
+
+  test("an edit writes the fields it names, and the database keeps the rest of the row", async () => {
+    // THE DEFECT THIS IS ABOUT, AND WHY POSTGRES IS THE AUTHORITY ON IT
+    // TIMECARD_FIELDS gives `trade` and `notes` a `.default("")`, so before the
+    // edit schema was `.partial()` a PATCH naming one field arrived holding
+    // blanks for the others and the UPDATE wrote all nine columns. The route's
+    // own response echoes whatever the store returned, so a test that reads
+    // only the response can be satisfied by a store that reported a value it
+    // never stored. These assertions read the row straight out of the database.
+    const card = await seed<{ timecard: Timecard }>("POST", "/crew/timecards", {
+      siteId,
+      workerName: "Worker",
+      date: TODAY,
+      startTime: "07:00",
+      endTime: "15:30",
+      breakMinutes: 30,
+      hoursRegular: 8,
+      hoursOvertime: 1.5,
+      trade: "Carpentry",
+      notes: "Level 3 formwork",
+    }, crewToken);
+    const id = card.body.timecard.id;
+
+    const before = await readRowDirect(id);
+    assert.ok(before, "the seeded card is not in the database");
+
+    const edited = await req<{ timecard?: Timecard; error?: string }>(
+      "PATCH", `/crew/timecards/${id}`, { notes: "Level 3 formwork, east bay" }, crewToken
+    );
+    record("author edits one field", "PATCH /crew/timecards/:id", "crew", edited.status);
+    assert.equal(edited.status, 200, `a single-field edit -> ${edited.status} ${JSON.stringify(edited.body)}`);
+
+    const after = await readRowDirect(id);
+    assert.ok(after, "the edited card is gone from the database");
+
+    // THE POSITIVE CONTROL FIRST. Without it, a store that wrote nothing at all
+    // would satisfy every "unchanged" assertion below — which is the same shape
+    // of vacuity the /uploads/sign mutation exposed (docs/VACUITY-AUDIT.md M7).
+    assert.notEqual(after.notes, before.notes, "the edit wrote nothing, so nothing below is tested");
+    assert.equal(after.notes, "Level 3 formwork, east bay");
+
+    // Every other column the edit never mentioned, compared against what the
+    // row held before it. Compared rather than asserted against literals, so
+    // the test cannot pass by agreeing with a value the seed never stored.
+    for (const column of Object.keys(before)) {
+      if (column === "notes" || column === "updated_at") continue;
+      assert.deepEqual(
+        after[column],
+        before[column],
+        `an edit naming only notes changed ${column}: ${JSON.stringify(before[column])} -> ${JSON.stringify(after[column])}`
+      );
+    }
+
+    // The two columns the loop above skips, asserted rather than ignored, so a
+    // skip cannot hide a column that failed to move. `updated_at` is set from
+    // NOW() in a later transaction than the INSERT, which left it unset.
+    assert.notDeepEqual(
+      after.updated_at,
+      before.updated_at,
+      "the edit did not advance updated_at, so the audit timestamp is not being written"
+    );
+
+    // The approval state is untouched by an edit, read from the database rather
+    // than from the response.
+    assert.equal(await readStatusDirect(id), "pending", "a single-field edit changed the approval state");
+  });
+
+  test("start, finish and break move together, and an empty edit writes nothing", async () => {
+    const card = await createCard(crewToken, 8, "trio");
+    const before = await readRowDirect(card.id);
+    assert.ok(before, "the seeded card is not in the database");
+
+    const patch = (body: Record<string, unknown>) =>
+      req<{ timecard?: Timecard; error?: string }>("PATCH", `/crew/timecards/${card.id}`, body, crewToken);
+
+    // Half a span cannot be validated against a half that is only in the
+    // database, so the route refuses rather than guessing.
+    for (const partial of [{ endTime: "16:30" }, { startTime: "06:00" }, { breakMinutes: 60 }]) {
+      const res = await patch(partial);
+      record(`author sends ${Object.keys(partial)[0]} alone`, "PATCH /crew/timecards/:id", "crew", res.status);
+      assert.equal(res.status, 400, `${JSON.stringify(partial)} -> ${res.status} ${JSON.stringify(res.body)}`);
+    }
+
+    const empty = await patch({});
+    record("author sends an empty edit", "PATCH /crew/timecards/:id", "crew", empty.status);
+    assert.equal(empty.status, 400, `an empty edit -> ${empty.status} ${JSON.stringify(empty.body)}`);
+
+    // None of the four refusals touched the row.
+    assert.deepEqual(await readRowDirect(card.id), before, "a refused edit changed the stored row");
+
+    // THE CONTROLS, in this test: the trio together is accepted and lands in
+    // the database, and a non-span field on its own is accepted too. Without
+    // them, `.partial()` having shut the edit route completely would read green.
+    const trio = await patch({ startTime: "06:00", endTime: "16:30", breakMinutes: 60 });
+    record("author sends the whole span", "PATCH /crew/timecards/:id", "crew", trio.status);
+    assert.equal(trio.status, 200, `the whole span -> ${trio.status} ${JSON.stringify(trio.body)}`);
+    const withSpan = await readRowDirect(card.id);
+    assert.ok(withSpan, "the row is gone");
+    assert.notDeepEqual(withSpan.break_minutes, before.break_minutes, "the accepted span did not reach the database");
+
+    const nonSpan = await patch({ notes: "corrected" });
+    record("author sends one non-span field", "PATCH /crew/timecards/:id", "crew", nonSpan.status);
+    assert.equal(nonSpan.status, 200, `a non-span field alone -> ${nonSpan.status}`);
+
+    // And the span rule still applies when all three arrive, so the trio rule
+    // has not become a way around the validation it exists to make possible.
+    const reversed = await patch({ startTime: "15:00", endTime: "07:00", breakMinutes: 0 });
+    record("author sends a reversed span", "PATCH /crew/timecards/:id", "crew", reversed.status);
+    assert.equal(reversed.status, 400, `a reversed span -> ${reversed.status}`);
   });
 
   test("the measured table", () => {

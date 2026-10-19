@@ -63,17 +63,35 @@ export type TimecardWriteResult =
   | { ok: false; reason: "not-found" }
   | { ok: false; reason: "locked"; status: TimecardApprovalStatus };
 
-/** The fields the author of a timecard may change. Closed, and deliberately so. */
+/**
+ * The fields the author of a timecard may change. Closed, and deliberately so.
+ *
+ * EVERY ONE OF THEM IS OPTIONAL, AND THAT IS THE POINT
+ * An edit changes the fields it was given and leaves the rest of the row alone.
+ * The first version of this type had `workerName`, `date`, `trade` and `notes`
+ * required, and the route's schema gave `trade` and `notes` a `.default("")` —
+ * so a PATCH that corrected only the finish time arrived carrying
+ * `trade: ""`, `notes: ""` and `breakMinutes: 0`, and the UPDATE wrote all nine
+ * columns. Correcting one field erased three others. On a seven-year compliance
+ * record that is data loss performed by the save button.
+ *
+ * `undefined` therefore means "not mentioned, leave it", and it is the only
+ * thing it can mean: there is no way to CLEAR a start or finish time through an
+ * edit, because the route's schema has no null for them. That is a deliberate
+ * limit rather than an oversight — see the trio rule on TimecardUpdateSchema in
+ * routes/crew.ts, which keeps start, finish and break moving together so the
+ * server never has to validate half a span against a stored half.
+ */
 export type TimecardEditableFields = {
-  workerName: string;
-  date: string;
+  workerName?: string;
+  date?: string;
   startTime?: string;
   endTime?: string;
   breakMinutes?: number;
-  hoursRegular: number;
-  hoursOvertime: number;
-  trade: string;
-  notes: string;
+  hoursRegular?: number;
+  hoursOvertime?: number;
+  trade?: string;
+  notes?: string;
 };
 
 /**
@@ -87,18 +105,50 @@ export type TimecardEditableFields = {
  */
 const EDITABLE_COLUMNS: ReadonlyArray<{
   column: string;
+  field: keyof TimecardEditableFields;
   read: (f: TimecardEditableFields) => unknown;
 }> = Object.freeze([
-  { column: "worker_name", read: (f) => f.workerName },
-  { column: "date", read: (f) => f.date },
-  { column: "start_time", read: (f) => f.startTime ?? null },
-  { column: "end_time", read: (f) => f.endTime ?? null },
-  { column: "break_minutes", read: (f) => f.breakMinutes ?? null },
-  { column: "hours_regular", read: (f) => f.hoursRegular },
-  { column: "hours_overtime", read: (f) => f.hoursOvertime },
-  { column: "trade", read: (f) => f.trade || null },
-  { column: "notes", read: (f) => f.notes || null },
+  { column: "worker_name", field: "workerName", read: (f) => f.workerName },
+  { column: "date", field: "date", read: (f) => f.date },
+  { column: "start_time", field: "startTime", read: (f) => f.startTime ?? null },
+  { column: "end_time", field: "endTime", read: (f) => f.endTime ?? null },
+  { column: "break_minutes", field: "breakMinutes", read: (f) => f.breakMinutes ?? null },
+  { column: "hours_regular", field: "hoursRegular", read: (f) => f.hoursRegular },
+  { column: "hours_overtime", field: "hoursOvertime", read: (f) => f.hoursOvertime },
+  { column: "trade", field: "trade", read: (f) => f.trade || null },
+  { column: "notes", field: "notes", read: (f) => f.notes || null },
 ]);
+
+/**
+ * The entries of EDITABLE_COLUMNS the caller actually supplied.
+ *
+ * `field` carries the presence test and `read` the coercion, and the two are
+ * separate because they answer different questions: whether to write the column
+ * at all, and what to write when a blank string or an absent optional should
+ * land as SQL NULL. Deriving either from the payload's own keys is the mistake
+ * the header above EDITABLE_COLUMNS describes.
+ */
+function suppliedColumns(fields: TimecardEditableFields) {
+  return EDITABLE_COLUMNS.filter((c) => fields[c.field] !== undefined);
+}
+
+/**
+ * The supplied fields, as a patch for an in-memory record.
+ *
+ * Not `{ ...existing, ...fields }`. A spread copies a key that is present and
+ * holding `undefined` — which zod can produce for an optional key — and would
+ * then set `trade: undefined` on a row whose trade the caller never mentioned.
+ * That is the in-memory half of the same erasure the SQL half avoids by
+ * filtering the column list, and the two paths have to agree: seven defects
+ * have hidden in the gap between this store's two halves.
+ */
+function suppliedPatch(fields: TimecardEditableFields): Partial<TimecardRecord> {
+  const patch: Partial<TimecardRecord> = {};
+  for (const { field } of suppliedColumns(fields)) {
+    Object.assign(patch, { [field]: fields[field] });
+  }
+  return patch;
+}
 
 export type TimecardRecord = {
   id: string;
@@ -188,7 +238,7 @@ function mapRow(row: {
  * unreviewed — which is also the safe direction, because `pending` is the
  * state that grants no lock and claims no approval.
  */
-function normaliseApprovalStatus(value: string | null | undefined): TimecardApprovalStatus {
+function normaliseApprovalStatus(value: unknown): TimecardApprovalStatus {
   return TIMECARD_APPROVAL_STATUSES.includes(value as TimecardApprovalStatus)
     ? (value as TimecardApprovalStatus)
     : "pending";
@@ -256,6 +306,12 @@ export async function createTimecard(
 /**
  * Change a timecard's hours. The author only, and only while it is unapproved.
  *
+ * A PARTIAL UPDATE. Only the fields the caller supplied are written; every
+ * other column keeps the value it had. See TimecardEditableFields for the
+ * defect that shape exists to prevent, and note that both halves of this
+ * function have to implement it — the SQL half by narrowing the column list,
+ * the in-memory half by patching rather than spreading the payload.
+ *
  * TWO REFUSALS, TWO CODES
  * `not-found` is "no such row you may touch", which the route answers 404 —
  * the same answer every other store gives, so a row in another company stays
@@ -285,17 +341,17 @@ export async function updateTimecard(
     if (!isTimecardEditable(existing.approvalStatus)) {
       return { ok: false, reason: "locked", status: existing.approvalStatus };
     }
+    const patch = suppliedPatch(fields);
+    // Nothing to change is not an error and not a write: the row is returned
+    // as it stands, with its updatedAt untouched, so an empty edit cannot
+    // rewrite the audit timestamp of a record nobody changed. The route
+    // refuses an empty payload out loud before it gets here; this is the
+    // second layer, and it is also what stops the SQL half emitting an UPDATE
+    // with no assignments.
+    if (Object.keys(patch).length === 0) return { ok: true, timecard: existing };
     const updated: TimecardRecord = {
       ...existing,
-      workerName: fields.workerName,
-      date: fields.date,
-      startTime: fields.startTime,
-      endTime: fields.endTime,
-      breakMinutes: fields.breakMinutes,
-      hoursRegular: fields.hoursRegular,
-      hoursOvertime: fields.hoursOvertime,
-      trade: fields.trade,
-      notes: fields.notes,
+      ...patch,
       updatedAt: new Date().toISOString(),
     };
     memoryTimecards.set(id, updated);
@@ -307,19 +363,27 @@ export async function updateTimecard(
     const selectConditions = ["id = $1", "company_id = $2", "deleted_at IS NULL"];
     const ownership = editOwnershipSql(actor, "timesheet", selectParams);
     if (ownership) selectConditions.push(ownership);
-    const current = await client.query<{ approval_status: string | null }>(
-      `SELECT ${TIMECARD_APPROVAL_STATUS_COLUMN} FROM ${TIMECARDS_TABLE}` +
+    // The whole row rather than the status column alone, so that an edit which
+    // turns out to change nothing can be answered from the locked row without a
+    // second query — and without an UPDATE.
+    const current = await client.query(
+      `SELECT * FROM ${TIMECARDS_TABLE}` +
         ` WHERE ${selectConditions.join(" AND ")} FOR UPDATE`,
       selectParams
     );
     if (current.rowCount === 0) return { ok: false, reason: "not-found" } as const;
-    const status = normaliseApprovalStatus(current.rows[0].approval_status);
+    const status = normaliseApprovalStatus(
+      (current.rows[0] as Record<string, unknown>)[TIMECARD_APPROVAL_STATUS_COLUMN]
+    );
     if (!isTimecardEditable(status)) return { ok: false, reason: "locked", status } as const;
 
     // Built from EDITABLE_COLUMNS, so the set of writable columns is the list
-    // above and not whatever keys the caller happened to send.
+    // above and not whatever keys the caller happened to send — and narrowed to
+    // the ones the caller DID send, so an unmentioned column keeps its value.
+    const writable = suppliedColumns(fields);
+    if (writable.length === 0) return { ok: true, timecard: mapRow(current.rows[0]) } as const;
     const updateParams: unknown[] = [id, actor.companyId];
-    const assignments = EDITABLE_COLUMNS.map((c) => {
+    const assignments = writable.map((c) => {
       updateParams.push(c.read(fields));
       return `${c.column} = $${updateParams.length}`;
     });

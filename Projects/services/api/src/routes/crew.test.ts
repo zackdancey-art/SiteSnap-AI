@@ -414,3 +414,112 @@ test("crew timecards: a crew member cannot approve their own hours, the owner ca
     "approved_by is not the approver"
   );
 });
+
+test("crew timecards: an edit writes the fields it names and leaves the rest of the row alone", async () => {
+  // THE DEFECT THIS IS ABOUT
+  // TIMECARD_FIELDS gives `trade` and `notes` a `.default("")`, so before the
+  // edit schema was `.partial()` a PATCH carrying only a corrected finish time
+  // arrived holding `trade: ""`, `notes: ""` and `breakMinutes: 0` — zod filled
+  // them — and the store wrote all nine columns from it. Correcting one field
+  // erased three others, silently, with a 200. On a seven-year compliance
+  // record that is data loss performed by the save button.
+  //
+  // The DB-gated half of this is authoritative and reads the row back out of
+  // Postgres: routes/crew-timecards-db.test.ts. This half is here because the
+  // in-memory store has its own copy of the same logic (a patch rather than a
+  // spread) and the two halves disagreeing is how seven defects have already
+  // hidden in this store.
+  const token = await registerUser("timecard-partial@test.test");
+  const created = await req<{ timecard: { id: string } }>(
+    "POST", "/crew/timecards",
+    timecard({ trade: "Carpentry", notes: "Level 3 formwork", hoursOvertime: 1.5 }),
+    token
+  );
+  assert.equal(created.status, 201, `the card must save first: ${JSON.stringify(created.body)}`);
+  const id = created.body.timecard.id;
+
+  // One field, named on its own.
+  const edited = await req<{ timecard?: Record<string, unknown>; error?: string }>(
+    "PATCH", `/crew/timecards/${id}`, { notes: "Level 3 formwork, east bay" }, token
+  );
+  assert.equal(edited.status, 200, `a single-field edit: ${JSON.stringify(edited.body)}`);
+
+  // The named field changed — the positive control, without which "nothing was
+  // written at all" would pass every assertion below it.
+  assert.equal(edited.body.timecard?.notes, "Level 3 formwork, east bay");
+
+  // And nothing else did.
+  assert.equal(edited.body.timecard?.trade, "Carpentry", "an unmentioned trade was overwritten");
+  assert.equal(edited.body.timecard?.hoursOvertime, 1.5, "unmentioned overtime was overwritten");
+  assert.equal(edited.body.timecard?.hoursRegular, 8, "unmentioned regular hours were overwritten");
+  assert.equal(edited.body.timecard?.breakMinutes, 30, "an unmentioned break was overwritten");
+  assert.equal(edited.body.timecard?.startTime, "07:00", "an unmentioned start time was overwritten");
+  assert.equal(edited.body.timecard?.endTime, "15:30", "an unmentioned finish time was overwritten");
+  assert.equal(edited.body.timecard?.workerName, "A Builder", "an unmentioned worker name was overwritten");
+  assert.equal(edited.body.timecard?.date, "2026-10-03", "an unmentioned date was overwritten");
+
+  // Read back through the list route as well, so the assertions above are about
+  // the stored row and not about what the write handler happened to echo.
+  const listed = await req<{ timecards: Array<Record<string, unknown>> }>(
+    "GET", "/crew/timecards?siteId=site-under-test", undefined, token
+  );
+  assert.equal(listed.status, 200);
+  const row = listed.body.timecards.find((t) => t.id === id);
+  assert.ok(row, "the edited card is gone from the list");
+  assert.equal(row.notes, "Level 3 formwork, east bay");
+  assert.equal(row.trade, "Carpentry", "the stored trade was erased by an edit that never mentioned it");
+  assert.equal(row.hoursOvertime, 1.5, "the stored overtime was erased by an edit that never mentioned it");
+});
+
+test("crew timecards: start, finish and break move together, and an empty edit is refused", async () => {
+  // A partial edit creates a question the whole-object version never had: what
+  // validates a finish time sent on its own, against a start time that is only
+  // in the database? Nothing in the route can, so the three travel as a set.
+  const token = await registerUser("timecard-span-trio@test.test");
+  const created = await req<{ timecard: { id: string } }>(
+    "POST", "/crew/timecards", timecard(), token
+  );
+  assert.equal(created.status, 201, `the card must save first: ${JSON.stringify(created.body)}`);
+  const id = created.body.timecard.id;
+
+  const patch = (body: Record<string, unknown>) =>
+    req<{ timecard?: { endTime?: string; breakMinutes?: number }; error?: string }>(
+      "PATCH", `/crew/timecards/${id}`, body, token
+    );
+
+  // Each span field alone is refused, and the 400 names what is missing rather
+  // than a generic failure.
+  const endAlone = await patch({ endTime: "16:30" });
+  assert.equal(endAlone.status, 400, `a lone finish time: ${JSON.stringify(endAlone.body)}`);
+  assert.match(String(endAlone.body.error), /together/i);
+
+  const startAlone = await patch({ startTime: "06:00" });
+  assert.equal(startAlone.status, 400, `a lone start time: ${JSON.stringify(startAlone.body)}`);
+
+  const breakAlone = await patch({ breakMinutes: 60 });
+  assert.equal(breakAlone.status, 400, `a lone break: ${JSON.stringify(breakAlone.body)}`);
+
+  // An edit naming nothing is refused too, and says why. Without this the
+  // schema would accept `{}` and the store would be asked for an UPDATE with no
+  // assignments.
+  const nothing = await patch({});
+  assert.equal(nothing.status, 400, `an empty edit: ${JSON.stringify(nothing.body)}`);
+  assert.match(String(nothing.body.error), /at least one field/i);
+
+  // THE CONTROLS, in this test. Without them "the trio is required" and "every
+  // edit is refused" are the same assertion, and the `.partial()` change could
+  // have shut the route entirely.
+  const allThree = await patch({ startTime: "06:00", endTime: "16:30", breakMinutes: 60 });
+  assert.equal(allThree.status, 200, `all three together: ${JSON.stringify(allThree.body)}`);
+  assert.equal(allThree.body.timecard?.endTime, "16:30");
+  assert.equal(allThree.body.timecard?.breakMinutes, 60);
+
+  const nonSpanField = await patch({ notes: "corrected" });
+  assert.equal(nonSpanField.status, 200, `a non-span field alone: ${JSON.stringify(nonSpanField.body)}`);
+
+  // The span rule itself still applies when all three are present, so the trio
+  // rule has not become a way around the validation it protects.
+  const reversed = await patch({ startTime: "15:00", endTime: "07:00", breakMinutes: 0 });
+  assert.equal(reversed.status, 400, `a reversed span sent as a trio: ${JSON.stringify(reversed.body)}`);
+  assert.match(String(reversed.body.error), /endTime/);
+});

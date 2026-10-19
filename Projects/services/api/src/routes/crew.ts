@@ -164,6 +164,12 @@ const TimecardSchema = z
   .superRefine(refineTimecardSpan);
 
 /**
+ * The three fields that describe a worked span. They move together — see the
+ * trio rule on TimecardUpdateSchema.
+ */
+const TIMECARD_SPAN_KEYS = ["startTime", "endTime", "breakMinutes"] as const;
+
+/**
  * An edit: the hours, and nothing else.
  *
  * `siteId` and `entryId` are absent deliberately. Moving a timecard to another
@@ -171,8 +177,69 @@ const TimecardSchema = z
  * route that quietly accepts a new `siteId` would let an approved week be
  * reassembled under a site the approving manager never looked at. Nothing in
  * either client asks for it.
+ *
+ * `.partial()` AND WHY IT HAD TO BE
+ * Without it every field was required or defaulted, so a client correcting one
+ * finish time sent `trade: ""` and `notes: ""` by omission — `.default("")` in
+ * TIMECARD_FIELDS fills an absent key — and the store wrote all nine columns.
+ * One corrected field erased three others, which on a seven-year compliance
+ * record is data loss performed by the save button. `.partial()` beats
+ * `.default()` in zod (the optional wrapper short-circuits on undefined before
+ * the default is reached), so an omitted key now arrives absent rather than
+ * blank, and storage/crewStore.ts writes only the columns it was given.
+ *
+ * `.strict()` is unchanged and still the field gate's loud half: a payload
+ * naming `approvalStatus`, `approvedBy`, `approvedAt`, `approvalNote` or
+ * `siteId` is a 400, not a key that is quietly dropped.
+ *
+ * THE TRIO RULE
+ * A partial edit creates a question the whole-object version never had: what
+ * validates a finish time sent on its own, against a start time that is only in
+ * the database? Nothing here can — refineTimecardSpan needs all three values —
+ * and guessing is how a 23:00-to-06:00 pair gets stored as a positive span. So
+ * start, finish and break move as a set: supply all three or none. A card that
+ * records hours without a clocked span keeps doing so, because none is legal;
+ * and there is deliberately no way to CLEAR a span through an edit, since the
+ * schema has no null for those fields. Flagged as a limitation rather than
+ * hidden: no client offers it, and adding it means adding the null, not
+ * loosening this rule.
  */
-const TimecardUpdateSchema = z.object({ ...TIMECARD_FIELDS }).strict().superRefine(refineTimecardSpan);
+const TimecardUpdateSchema = z
+  .object({ ...TIMECARD_FIELDS })
+  .partial()
+  .strict()
+  .superRefine((value, ctx) => {
+    const supplied = (Object.keys(value) as Array<keyof typeof value>).filter(
+      (key) => value[key] !== undefined
+    );
+    if (supplied.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [],
+        message: "An edit must name at least one field to change.",
+      });
+      return;
+    }
+
+    const span = TIMECARD_SPAN_KEYS.filter((key) => value[key] !== undefined);
+    if (span.length > 0 && span.length < TIMECARD_SPAN_KEYS.length) {
+      const missing = TIMECARD_SPAN_KEYS.filter((key) => value[key] === undefined);
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [missing[0]],
+        message:
+          `Start time, finish time and break minutes have to be sent together. ` +
+          `Missing: ${missing.join(", ")}.`,
+      });
+      return;
+    }
+    if (span.length === TIMECARD_SPAN_KEYS.length) {
+      refineTimecardSpan(
+        { startTime: value.startTime, endTime: value.endTime, breakMinutes: value.breakMinutes! },
+        ctx
+      );
+    }
+  });
 
 /**
  * The approval payload. `status` is the whole decision; the note is optional
@@ -209,7 +276,14 @@ function invalidPayload<T>(
   const firstField = Object.entries(fieldErrors).find(
     ([, messages]) => messages && messages.length > 0
   );
-  const detail = firstField ? ` ${firstField[0]}: ${firstField[1]![0]}` : "";
+  // An issue raised with an empty `path` — the edit schema's "name at least one
+  // field" refusal is one — lands in formErrors, not fieldErrors. Without this
+  // fallback that 400 carried the generic sentence and no reason at all.
+  const detail = firstField
+    ? ` ${firstField[0]}: ${firstField[1]![0]}`
+    : flattened.formErrors.length > 0
+      ? ` ${flattened.formErrors[0]}`
+      : "";
   return res.status(400).json({ error: `Invalid ${what} payload.${detail}`, details: flattened });
 }
 
