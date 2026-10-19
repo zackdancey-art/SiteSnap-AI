@@ -25,6 +25,26 @@ import type { Client, Site } from "./types";
  * is deliberately not one of the record kinds there.
  */
 
+/*
+ * THIS LOGIC EXISTS TWICE, AND CI PROVES THE TWO COPIES AGREE.
+ *
+ * The portal needs the same grouping (apps/supervisor-web/lib/site-grouping.ts)
+ * and cannot import this one: `@sitesnap/shared` resolves `main`, `types` and
+ * every `exports` entry to a `.d.ts` file, so it carries types and no runtime
+ * JavaScript, and changing that is an install-resolution decision belonging to
+ * docs/DECISIONS.md rather than to a filing feature.
+ *
+ * So the region between the two markers below is byte-identical in both files,
+ * and `assert_site_grouping_copies` in Projects/scripts/ci.sh diffs it. Edit one
+ * and CI fails on the commit that did it, naming both paths. The imports and the
+ * prose above the marker are each file's own; everything inside it is shared.
+ *
+ * This is the AUDIT L36 shape applied before the drift rather than after it: a
+ * second copy nobody enumerated is how the portal ended up with a privacy policy
+ * that agreed with nothing.
+ */
+
+// SHARED-LOGIC-BEGIN
 /**
  * The key and heading for sites filed under nobody.
  *
@@ -130,3 +150,4 @@ export function shouldShowGroupHeadings(groups: ReadonlyArray<SiteGroup>): boole
   if (groups.length === 0) return false;
   return !(groups.length === 1 && groups[0].clientId === null);
 }
+// SHARED-LOGIC-END
