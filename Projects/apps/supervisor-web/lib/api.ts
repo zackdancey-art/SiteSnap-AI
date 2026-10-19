@@ -126,7 +126,23 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       window.location.href = "/";
       throw new Error("Unauthorized");
     }
-    throw new Error(parsed.error || text || `Request failed (${res.status})`);
+    /**
+     * The STATUS and the code ride out on the error, not just the prose.
+     *
+     * This was a bare `new Error(message)`, which left a caller that needs to
+     * tell one refusal from another with nothing to branch on but the wording —
+     * and app/invite.tsx did exactly that, matching on tokens no response body
+     * ever contained, so it picked its message by accident. The clients page
+     * needs the 409 specifically (a duplicate client name), and asking for it
+     * by status is the only way that stays correct when the wording changes.
+     */
+    const err = new Error(parsed.error || text || `Request failed (${res.status})`) as Error & {
+      status?: number;
+      code?: string;
+    };
+    err.status = res.status;
+    if (parsed.code) err.code = parsed.code;
+    throw err;
   }
   return res.json() as Promise<T>;
 }
