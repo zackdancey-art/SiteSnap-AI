@@ -9,10 +9,12 @@
  * templates, location — crew gets, read and write, across every site in the
  * company.
  *
- * Plus one refusal that is narrower than a feature: crew may edit a diary and
- * may not APPROVE one. See canApproveDiary, and read the note there before
- * reaching for it — the hazard in this one is implementing it as "crew cannot
- * use diaries", which is a worse bug than the one it fixes.
+ * Plus two refusals that are narrower than a feature, both of them the same
+ * shape: crew may edit a diary and may not APPROVE one (canApproveDiary), and
+ * crew may enter, correct and delete their own timecards and may not APPROVE
+ * one (canApproveTimesheet). Read the notes on those two before reaching for
+ * either — the hazard in both is implementing them as "crew cannot use diaries"
+ * or "crew cannot use timesheets", which is a worse bug than the one it fixes.
  *
  * WHY A MODULE RATHER THAN THE EXPRESSION IT REPLACES
  * `user?.companyRole === "owner" || user?.companyRole === "manager"` was written
@@ -115,6 +117,30 @@ export function canApproveDiary(companyRole: unknown): boolean {
 }
 
 /**
+ * APPROVING a timesheet. Manager+, and the same shape as canApproveDiary for
+ * the same reason: a timecard a crew member approved themselves is a payroll
+ * claim with no second pair of eyes on it, and the row carries `approved_by`
+ * into a seven-year record.
+ *
+ * What this is NOT, again: it is not permission to USE timesheets. Crew enter,
+ * correct and delete their own timecards in full — that is the daily work this
+ * screen exists for — and the only thing this predicate hides is the
+ * approve/send-back control on somebody's card.
+ *
+ * Two refusals on this screen are deliberately different things, and conflating
+ * them is the mistake to avoid:
+ *   - no rank  → 403, this predicate, requireAtLeast("manager") at the API;
+ *   - approved → 409, isTimecardLocked below, and NO rank opens it. A manager
+ *     cannot edit an approved card either; they reopen it first.
+ * A manager approving their own timecard is allowed on purpose: refusing it
+ * would leave a working manager unable to record hours at all, and
+ * `approved_by` is what makes that auditable rather than invisible.
+ */
+export function canApproveTimesheet(companyRole: unknown): boolean {
+  return isManagerOrAbove(companyRole);
+}
+
+/**
  * Company settings: branding, NZBN, contact details, anything
  * organisation-level. Exception 3, and the only one that is owner-only rather
  * than manager+, because that is what the API already enforces
@@ -158,14 +184,57 @@ export function isForbidden(err: unknown): boolean {
   return (err as { status?: unknown }).status === 403;
 }
 
+// ── What a 409 on a timecard means on the client ────────────────────────
+
+/**
+ * The code services/api/src/routes/crew.ts sends with its 409 (see
+ * sendWriteResult there). It is 409 and not 403 because the ROW's state is what
+ * refuses, not the caller's rank — so the remedy is to reopen the card, not to
+ * find somebody more senior, and the sentence a client shows has to say that.
+ */
+export const TIMECARD_LOCKED_CODE = "timecard_approved";
+
+/**
+ * Client-authored, like FORBIDDEN_MESSAGE, and for the same reason: the API's
+ * own sentence is good, but a screen that renders server copy verbatim shows
+ * whatever a future deploy decides to say there. This one has to stay true of
+ * both of the editable statuses — a rejected card is still editable — so it
+ * names approval, which is the only state that locks.
+ */
+export const TIMECARD_LOCKED_MESSAGE =
+  "This timecard has been approved, so it can no longer be changed. Ask a manager to reopen it.";
+
+/**
+ * Whether a caught value is the approved-timecard refusal.
+ *
+ * Keyed on the status AND the code, unlike isForbidden, which is keyed on the
+ * status alone. The asymmetry is not an inconsistency: a 403 from this API
+ * means exactly one thing from exactly two middlewares, whereas 409 is the
+ * ordinary conflict status and describeFailure is shared by every screen. So
+ * matching a bare 409 here would relabel some other screen's future conflict
+ * as an approved timecard. The code is a contract the server actually has.
+ *
+ * An absent code therefore reads as NOT locked and keeps the feature's own
+ * wording — which is the honest answer for a client newer than the API,
+ * because that API has no approval lock to have hit.
+ */
+export function isTimecardLocked(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { status?: unknown; code?: unknown };
+  return e.status === 409 && e.code === TIMECARD_LOCKED_CODE;
+}
+
 /**
  * The message to show for a caught error, given what the feature would
- * otherwise have said. A 403 gets the truth; everything else keeps the
- * feature's own wording, which is correct for a feature failure.
+ * otherwise have said. A 403 gets the truth, an approved timecard gets the
+ * remedy, and everything else keeps the feature's own wording, which is correct
+ * for a feature failure.
  *
  * A session failure is NOT handled here: lib/authed-fetch.ts converts a 401 to
  * SessionExpiredError before a call site sees it, and the handler navigates.
  */
 export function describeFailure(err: unknown, featureMessage: string): string {
-  return isForbidden(err) ? FORBIDDEN_MESSAGE : featureMessage;
+  if (isForbidden(err)) return FORBIDDEN_MESSAGE;
+  if (isTimecardLocked(err)) return TIMECARD_LOCKED_MESSAGE;
+  return featureMessage;
 }
