@@ -21,8 +21,8 @@
 -- which the API renders as "Unfiled". Nothing is backfilled here: turning those
 -- strings into rows is a judgement about the owner's data (two spellings of one
 -- builder are one client or two, and only they know), so it lives in
--- scripts/backfill-clients.ts, which is opt-in, dry-run by default, and is not
--- part of the migration sequence. Reversing this migration is dropping one
+-- src/scripts/backfill-clients.ts, which is opt-in, dry-run by default and is
+-- not part of the migration sequence. Reversing this migration is dropping one
 -- nullable column and one empty table.
 --
 -- storage/migrate.ts wraps this file in its own BEGIN/COMMIT.
