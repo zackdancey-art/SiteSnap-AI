@@ -681,7 +681,7 @@ export default function SettingsPage() {
                   <Row label="Current session" sub="You are signed in on this device">
                     <span className="badge" style={{ background: "#F0FDF4", color: "#22C55E" }}>Active</span>
                   </Row>
-                  <Row label="Sign out all other devices" sub="Revoke tokens for every other session — your current session stays active" last>
+                  <Row label="Sign out others, stay signed in here" sub="Refuses every other session immediately and keeps this device working — Sign Out ends this one too" last>
                     <BtnGhost onClick={handleSignOutAll} danger>Sign Out All</BtnGhost>
                   </Row>
                 </Panel>
