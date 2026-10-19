@@ -536,9 +536,49 @@ const MATRIX: MatrixEntry[] = [
       assert.equal(listRes.status, 200);
       assert.ok(!listRes.body.timecards.map((t) => t.id).includes(tcAId), "Company B must not see Company A's timecard in the list");
 
-      // No PATCH /crew/timecards/:id route exists (verified in routes/crew.ts).
+      // PATCH and the approval route are migration 033's additions. Both are
+      // cross-tenant write surfaces that did not exist when this row was
+      // written — the comment here previously recorded that no PATCH existed,
+      // which is the kind of note that goes stale silently and leaves a new
+      // route untested by a matrix that looks complete.
+      //
+      // 404 and not 403 on both: Company B's actor carries its own company_id,
+      // so the row is not merely refused, it is not visible to look up. A 403
+      // would mean the row had been found first.
+      const patchRes = await req(
+        "PATCH", `/crew/timecards/${tcAId}`,
+        { workerName: "Matrix Worker A", date: "2026-01-06", hoursRegular: 12 },
+        tokenB
+      );
+      assert.equal(patchRes.status, 404, "Company B PATCH on Company A's timecard must 404");
+
+      const apprRes = await req(
+        "POST", `/crew/timecards/${tcAId}/approval`, { status: "approved" }, tokenB
+      );
+      assert.equal(apprRes.status, 404, "Company B must not be able to approve Company A's timecard");
+
       const delRes = await req("DELETE", `/crew/timecards/${tcAId}`, undefined, tokenB);
       assert.equal(delRes.status, 404, "Company B DELETE on Company A's timecard must 404");
+
+      // The positive control for all three refusals, on the same routes in the
+      // same row: Company A's own owner can do each of them. Three 404s alone
+      // would read identically if the routes had been deleted.
+      const ownPatch = await req<{ timecard?: { hoursRegular: number } }>(
+        "PATCH", `/crew/timecards/${tcAId}`,
+        { workerName: "Matrix Worker A", date: "2026-01-06", hoursRegular: 9 },
+        tokenA
+      );
+      assert.equal(ownPatch.status, 200, `positive control: Company A must be able to edit its own timecard: ${JSON.stringify(ownPatch.body)}`);
+      const ownAppr = await req<{ timecard?: { approvalStatus: string } }>(
+        "POST", `/crew/timecards/${tcAId}/approval`, { status: "approved" }, tokenA
+      );
+      assert.equal(ownAppr.status, 200, "positive control: Company A must be able to approve its own timecard");
+      // Reopened so the delete below is not refused by the approval lock — the
+      // thing under test in this row is tenancy, not the approval state.
+      const reopen = await req("POST", `/crew/timecards/${tcAId}/approval`, { status: "pending" }, tokenA);
+      assert.equal(reopen.status, 200, "reopening the row for the delete control failed");
+      const ownDel = await req("DELETE", `/crew/timecards/${tcAId}`, undefined, tokenA);
+      assert.equal(ownDel.status, 200, "positive control: Company A must be able to delete its own timecard");
     },
   },
   {
