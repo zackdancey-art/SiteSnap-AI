@@ -2,7 +2,7 @@ import React, { useState, useMemo } from "react";
 import {
   View,
   Text,
-  FlatList,
+  SectionList,
   Pressable,
   TextInput,
   StyleSheet,
@@ -14,6 +14,7 @@ import { useData } from "@/lib/data-context";
 import { SyncStatusBanner } from "@/components/SyncStatusBanner";
 import Colors from "@/constants/colors";
 import { Site } from "@/lib/types";
+import { groupSitesByClient, shouldShowGroupHeadings } from "@/lib/site-grouping";
 import { TabScreenInsets, useTabScreenInsets } from "@/lib/useScreenInsets";
 
 function SiteCard({ site }: { site: Site }) {
@@ -75,24 +76,68 @@ export default function SitesScreen() {
 
 function SitesContent() {
   const insets = useTabScreenInsets();
-  const { sites } = useData();
+  const { sites, clients, refresh } = useData();
   const [search, setSearch] = useState("");
   const [refreshing, setRefreshing] = useState(false);
 
   const filtered = useMemo(() => {
     if (!search.trim()) return sites;
     const q = search.toLowerCase();
+    /**
+     * Searches the canonical client NAME as well as the site's own label.
+     *
+     * Those differ for every site filed before its client was renamed: the
+     * label is a snapshot taken at filing time and nothing backfills it. A
+     * search that read only the label would hide a site from under the heading
+     * the person can see it sitting beneath.
+     */
+    const nameById = new Map(clients.map((c) => [c.id, c.name.toLowerCase()]));
     return sites.filter(
       (s) =>
         s.name.toLowerCase().includes(q) ||
         s.client.toLowerCase().includes(q) ||
-        s.address.toLowerCase().includes(q)
+        s.address.toLowerCase().includes(q) ||
+        (s.clientId ? (nameById.get(s.clientId) ?? "").includes(q) : false)
     );
-  }, [sites, search]);
+  }, [sites, clients, search]);
 
-  const onRefresh = () => {
+  /**
+   * GROUPED BY CLIENT, with everything unfiled in a group of its own.
+   *
+   * The grouping itself is in lib/site-grouping.ts rather than here, and is
+   * unit-tested there — this file imports React Native, so nothing in it can
+   * run without a simulator, and there is no simulator. What is NOT verified
+   * by those tests is the rendering below; that is on the PR's device
+   * checklist, stated as unverified.
+   *
+   * Headings are suppressed in exactly one case — a company with no filing at
+   * all, where the single "Unfiled" heading over every site says nothing. The
+   * first site filed brings them all back.
+   */
+  const sections = useMemo(() => groupSitesByClient(filtered, clients), [filtered, clients]);
+  const showHeadings = useMemo(() => shouldShowGroupHeadings(sections), [sections]);
+
+  /**
+   * Pull-to-refresh actually refetches now.
+   *
+   * It was `setTimeout(() => setRefreshing(false), 600)` — a spinner that
+   * animated for 600ms and fetched nothing. That is fixed here rather than
+   * left for the debt workstream because this list's HEADINGS now come from
+   * /clients: without it, a client added or renamed in the portal never
+   * reaches a running app, and the gesture people would use to go and get it
+   * is the one that does nothing.
+   *
+   * refresh() swallows its own failures (it falls back to the cache and sets
+   * the sync status, which SyncStatusBanner above already shows), so there is
+   * nothing to report here beyond stopping the spinner.
+   */
+  const onRefresh = async () => {
     setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 600);
+    try {
+      await refresh();
+    } finally {
+      setRefreshing(false);
+    }
   };
 
   const activeSites = filtered.filter((s) => s.status === "active").length;
@@ -133,10 +178,19 @@ function SitesContent() {
 
       <SyncStatusBanner />
 
-      <FlatList
-        data={filtered}
+      <SectionList
+        sections={sections}
         keyExtractor={(item) => item.id}
         renderItem={({ item }) => <SiteCard site={item} />}
+        renderSectionHeader={({ section }) =>
+          showHeadings ? (
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionHeaderText} numberOfLines={1}>{section.title}</Text>
+              <Text style={styles.sectionHeaderCount}>{section.data.length}</Text>
+            </View>
+          ) : null
+        }
+        stickySectionHeadersEnabled={false}
         // insets.bottom clears the tab bar (measured, see lib/useScreenInsets);
         // the +24 is breathing room below the last card, not a guess at the bar.
         contentContainerStyle={[styles.listContent, { paddingBottom: insets.bottom + 24 }]}
@@ -212,6 +266,29 @@ const styles = StyleSheet.create({
   listContent: {
     padding: 16,
     gap: 12,
+  },
+  // The heading sits in the list's own `gap: 12` rhythm, so it carries no
+  // vertical margin of its own — one more and the groups drift apart.
+  sectionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    paddingHorizontal: 4,
+    paddingTop: 4,
+  },
+  sectionHeaderText: {
+    flex: 1,
+    fontSize: 13,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.textSecondary,
+    letterSpacing: 0.4,
+    textTransform: "uppercase",
+  },
+  sectionHeaderCount: {
+    fontSize: 12,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.textTertiary,
   },
   card: {
     backgroundColor: Colors.surface,
