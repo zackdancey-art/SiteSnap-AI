@@ -274,6 +274,7 @@ function mapSite(row: {
   start_date: string;
   status: SiteStatus;
   created_at: Date;
+  progress_percent?: number;
 }): SiteRecord {
   return {
     id: row.id,
@@ -285,6 +286,20 @@ function mapSite(row: {
     startDate: row.start_date,
     status: row.status,
     createdAt: row.created_at.toISOString(),
+    /**
+     * `progress_percent` has existed since migration 009 and this mapper had
+     * never read it, so the Postgres path WROTE progress and never returned it:
+     * `listSites` does `SELECT *`, mapSite dropped the column, and the mobile
+     * site screen falls back to `?? 0`. The slider therefore reset to zero on
+     * every reload against a real database while the in-memory twin — which
+     * spreads the whole record — returned it correctly. The same pairing that
+     * hid AUDIT L99's missing-column error one line further on.
+     *
+     * Optional in the row shape because `updateSiteClient` and `createSite`
+     * both RETURN * from statements that include the column, but the type is
+     * shared with callers that select a narrower set.
+     */
+    progressPercent: row.progress_percent ?? 0,
   };
 }
 
@@ -370,6 +385,7 @@ type SiteRow = {
   start_date: string;
   status: SiteStatus;
   created_at: Date;
+  progress_percent: number;
 };
 
 export async function listSites(actor: Actor, limit = 200, offset = 0): Promise<SiteRecord[]> {
