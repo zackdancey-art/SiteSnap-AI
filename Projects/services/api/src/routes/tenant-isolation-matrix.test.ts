@@ -67,6 +67,7 @@ import { inspectionsRouter } from "./inspections";
 import { deliveriesRouter } from "./deliveries";
 import { templatesRouter } from "./templates";
 import { locationRouter } from "./location";
+import { clientsRouter } from "./clients";
 import { companyRouter } from "./company";
 
 let server: http.Server;
@@ -589,6 +590,54 @@ const MATRIX: MatrixEntry[] = [
       assert.equal(delRes.status, 404, "Company B DELETE on Company A's push token must 404");
     },
   },
+  {
+    key: "clients",
+    run: async () => {
+      const tokenA = await registerUser("owner-a@clients.matrix.test", "Owner A", "Clients Co A");
+      const tokenB = await registerUser("owner-b@clients.matrix.test", "Owner B", "Clients Co B");
+
+      const made = await req<{ client: { id: string } }>("POST", "/clients", { name: "Matrix Builders A" }, tokenA);
+      assert.equal(made.status, 201, `seed client failed: ${JSON.stringify(made.body)}`);
+      const clientAId = made.body.client.id;
+
+      // Positive control first: an endpoint broken to return [] for EVERY
+      // caller satisfies the negative assertion below and would leave this row
+      // green with isolation untested (docs/VACUITY-AUDIT.md, mutation M6).
+      const ownRes = await req<{ clients: { id: string }[] }>("GET", "/clients", undefined, tokenA);
+      assert.equal(ownRes.status, 200);
+      assert.ok(
+        ownRes.body.clients.map((c) => c.id).includes(clientAId),
+        "positive control: Company A must see its OWN client in the list"
+      );
+
+      const listRes = await req<{ clients: { id: string }[] }>("GET", "/clients", undefined, tokenB);
+      assert.equal(listRes.status, 200);
+      assert.ok(!listRes.body.clients.map((c) => c.id).includes(clientAId), "Company B must not see Company A's client in the list");
+
+      const patchRes = await req("PATCH", `/clients/${clientAId}`, { name: "hijacked" }, tokenB);
+      assert.equal(patchRes.status, 404, "Company B PATCH on Company A's client must 404");
+
+      const delRes = await req("DELETE", `/clients/${clientAId}`, undefined, tokenB);
+      assert.equal(delRes.status, 404, "Company B DELETE on Company A's client must 404");
+
+      // Company A's client survived both, which is what makes the two 404s a
+      // tenancy result rather than a pair of broken routes.
+      const after = await req<{ clients: { id: string; name: string }[] }>("GET", "/clients", undefined, tokenA);
+      const mine = after.body.clients.find((c) => c.id === clientAId);
+      assert.ok(mine, "Company A's client was deleted by Company B");
+      assert.equal(mine.name, "Matrix Builders A", "Company A's client was renamed by Company B");
+
+      // And the filing route: Company B cannot file its own site under Company
+      // A's client, which is the one place a client id crosses into another
+      // table. The control is that A can file its own site with the same id.
+      const siteBId = await createSiteAs(tokenB, "Matrix Site B");
+      const crossFile = await req("PATCH", `/projects/sites/${siteBId}`, { clientId: clientAId }, tokenB);
+      assert.equal(crossFile.status, 400, "Company B filed its site under Company A's client");
+      const siteAId = await createSiteAs(tokenA, "Matrix Site A");
+      const ownFile = await req("PATCH", `/projects/sites/${siteAId}`, { clientId: clientAId }, tokenA);
+      assert.equal(ownFile.status, 200, "Company A cannot file its own site either — the 400 above is not a tenancy result");
+    },
+  },
 ];
 
 for (const entry of MATRIX) {
@@ -723,6 +772,7 @@ const KNOWN_ROUTERS: KnownRouter[] = [
   { router: deliveriesRouter, label: "deliveriesRouter", tenantScoped: true, resourceKeys: ["deliveries"] },
   { router: templatesRouter, label: "templatesRouter", tenantScoped: true, resourceKeys: ["entry-templates"] },
   { router: locationRouter, label: "locationRouter", tenantScoped: true, resourceKeys: ["worker-locations"] },
+  { router: clientsRouter, label: "clientsRouter", tenantScoped: true, resourceKeys: ["clients"] },
   {
     router: companyRouter, label: "companyRouter", tenantScoped: false, resourceKeys: [],
     reason: "Company membership/invite management is the tenancy boundary itself, not a scoped 'record' resource in the seed-then-deny sense — exhaustively covered by company-rbac.test.ts (tests 2, 4, 6a, 6b) and invites.test.ts.",
