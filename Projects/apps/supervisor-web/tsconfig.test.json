@@ -1,0 +1,37 @@
+{
+  "//": [
+    "Build for `pnpm --filter sitesnap-supervisor-web run test`.",
+    "",
+    "Separate from tsconfig.json because the package's own program is a Next",
+    "app: it includes .tsx components, JSX, next/* imports and browser globals,",
+    "none of which node can load. This config compiles ONLY the modules that",
+    "are free of them, to plain CommonJS that `node --test` can require.",
+    "",
+    "`files` is an explicit list rather than a glob on purpose, copying",
+    "apps/mobile/tsconfig.test.json. A module can be added here only by someone",
+    "who has checked it has no React, next/* or DOM import, and the compile",
+    "fails loudly rather than the test silently pulling a browser module in.",
+    "",
+    "`moduleResolution: node` and `module: commonjs` override the app's",
+    "`bundler`/`esnext` pair, which only a bundler can resolve."
+  ],
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "incremental": false,
+    "rootDir": ".",
+    "outDir": "dist-test",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "jsx": "react",
+    "types": ["node"],
+    "plugins": []
+  },
+  "include": [],
+  "files": [
+    "lib/photo-capture-time.ts",
+    "lib/photo-capture-time.test.ts",
+    "lib/photo-provenance.ts",
+    "lib/photo-provenance.test.ts"
+  ]
+}
