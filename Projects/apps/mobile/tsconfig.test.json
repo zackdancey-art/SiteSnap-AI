@@ -34,6 +34,8 @@
     "lib/photo-uri.ts",
     "lib/photo-uri.test.ts",
     "lib/offline-queue.ts",
+    "lib/photo-payload-retention.ts",
+    "lib/photo-payload-retention.test.ts",
     "lib/photo-payload-store.ts",
     "lib/photo-payload-store.test.ts",
     "lib/sync-telemetry-redaction.ts",
