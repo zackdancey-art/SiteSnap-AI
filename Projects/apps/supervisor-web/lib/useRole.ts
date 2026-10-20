@@ -98,6 +98,43 @@ export function canApproveDiary(companyRole: string | null | undefined): boolean
 }
 
 /**
+ * Whether this role may approve, send back, or reopen a crew timecard.
+ *
+ * The same two refused roles as diary approval, and for a stronger reason than
+ * tidiness: `POST /crew/timecards/:id/approval` carries `requireAtLeast(
+ * "manager")`, so crew (rank 0) and viewer (rank 1) are both refused at the API.
+ * Written as the refused roles by name rather than as a rank comparison, like
+ * the rest of this file, so an unrecognised role is not silently demoted and the
+ * API stays the authority on it.
+ *
+ * WHY THE PORTAL ASKS AT ALL, WHEN THE API ALREADY REFUSES
+ *
+ * Because of what a crew member would otherwise see. The approval controls are
+ * the only thing on the timesheets tab that writes, and a crew member's own list
+ * is narrowed to their own cards by the API, so offering them Approve would be
+ * offering them self-approval of their own hours — the exact defect the rank gate
+ * on that route exists to prevent — and then refusing it with a 403. Not drawing
+ * the button says the true thing first.
+ *
+ * It is NOT the only thing standing between a crew member and that write. The
+ * route refuses them independently, which is the point of doing both halves
+ * (CLAUDE.md §3). This half decides what is drawn; that half decides what
+ * happens.
+ *
+ * Mobile's `canApproveTimesheet` (apps/mobile/lib/permissions.ts) is written as
+ * manager+ rather than as a refused list, and answers the same for all four
+ * known roles. The two differ only on a role neither recognises — mobile refuses
+ * it, this allows it — and that is the same pre-existing asymmetry already
+ * recorded on canSeeSupervisorDashboard above, kept rather than unified in
+ * passing.
+ */
+const REFUSED_TIMESHEET_APPROVAL = ["crew", "viewer"];
+
+export function canApproveTimesheet(companyRole: string | null | undefined): boolean {
+  return !REFUSED_TIMESHEET_APPROVAL.includes(companyRole ?? "");
+}
+
+/**
  * Where a signed-in person lands when they asked for no particular screen.
  *
  * The sign-in page sent everybody to /dashboard. For crew that is now the
@@ -127,6 +164,7 @@ export function useRole() {
     canSeeSupervisorDashboard: canSeeSupervisorDashboard(user?.companyRole),
     canReadCompanyProfile: canReadCompanyProfile(user?.companyRole),
     canApproveDiary: canApproveDiary(user?.companyRole),
+    canApproveTimesheet: canApproveTimesheet(user?.companyRole),
     isCrew: isCrew(user?.companyRole),
   };
 }
