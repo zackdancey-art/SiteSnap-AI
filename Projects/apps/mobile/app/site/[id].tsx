@@ -21,6 +21,7 @@ import { DailyEntry, SiteMember } from "@/lib/types";
 import { authedFetch } from "@/lib/authed-fetch";
 import { isSessionExpired } from "@/lib/session";
 import { BackButton } from "@/components/BackButton";
+import { EntrySyncBadge } from "@/components/EntrySyncBadge";
 
 function EntryCard({ entry }: { entry: DailyEntry }) {
   const dateObj = new Date(entry.date + "T00:00:00");
@@ -61,6 +62,9 @@ function EntryCard({ entry }: { entry: DailyEntry }) {
           )}
         </View>
         <Text style={styles.entryNotes} numberOfLines={2}>{entry.notes}</Text>
+        {/* AUDIT L37: whether THIS entry reached the server. Renders nothing
+            when it has, which is almost always. */}
+        <EntrySyncBadge entryId={entry.id} />
         {entry.photos.length > 0 && (
           <View style={styles.photoCount}>
             <Ionicons name="camera-outline" size={13} color={Colors.textTertiary} />

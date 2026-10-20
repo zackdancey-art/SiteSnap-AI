@@ -23,6 +23,7 @@ import {
   type QueuedOp,
 } from "@/lib/offline-queue";
 import { drainQueue } from "@/lib/offline-drain";
+import { entrySyncStatesFromQueue, type EntrySyncStates } from "@/lib/entry-sync-state";
 import { materializeQueuedPhoto } from "@/lib/photo-bytes";
 import {
   canonicalUploadPathFromResponse,
@@ -49,6 +50,13 @@ interface DataContextType {
    * holding the phone can learn that work did not sync.
    */
   failedOps: QueuedOp[];
+  /**
+   * Per-entry sync state, keyed by entry id — AUDIT L37's remaining half. An
+   * entry id ABSENT from this map has reached the server; see
+   * lib/entry-sync-state.ts for why it is derived from the queue rather than
+   * read off `Entry.isPending`, which is set once and never cleared.
+   */
+  entrySyncStates: EntrySyncStates;
   /** Hands failed ops back to the drain. Returns how many were queued again. */
   retryFailedSync: (ids?: string[]) => Promise<number>;
   addSite: (site: Omit<Site, "id" | "createdAt">) => Promise<void>;
@@ -561,6 +569,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const [lastSyncError, setLastSyncError] = useState<string | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
   const [failedOps, setFailedOps] = useState<QueuedOp[]>([]);
+  const [entrySyncStates, setEntrySyncStates] = useState<EntrySyncStates>({});
 
   // The failed list is read from storage rather than accumulated in memory:
   // ops dead-lettered on a previous launch must still be visible on this one.
@@ -569,6 +578,27 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       setFailedOps(await peekFailedQueue());
     } catch {
       // Storage being unreadable must not take the screen down with it.
+    }
+  }, []);
+
+  /**
+   * Re-derives the per-entry sync map from the queue. Called wherever the queue
+   * changes, which is the only thing that can change the answer.
+   *
+   * This is a whole-queue read, and that is affordable here in a way the
+   * photograph payload map is not: queued payloads have their base64 stripped
+   * before being enqueued (stripPhotoPayloads), so the queue is a short array of
+   * small objects rather than tens of megabytes of string.
+   *
+   * On a read failure the map is left EXACTLY AS IT WAS rather than cleared.
+   * Clearing it would silently promote every outstanding entry to "arrived",
+   * which is the one wrong answer this indicator exists to prevent.
+   */
+  const refreshEntrySyncStates = React.useCallback(async () => {
+    try {
+      setEntrySyncStates(entrySyncStatesFromQueue(await peekQueue()));
+    } catch {
+      // Keep the last known map; see above.
     }
   }, []);
 
@@ -589,10 +619,16 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       updateQueuedPayload,
       markOpFailed,
       report: reportSyncFailure,
-      onPending: setPendingCount,
+      onPending: (count) => {
+        setPendingCount(count);
+        // An op leaving the queue is the moment an entry becomes "arrived", so
+        // the per-entry map has to be re-derived here and not only on mount.
+        void refreshEntrySyncStates();
+      },
       onFailed: () => {
         // The count comes back with the list, so there is one source for both.
         void refreshFailedOps();
+        void refreshEntrySyncStates();
       },
       warn: (...args) => console.warn(...args),
     });
@@ -601,6 +637,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const retryFailedSync = async (ids?: string[]) => {
     const retried = await retryFailedOps(ids);
     await refreshFailedOps();
+    // A retried op goes from failed back to pending, so the badge must follow.
+    await refreshEntrySyncStates();
     if (retried > 0) await drainOfflineQueue();
     return retried;
   };
@@ -664,7 +702,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     void refreshFailedOps();
     peekQueue()
-      .then((queue) => setPendingCount(queue.filter((op) => op.status !== "failed").length))
+      .then((queue) => {
+        setPendingCount(queue.filter((op) => op.status !== "failed").length);
+        setEntrySyncStates(entrySyncStatesFromQueue(queue));
+      })
       .catch(() => {});
   }, [refreshFailedOps]);
 
@@ -703,6 +744,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         await persistCache(user?.email, updated, entries, diaries);
         await enqueue({ type: "addSite", payload: siteData });
         setPendingCount((n) => n + 1);
+        void refreshEntrySyncStates();
         setSyncStatus("offline");
         return;
       }
@@ -764,6 +806,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         await persistCache(user?.email, sites, updated, diaries);
         await enqueue({ type: "addEntry", payload: stripPhotoPayloads(optimistic) });
         setPendingCount((n) => n + 1);
+        void refreshEntrySyncStates();
         setSyncStatus("offline");
         return;
       }
@@ -999,6 +1042,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         lastSyncError,
         pendingCount,
         failedOps,
+        entrySyncStates,
         retryFailedSync,
         addSite,
         deleteSite,

@@ -34,6 +34,8 @@
     "lib/photo-uri.ts",
     "lib/photo-uri.test.ts",
     "lib/offline-queue.ts",
+    "lib/entry-sync-state.ts",
+    "lib/entry-sync-state.test.ts",
     "lib/photo-payload-retention.ts",
     "lib/photo-payload-retention.test.ts",
     "lib/photo-payload-store.ts",

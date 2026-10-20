@@ -16,6 +16,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { router, useLocalSearchParams } from "expo-router";
 import * as Crypto from "expo-crypto";
 import { useData } from "@/lib/data-context";
+import { EntrySyncBadge } from "@/components/EntrySyncBadge";
 import Colors from "@/constants/colors";
 import { Photo, type AnnotationVector } from "@/lib/types";
 import { describeCaptureTime } from "@/lib/photo-capture-time";
@@ -272,6 +273,13 @@ export default function EntryDetailScreen() {
         contentContainerStyle={[styles.scrollContent, { paddingBottom: 40 + webBottomInset }]}
         showsVerticalScrollIndicator={false}
       >
+        {/* AUDIT L37: this screen is where "has this entry arrived" is asked
+            most pointedly, so the answer goes above the entry's content.
+            Renders nothing once it has arrived. */}
+        <View style={styles.syncBadgeRow}>
+          <EntrySyncBadge entryId={entry.id} />
+        </View>
+
         <View style={styles.infoGrid}>
           {!!entry.weather && (
             <View style={styles.infoCard}>
@@ -564,6 +572,7 @@ const styles = StyleSheet.create({
     padding: 16,
     gap: 20,
   },
+  syncBadgeRow: { flexDirection: "row" },
   infoGrid: {
     flexDirection: "row",
     gap: 10,
