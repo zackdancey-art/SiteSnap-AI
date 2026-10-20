@@ -26,7 +26,7 @@ type ReportPeriod = "daily" | "weekly" | "monthly";
  * schema that no compiler and no test checks.
  *
  * So the range predicate below is built from these two constants, and
- * `storage/project-entry-date-column-db.test.ts` asserts against
+ * `storage/report-range-db.test.ts` asserts against
  * `information_schema.columns` that the column named here is a column that
  * exists on the table named here. That test is the only thing standing between
  * a rename and another silently-false predicate.

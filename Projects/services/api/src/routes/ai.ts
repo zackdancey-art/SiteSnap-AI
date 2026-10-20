@@ -14,6 +14,14 @@ import {
   latestEntryDate,
   windowLengthInDays,
 } from "../utils/reportWindow";
+import {
+  buildAuthorNameIndex,
+  effectiveEntryNotes,
+  renderSafetyRecord,
+  resolveAuthorName,
+  toolboxTalkFromStoredRow,
+} from "../utils/reportPayload";
+import { listCompanyMembers } from "../storage/authStore";
 import { uploadBelongsToActorCompany } from "../storage/uploadsStore";
 import { Actor } from "../storage/actor";
 import type OpenAI from "openai";
@@ -40,7 +48,7 @@ type ReportPeriod = "daily" | "weekly" | "monthly";
  * and then filtered by period in JavaScript, so the cap applied to rows the
  * report was about to discard and the entries it dropped were the ones in the
  * window. With the window filtered in SQL the cap is a cap on the window, and
- * when it bites the response says so (`entriesOmitted`) rather than returning a
+ * when it bites the response says so (`truncatedAtCeiling`) rather than returning a
  * short report that looks complete. Raising the old 200 was explicitly the
  * wrong fix: it hides the same defect for longer.
  */
@@ -65,6 +73,17 @@ const DiaryEntrySchema = z.object({
   notes: z.string().optional(),
   photos: z.array(DiaryPhotoSchema).optional(),
   timestamp: z.string().optional(),
+  // AUDIT L97. All five are on `EntryRecord`, all five are persisted, all five
+  // are mapped back by `mapEntry`, and none of them was in the object this
+  // route built for the report. They are optional because a client older than
+  // this deploy sends none of them and must keep working — and because the
+  // store branch below fills them from the row regardless of what any client
+  // sends, which is the path that matters for a report of real work.
+  swmsRef: z.string().optional(),
+  hazardNotes: z.string().optional(),
+  toolboxTalk: z.boolean().optional(),
+  notesMode: z.enum(["free", "hourly"]).optional(),
+  hourlyNotes: z.array(z.object({ hour: z.number(), note: z.string() })).optional(),
 });
 
 const GenerateDiaryBodySchema = z.object({
@@ -94,6 +113,18 @@ const GenerateDiaryBodySchema = z.object({
 
 type GenerateDiaryPhoto = z.infer<typeof DiaryPhotoSchema>;
 type GenerateDiaryEntry = z.infer<typeof DiaryEntrySchema>;
+
+/**
+ * An entry as the report sees it: what the request carried, plus the author
+ * name this server resolved for it.
+ *
+ * `authorName` is NOT on `DiaryEntrySchema`, and that is the point. Attribution
+ * in a compliance document must not be settable by the caller — zod strips
+ * unknown keys, so an `authorName` in a request body is dropped before it is
+ * read, and the only writer of this field is `resolveDiaryRequest` resolving
+ * `ownerEmail` against the caller's own company. AUDIT L96.
+ */
+type ReportEntry = GenerateDiaryEntry & { authorName?: string };
 type GenerateDiaryBody = z.infer<typeof GenerateDiaryBodySchema>;
 
 /**
@@ -108,7 +139,7 @@ type ResolvedDiaryRequest = {
   site: NonNullable<GenerateDiaryBody["site"]>;
   period: ReportPeriod;
   window: ReportWindow;
-  entries: GenerateDiaryEntry[];
+  entries: ReportEntry[];
   /**
    * True when the window held more entries than `REPORT_ENTRY_CEILING` and the
    * report was built from the first `REPORT_ENTRY_CEILING` of them.
@@ -124,6 +155,27 @@ type ResolvedDiaryRequest = {
   truncatedAtCeiling: boolean;
   /** Entries skipped because their date is missing or not a real day. */
   undatedEntries: number;
+  /**
+   * Entries in the report whose author could not be named. AUDIT L96.
+   *
+   * Reported as a count rather than left blank in the document, because the two
+   * are what distinguish "this company records who does what" from "this report
+   * has gaps in it", and only the second is actionable. The reasons are not
+   * broken out: a removed member, a member row with no name, and an entry
+   * predating ownership all read the same from here, and the remedy for each is
+   * the same conversation.
+   */
+  unattributedEntries: number;
+  /**
+   * Display names shared by more than one member of this company, so the caller
+   * can say that attribution in this report is ambiguous rather than present a
+   * collision as fact. Empty on the overwhelming majority of reports.
+   *
+   * KNOWN LIMITATION, not a fix: two people called the same thing still appear
+   * as one name on their entries. Resolving it needs a per-user display handle,
+   * which is a product decision rather than a patch.
+   */
+  ambiguousAuthorNames: string[];
 };
 
 type OpenAIErrorLike = {
@@ -167,6 +219,13 @@ type DiarySection = {
   materialsUsed: string;
   issues: string;
   photoAnalysis: string;
+  /**
+   * Who recorded the entry this section was built from, or "Not recorded".
+   *
+   * Server-resolved and never taken from the model — see `normalizeSection`.
+   * AUDIT L96.
+   */
+  recordedBy: string;
 };
 
 type DiaryOutput = {
@@ -188,7 +247,7 @@ type GenerationResult = {
  * Stamped into every generated diary so a report can be traced to the prompt
  * that wrote it.
  */
-export const PROMPT_VERSION = "2026-09-v1";
+export const PROMPT_VERSION = "2026-10-v2";
 
 const FALLBACK_NOTICE =
   "Written by the built-in template generator, not AI.";
@@ -222,14 +281,19 @@ function formatDisplayDate(dateStr: string) {
   }
 }
 
-function normalizeEntry(entry: GenerateDiaryEntry): DiarySection {
+function normalizeEntry(entry: ReportEntry): DiarySection {
   const photos = Array.isArray(entry.photos) ? entry.photos : [];
   const captionNotes = photos
     .map((p) => String(p.caption || "").trim())
     .filter(Boolean);
 
+  // `effectiveEntryNotes` rather than `entry.notes`. An entry captured hour by
+  // hour has its content in `hourlyNotes` and usually nothing in `notes`, so
+  // reading `notes` alone rendered the whole of that entry's work as the
+  // "Site activities recorded" placeholder below. AUDIT L97.
+  const notes = effectiveEntryNotes(entry);
   const workParts: string[] = [];
-  if (entry.notes?.trim()) workParts.push(entry.notes.trim());
+  if (notes.text) workParts.push(notes.text);
   if (entry.locationAddress?.trim()) workParts.push(`Location: ${entry.locationAddress.trim()}`);
   const workCompleted = workParts.join("\n") || "Site activities recorded. See photo observations for detail.";
 
@@ -238,20 +302,33 @@ function normalizeEntry(entry: GenerateDiaryEntry): DiarySection {
       ? captionNotes.map((c, i) => `Photo ${i + 1}: ${c}`).join("\n")
       : "N/A";
 
+  // This used to be the literal "N/A", sitting on top of three populated
+  // columns. The template generator never invents content, so when nothing was
+  // recorded it still says so — but when something WAS recorded it now says
+  // that instead. AUDIT L97.
+  const safetyRecord = renderSafetyRecord(entry);
+
   return {
     date: String(entry.date ?? new Date().toISOString().slice(0, 10)),
     weather: String(entry.weather ?? "Not recorded"),
     crewCount: String(entry.crewCount ?? "Not recorded"),
     workCompleted,
-    safetyObservations: "N/A",
+    safetyObservations: safetyRecord ?? "N/A",
     materialsUsed: "Refer to site records.",
     issues: "None reported.",
     photoAnalysis,
+    recordedBy: entry.authorName?.trim() || "Not recorded",
   };
 }
 
 function normalizeSection(section: Partial<DiarySection> | undefined, fallback: DiarySection): DiarySection {
   return {
+    // DELIBERATELY NOT `cleanString(section?.recordedBy, ...)`. Every other
+    // field here is prose the model is asked to improve; this one is a fact
+    // about who recorded the entry, and the model has no way to know it beyond
+    // what we told it. Taking it from the model's output would make attribution
+    // in a compliance document a function of generated text. AUDIT L96.
+    recordedBy: fallback.recordedBy,
     date: cleanString(section?.date, fallback.date),
     weather: cleanString(section?.weather, fallback.weather),
     crewCount: cleanString(section?.crewCount, fallback.crewCount),
@@ -362,6 +439,7 @@ function buildFullReport(args: {
 
   sections.forEach((section) => {
     lines.push(`DATE: ${formatDisplayDate(section.date)}`);
+    lines.push(`Recorded by: ${section.recordedBy}`);
     lines.push(`Weather Conditions: ${section.weather}`);
     lines.push(`Crew on Site: ${section.crewCount}`);
     lines.push("");
@@ -476,7 +554,7 @@ async function buildVisionInputs(entries: GenerateDiaryEntry[], actor: Pick<Acto
 }
 
 export function buildDiaryFromEntries(
-  entries: GenerateDiaryEntry[],
+  entries: ReportEntry[],
   period: ReportPeriod = "daily",
   window?: ReportWindow
 ): DiaryOutput {
@@ -503,6 +581,12 @@ export function buildDiaryFromEntries(
   const safetyChecklist: string[] = [];
   for (const entry of entries) {
     const photos = entry.photos ?? [];
+    // Hazard notes need no photograph to qualify. The notes field is general
+    // text, which is why it is admitted only with evidence beside it; a hazard
+    // note is a safety observation by the field it was typed into, and it was
+    // reaching this document nowhere at all. AUDIT L97.
+    const hazards = entry.hazardNotes?.trim();
+    if (hazards) safetyChecklist.push(hazards);
     if (entry.notes?.trim() && photos.length > 0) safetyChecklist.push(entry.notes.trim());
     for (const photo of photos) {
       const caption = (photo as { caption?: string }).caption?.trim();
@@ -524,7 +608,7 @@ export const SYSTEM_PROMPT = `You are a professional quantity surveyor and const
 Your task is to produce a detailed, accurate, and professionally written site diary based on:
 1. Site photographs (your PRIMARY source — analyse each image carefully)
 2. Field notes and captions provided by the site team
-3. Structured entry data (date, weather, crew count, location)
+3. Structured entry data (date, weather, crew count, location, author, safety record)
 
 PHOTO ANALYSIS REQUIREMENTS:
 - Study every photograph in detail before writing
@@ -540,6 +624,9 @@ PROFESSIONAL WRITING STANDARDS:
 - safetyObservations must detail visible PPE compliance, hazards, barriers, and signage
 - materialsUsed must list specific materials, products, or plant observed or referenced
 - issues must document any concerns, delays, defects, or non-conformances visible or noted
+- safetyObservations must incorporate the entry's own safetyRecord verbatim where one is given — the SWMS reference, the hazards noted, and whether a toolbox talk was held are the recorded facts and must not be paraphrased away or contradicted by what you infer from a photograph
+- an entry whose notesMode is "hourly" has its work recorded hour by hour inside notes; describe the shape of the day it shows, and never treat it as a single undifferentiated block
+- fullReport must attribute each day's record to the recordedBy name given for that entry, and must print "Not recorded" where that is the value — attribution is a recorded fact, so never infer, substitute or omit a name
 - fullReport must be a complete, well-structured report document including all sections
 - summary must be a professional executive paragraph suitable for a project manager or client
 
@@ -731,17 +818,35 @@ async function tryGenerateWithOpenAI(
       totalEntries: entries.length,
       totalPhotosAttached: imageCount,
     },
-    entries: entries.map((entry) => ({
-      date: entry.date || "",
-      locationAddress: entry.locationAddress || "",
-      weather: entry.weather || "",
-      crewCount: entry.crewCount || "",
-      notes: entry.notes || "",
-      photoCount: (entry.photos || []).length,
-      photoCaptions: (entry.photos || [])
-        .map((p) => p.caption || "")
-        .filter(Boolean),
-    })),
+    entries: entries.map((entry) => {
+      const notes = effectiveEntryNotes(entry);
+      return {
+        date: entry.date || "",
+        // The name, never the email. An email address is personal content and
+        // this object is sent to OpenAI on every generation. AUDIT L96.
+        recordedBy: entry.authorName || "Not recorded",
+        locationAddress: entry.locationAddress || "",
+        weather: entry.weather || "",
+        crewCount: entry.crewCount || "",
+        // `notes` here is the entry's whole content, hourly log included, not
+        // the free-text column. An hourly entry's free-text column is usually
+        // empty, so this field used to arrive blank and the model wrote a
+        // paragraph of nothing for a day's work. AUDIT L97.
+        notes: notes.text,
+        notesMode: entry.notesMode || "free",
+        hoursRecorded: notes.recordedHours,
+        safetyRecord: renderSafetyRecord(entry) || "",
+        swmsRef: entry.swmsRef || "",
+        hazardNotes: entry.hazardNotes || "",
+        // Three states, kept as three. `null` is "never answered", which is not
+        // the same claim as `false`.
+        toolboxTalk: entry.toolboxTalk ?? null,
+        photoCount: (entry.photos || []).length,
+        photoCaptions: (entry.photos || [])
+          .map((p) => p.caption || "")
+          .filter(Boolean),
+      };
+    }),
   };
 
   const userContent: OpenAIContentItem[] = [
@@ -855,6 +960,15 @@ async function resolveDiaryRequest(
       entries: filtered.entries,
       truncatedAtCeiling: false,
       undatedEntries: filtered.undatedCount,
+      // No attribution on this branch, and none invented. The entries came out
+      // of the request, so the only author this server could name is one the
+      // caller told it — which is exactly what must not decide attribution in a
+      // compliance document. This branch is the phone's offline retry; its
+      // report carries "Not recorded" against every entry and the count says
+      // how many. AUDIT L96. The store branch below is where attribution comes
+      // from, because there the owner of each row is a fact the server holds.
+      unattributedEntries: filtered.entries.length,
+      ambiguousAuthorNames: [],
     };
   }
 
@@ -879,7 +993,7 @@ async function resolveDiaryRequest(
   // One row over the ceiling, so truncation is DETECTED rather than assumed.
   // `rows.length === limit` cannot tell a full page from an exact fit.
   const probeLimit = REPORT_ENTRY_CEILING + 1;
-  const [sites, loaded] = await Promise.all([
+  const [sites, loaded, members] = await Promise.all([
     listSites(actor),
     explicitWindowRequested
       ? listEntries(actor, siteId, probeLimit, 0, {
@@ -887,6 +1001,11 @@ async function resolveDiaryRequest(
           to: explicitWindowRequested.to,
         })
       : listEntries(actor, siteId, probeLimit, 0),
+    // AUDIT L96. Scoped to the caller's own company by the function itself, so
+    // an entry whose `ownerEmail` belongs to another tenant resolves to no name
+    // rather than to that tenant's member — which is the behaviour a
+    // misfiled row must have, not an accident of this call.
+    listCompanyMembers(actor.companyId),
   ]);
   const site = sites.find((item) => item.id === siteId);
   if (!site) {
@@ -905,13 +1024,34 @@ async function resolveDiaryRequest(
     reportWindow = anchored.window;
   }
 
+  const authorIndex = buildAuthorNameIndex(members);
+
   const filtered = filterEntriesByWindow(
     rows.map((entry) => ({
       date: entry.date,
+      authorName: resolveAuthorName(authorIndex, entry.ownerEmail),
       locationAddress: entry.locationAddress,
       weather: entry.weather,
       crewCount: entry.crewCount,
       notes: entry.notes,
+      // AUDIT L97: five fields on the row, five fields the report never saw.
+      //
+      // Two of these five are reachable and three are not. `notesMode` and
+      // `hourlyNotes` are written by the capture form every time an entry is
+      // saved (`apps/mobile/app/new-entry.tsx:553` and `app/entry/[id].tsx:219`)
+      // and are the half of L97 that was losing real recorded content.
+      // `swmsRef`, `hazardNotes` and `toolboxTalk` are accepted and persisted by
+      // `POST /api/projects/entries` but no shipping client sends them, so they
+      // are read here for the day one does rather than claimed as delivered.
+      swmsRef: entry.swmsRef,
+      hazardNotes: entry.hazardNotes,
+      // NOT `entry.toolboxTalk`. The column is NOT NULL DEFAULT false, so a
+      // stored `false` is a default and not an answer — see
+      // `toolboxTalkFromStoredRow` for why that may not become a sentence in
+      // the document.
+      toolboxTalk: toolboxTalkFromStoredRow(entry.toolboxTalk),
+      notesMode: entry.notesMode,
+      hourlyNotes: entry.hourlyNotes,
       photos: Array.isArray(entry.photos)
         ? entry.photos.map((photo) => ({
             id: typeof photo.id === "string" ? photo.id : undefined,
@@ -945,6 +1085,8 @@ async function resolveDiaryRequest(
     // otherwise would be the same guess the old code made.
     truncatedAtCeiling: Boolean(explicitWindowRequested) && truncated,
     undatedEntries: filtered.undatedCount,
+    unattributedEntries: filtered.entries.filter((entry) => !entry.authorName).length,
+    ambiguousAuthorNames: authorIndex.duplicateNames,
   };
 }
 
@@ -980,6 +1122,13 @@ function logGeneration(
     entriesIncluded: resolved ? resolved.entries.length : null,
     undatedEntries: resolved?.undatedEntries ?? null,
     truncatedAtCeiling: resolved?.truncatedAtCeiling ?? null,
+    // A count, not a list of who. AUDIT L96's own note is that the author field
+    // is an email address and this product's logging rule is identifiers and
+    // counts; a display name is personal content by the same argument, so
+    // neither reaches here. What the logs answer is how many entries across all
+    // companies are reaching a compliance document unattributed.
+    unattributedEntries: resolved?.unattributedEntries ?? null,
+    ambiguousAuthorNames: resolved ? resolved.ambiguousAuthorNames.length : null,
   });
 }
 
@@ -1022,6 +1171,15 @@ aiRouter.post("/generate-diary", requireAuth, rateLimitByCompany("generate-diary
       reportWindow: resolved.window,
       entriesIncluded: resolved.entries.length,
       ...(resolved.undatedEntries > 0 ? { undatedEntries: resolved.undatedEntries } : {}),
+      // Present only when there is something to say. A report in which every
+      // entry is attributed should not carry a zero that invites a reader to
+      // wonder what it means. AUDIT L96.
+      ...(resolved.unattributedEntries > 0
+        ? { unattributedEntries: resolved.unattributedEntries }
+        : {}),
+      ...(resolved.ambiguousAuthorNames.length > 0
+        ? { ambiguousAuthorNames: resolved.ambiguousAuthorNames }
+        : {}),
       ...(resolved.truncatedAtCeiling ? { truncatedAtCeiling: true, entryCeiling: REPORT_ENTRY_CEILING } : {}),
       // Signed so the save request that follows cannot claim a generator that
       // never ran. Surfaced as `warning` too, because existing clients read
