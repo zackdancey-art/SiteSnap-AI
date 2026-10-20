@@ -5,6 +5,15 @@ import { requireAuth, AuthenticatedRequest } from "../middleware/auth";
 import { rateLimitByCompany, LIMITS } from "../middleware/rateLimit";
 import { getMediaStorage } from "../storage/mediaStorage";
 import { listEntries, listSites } from "../storage/projectsStore";
+import {
+  ReportWindow,
+  anchoredWindow,
+  describeWindow,
+  explicitWindow,
+  filterEntriesByWindow,
+  latestEntryDate,
+  windowLengthInDays,
+} from "../utils/reportWindow";
 import { uploadBelongsToActorCompany } from "../storage/uploadsStore";
 import { Actor } from "../storage/actor";
 import type OpenAI from "openai";
@@ -17,7 +26,25 @@ function extractUploadId(ref: string): string | null {
   return m ? m[1] : null;
 }
 
+/**
+ * The period a report is labelled with. It is now only a LABEL and a default:
+ * what a report actually covers is its `ReportWindow`, a pair of dates. See
+ * utils/reportWindow.ts for why — AUDIT L92.
+ */
 type ReportPeriod = "daily" | "weekly" | "monthly";
+
+/**
+ * The most entries one report may be built from.
+ *
+ * AUDIT L98. The old code called `listEntries` with its default limit of 200
+ * and then filtered by period in JavaScript, so the cap applied to rows the
+ * report was about to discard and the entries it dropped were the ones in the
+ * window. With the window filtered in SQL the cap is a cap on the window, and
+ * when it bites the response says so (`entriesOmitted`) rather than returning a
+ * short report that looks complete. Raising the old 200 was explicitly the
+ * wrong fix: it hides the same defect for longer.
+ */
+const REPORT_ENTRY_CEILING = 500;
 
 const DiaryPhotoSchema = z.object({
   id: z.string().optional(),
@@ -51,12 +78,53 @@ const GenerateDiaryBodySchema = z.object({
     })
     .optional(),
   period: z.enum(["daily", "weekly", "monthly"]).optional(),
+  // The window the caller is asking for, inclusive, both YYYY-MM-DD. Validated
+  // in `resolveWindow` rather than here so that a bad range comes back as a
+  // sentence a person can act on instead of a zod flatten() blob, and so the
+  // 92-day ceiling lives in one place with the rest of the window rules.
+  //
+  // OPTIONAL, and that is a deploy constraint rather than a preference: the API
+  // ships ahead of the mobile and portal builds, so for the whole gap between
+  // those deploys every caller sends no range and gets the legacy anchored
+  // window. See `anchoredWindow`.
+  from: z.string().optional(),
+  to: z.string().optional(),
   entries: z.array(DiaryEntrySchema).max(50).optional(),
 });
 
 type GenerateDiaryPhoto = z.infer<typeof DiaryPhotoSchema>;
 type GenerateDiaryEntry = z.infer<typeof DiaryEntrySchema>;
 type GenerateDiaryBody = z.infer<typeof GenerateDiaryBodySchema>;
+
+/**
+ * One request, resolved: the site, the window, and the entries inside it.
+ *
+ * `entriesOmitted` and `undatedEntries` are counts the old code had no way to
+ * express. A report built from a truncated list used to be indistinguishable
+ * from a complete one, which is the half of AUDIT L98 that raising the limit
+ * would not have fixed.
+ */
+type ResolvedDiaryRequest = {
+  site: NonNullable<GenerateDiaryBody["site"]>;
+  period: ReportPeriod;
+  window: ReportWindow;
+  entries: GenerateDiaryEntry[];
+  /**
+   * True when the window held more entries than `REPORT_ENTRY_CEILING` and the
+   * report was built from the first `REPORT_ENTRY_CEILING` of them.
+   *
+   * A BOOLEAN rather than a count, deliberately. The load asks for one row over
+   * the ceiling, so what it learns is "there is at least one more", and naming a
+   * field `entriesOmitted: 1` would be a measured-looking number that is only
+   * ever 1 — the `EXPECTED_WRITE_STEPS = 13` failure mode in a response body.
+   * Counting them properly means a second COUNT(*) query on every report to
+   * serve a case that should not arise; if it starts arising, that is the point
+   * to add the count.
+   */
+  truncatedAtCeiling: boolean;
+  /** Entries skipped because their date is missing or not a real day. */
+  undatedEntries: number;
+};
 
 type OpenAIErrorLike = {
   status?: number;
@@ -195,55 +263,72 @@ function normalizeSection(section: Partial<DiarySection> | undefined, fallback: 
   };
 }
 
-function dateOnly(value: string) {
-  return new Date(`${value}T00:00:00`);
-}
+// `dateOnly` and `formatDateKey` used to live here. They parsed and formatted a
+// report's boundaries in the SERVER's local zone — `new Date(`${d}T00:00:00`)`
+// and `getFullYear/getMonth/getDate` — so which Render instance answered could
+// move a monthly window by a day. Both are gone from this file; the only copies
+// left are the verbatim ones in `utils/reportWindow.test.ts`, where their job is
+// to be the thing the new UTC arithmetic is compared against. Do not reinstate
+// them here: `utils/reportWindow.ts` does this work, in UTC, on strings.
 
-function formatDateKey(date: Date) {
-  const year = date.getFullYear();
-  const month = `${date.getMonth() + 1}`.padStart(2, "0");
-  const day = `${date.getDate()}`.padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
+/**
+ * The window one request covers, and the entries inside it.
+ *
+ * Two paths, and which one ran is recorded on the window itself:
+ *
+ *   explicit  the caller sent `from` and `to`. The window is theirs, the
+ *             report is reproducible, and two reports on the same dates are
+ *             comparable. This is the path AUDIT L92 asked for.
+ *   anchored  the caller sent neither. The window is counted back from the
+ *             latest entry the caller can see, which is what the code did
+ *             before L92 and is kept bug-for-bug — `utils/reportWindow.test.ts`
+ *             asserts the agreement against a verbatim copy of the old filter.
+ *
+ * Returning the window is the other half of the fix. The old code's boundaries
+ * existed for the length of one function call and were never written down, so
+ * nothing in a saved diary said which days it covered.
+ */
+function resolveWindow(
+  body: Pick<GenerateDiaryBody, "period" | "from" | "to">,
+  entries: Array<{ date?: unknown }>
+): { ok: true; window: ReportWindow } | { ok: false; message: string } {
+  const period = normalizePeriod(body.period);
+  const asked = body.from !== undefined || body.to !== undefined;
+  if (asked) return explicitWindow(period, body.from, body.to);
 
-function filterEntriesByPeriod(entries: GenerateDiaryEntry[], period: ReportPeriod) {
-  if (entries.length === 0) return [];
-  const sorted = [...entries].sort(
-    (a, b) => dateOnly(String(a.date || "")).getTime() - dateOnly(String(b.date || "")).getTime()
-  );
-  const latest = dateOnly(String(sorted[sorted.length - 1].date || new Date().toISOString().slice(0, 10)));
-  if (period === "daily") {
-    const key = String(sorted[sorted.length - 1].date || formatDateKey(latest));
-    return sorted.filter((e) => e.date === key);
+  const anchor = latestEntryDate(entries);
+  if (!anchor) {
+    // No usable date anywhere, so there is no window to report on. Previously
+    // this defaulted the anchor to today and produced an empty report for a
+    // period nobody asked about.
+    return {
+      ok: false,
+      message: "No entries with a usable date are available for this site.",
+    };
   }
-  if (period === "weekly") {
-    const start = new Date(latest);
-    start.setDate(start.getDate() - 6);
-    return sorted.filter((e) => {
-      const d = dateOnly(String(e.date || formatDateKey(latest)));
-      return d >= start && d <= latest;
-    });
-  }
-  return sorted.filter((e) => {
-    const d = dateOnly(String(e.date || formatDateKey(latest)));
-    return d.getFullYear() === latest.getFullYear() && d.getMonth() === latest.getMonth();
-  });
+  return { ok: true, window: anchoredWindow(period, anchor) };
 }
 
 function buildFullReport(args: {
   sections: DiarySection[];
   period: ReportPeriod;
+  window?: ReportWindow;
   siteName?: string;
   client?: string;
   address?: string;
   summary?: string;
   safetyChecklist?: string[];
 }) {
-  const { sections, period, siteName, client, address, summary, safetyChecklist } = args;
+  const { sections, period, window, siteName, client, address, summary, safetyChecklist } = args;
   const today = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
 
-  const dateRange =
-    sections.length > 1
+  // The window the report was ASKED for, not the span of the entries that
+  // happened to come back. Those differ exactly when the reader most needs to
+  // know: a monthly report with two entries in it used to print the two dates
+  // as its period, so a near-empty month and a near-empty week looked the same.
+  const dateRange = window
+    ? describeWindow(window)
+    : sections.length > 1
       ? `${formatDisplayDate(sections[0].date)} – ${formatDisplayDate(sections[sections.length - 1].date)}`
       : sections.length === 1
         ? formatDisplayDate(sections[0].date)
@@ -256,6 +341,11 @@ function buildFullReport(args: {
     `Client:       ${client || "—"}`,
     `Site Address: ${address || "—"}`,
     `Report Period: ${period.charAt(0).toUpperCase() + period.slice(1)} — ${dateRange}`,
+    // An anchored window was not asked for, it was inferred, and a compliance
+    // record should not present an inference as a request. AUDIT L92.
+    ...(window?.mode === "anchored"
+      ? [`              Dates derived from the latest recorded entry (${window.anchoredOn}).`]
+      : []),
     `Prepared:     ${today}`,
     "",
   ];
@@ -385,7 +475,11 @@ async function buildVisionInputs(entries: GenerateDiaryEntry[], actor: Pick<Acto
   return { content, imageCount: includedImages };
 }
 
-export function buildDiaryFromEntries(entries: GenerateDiaryEntry[], period: ReportPeriod = "daily"): DiaryOutput {
+export function buildDiaryFromEntries(
+  entries: GenerateDiaryEntry[],
+  period: ReportPeriod = "daily",
+  window?: ReportWindow
+): DiaryOutput {
   const sections = entries.map((entry) => normalizeEntry(entry));
   const siteName = "";
 
@@ -418,7 +512,7 @@ export function buildDiaryFromEntries(entries: GenerateDiaryEntry[], period: Rep
 
   return {
     summary,
-    fullReport: buildFullReport({ sections, period, siteName, summary, safetyChecklist }),
+    fullReport: buildFullReport({ sections, period, window, siteName, summary, safetyChecklist }),
     safetyChecklist,
     reportPeriod: period,
     sections,
@@ -602,11 +696,12 @@ function fallbackProvenance(warning: string): DiaryProvenance {
 }
 
 async function tryGenerateWithOpenAI(
-  body: GenerateDiaryBody,
+  body: ResolvedDiaryRequest,
   actor: Pick<Actor, "companyId">
 ): Promise<GenerationResult> {
-  const entries = Array.isArray(body.entries) ? body.entries : [];
-  const period = normalizePeriod(body.period);
+  const entries = body.entries;
+  const period = body.period;
+  const window = body.window;
 
   if (!process.env.OPENAI_API_KEY) {
     // Previously this returned the template output with NO warning at all —
@@ -614,12 +709,12 @@ async function tryGenerateWithOpenAI(
     // error paths below, which at least set one. A missing key is a
     // misconfiguration, not a non-event.
     return {
-      diary: buildDiaryFromEntries(entries, period),
+      diary: buildDiaryFromEntries(entries, period, window),
       provenance: fallbackProvenance(`${FALLBACK_NOTICE} No OpenAI API key is configured.`),
     };
   }
 
-  const fallback = buildDiaryFromEntries(entries, period);
+  const fallback = buildDiaryFromEntries(entries, period, window);
   const model = resolveModel();
   const client = getOpenAIClient();
 
@@ -629,6 +724,10 @@ async function tryGenerateWithOpenAI(
     reportContext: {
       site: body.site || {},
       period,
+      // The model used to be told the word "monthly" and nothing else, so a
+      // report covering four days of a month was written as a month's report.
+      // AUDIT L92.
+      reportingWindow: { from: window.from, to: window.to, days: windowLengthInDays(window.from, window.to) },
       totalEntries: entries.length,
       totalPhotosAttached: imageCount,
     },
@@ -696,6 +795,7 @@ async function tryGenerateWithOpenAI(
     buildFullReport({
       sections: safeSections,
       period,
+      window,
       siteName: body.site?.name,
       client: body.site?.client,
       address: body.site?.address,
@@ -723,10 +823,39 @@ async function tryGenerateWithOpenAI(
   };
 }
 
-async function resolveDiaryRequest(req: AuthenticatedRequest, body: GenerateDiaryBody) {
+/**
+ * A window the caller could not have meant, reported as a sentence.
+ *
+ * Thrown rather than returned because `resolveDiaryRequest` is called twice —
+ * once on the happy path and once in the catch that builds the template
+ * fallback — and both call sites must refuse the same bad range identically.
+ * The route maps it to a 400.
+ */
+class ReportWindowError extends Error {}
+
+async function resolveDiaryRequest(
+  req: AuthenticatedRequest,
+  body: GenerateDiaryBody
+): Promise<ResolvedDiaryRequest> {
   const period = normalizePeriod(body.period);
+
+  // A client-supplied entries array still displaces the server's own load
+  // (AUDIT L45's note in supervisor-web/lib/api.ts explains why that branch
+  // exists and why the portal no longer takes it). The window is resolved
+  // against that array, so an offline retry from the phone reports the same
+  // dates the server would have.
   if (Array.isArray(body.entries) && body.entries.length > 0) {
-    return { site: body.site || {}, period, entries: filterEntriesByPeriod(body.entries, period) };
+    const resolved = resolveWindow(body, body.entries);
+    if (!resolved.ok) throw new ReportWindowError(resolved.message);
+    const filtered = filterEntriesByWindow(body.entries, resolved.window);
+    return {
+      site: body.site || {},
+      period,
+      window: resolved.window,
+      entries: filtered.entries,
+      truncatedAtCeiling: false,
+      undatedEntries: filtered.undatedCount,
+    };
   }
 
   const siteId = cleanString(body.siteId, "");
@@ -735,14 +864,49 @@ async function resolveDiaryRequest(req: AuthenticatedRequest, body: GenerateDiar
   }
 
   const actor = { email: req.auth.email, role: req.auth.role, companyId: req.auth.companyId, companyRole: req.auth.companyRole };
-  const [sites, entries] = await Promise.all([listSites(actor), listEntries(actor, siteId)]);
+
+  // An explicit range is resolved BEFORE the load, so the load can filter by it
+  // in SQL (AUDIT L98). An anchored window cannot be: its boundaries are a
+  // function of the latest entry, which is what the load is for — so that path
+  // keeps the old two-step shape, and keeps the old limit with it.
+  let explicitWindowRequested: ReportWindow | null = null;
+  if (body.from !== undefined || body.to !== undefined) {
+    const asked = resolveWindow(body, []);
+    if (!asked.ok) throw new ReportWindowError(asked.message);
+    explicitWindowRequested = asked.window;
+  }
+
+  // One row over the ceiling, so truncation is DETECTED rather than assumed.
+  // `rows.length === limit` cannot tell a full page from an exact fit.
+  const probeLimit = REPORT_ENTRY_CEILING + 1;
+  const [sites, loaded] = await Promise.all([
+    listSites(actor),
+    explicitWindowRequested
+      ? listEntries(actor, siteId, probeLimit, 0, {
+          from: explicitWindowRequested.from,
+          to: explicitWindowRequested.to,
+        })
+      : listEntries(actor, siteId, probeLimit, 0),
+  ]);
   const site = sites.find((item) => item.id === siteId);
   if (!site) {
     throw new Error("Site not found.");
   }
 
-  const scopedEntries = filterEntriesByPeriod(
-    entries.map((entry) => ({
+  const truncated = loaded.length > REPORT_ENTRY_CEILING;
+  const rows = truncated ? loaded.slice(0, REPORT_ENTRY_CEILING) : loaded;
+
+  let reportWindow: ReportWindow;
+  if (explicitWindowRequested) {
+    reportWindow = explicitWindowRequested;
+  } else {
+    const anchored = resolveWindow(body, rows);
+    if (!anchored.ok) throw new ReportWindowError(anchored.message);
+    reportWindow = anchored.window;
+  }
+
+  const filtered = filterEntriesByWindow(
+    rows.map((entry) => ({
       date: entry.date,
       locationAddress: entry.locationAddress,
       weather: entry.weather,
@@ -761,7 +925,7 @@ async function resolveDiaryRequest(req: AuthenticatedRequest, body: GenerateDiar
         : [],
       timestamp: entry.timestamp,
     })),
-    period
+    reportWindow
   );
 
   return {
@@ -772,7 +936,15 @@ async function resolveDiaryRequest(req: AuthenticatedRequest, body: GenerateDiar
       startDate: site.startDate,
     },
     period,
-    entries: scopedEntries,
+    window: reportWindow,
+    entries: filtered.entries,
+    // Only claimed on the explicit path: there the ceiling applies to the
+    // window itself, so hitting it means the window really does hold more
+    // entries than one report may carry. On the anchored path the load is
+    // unfiltered, so a truncation says nothing about the window and claiming
+    // otherwise would be the same guess the old code made.
+    truncatedAtCeiling: Boolean(explicitWindowRequested) && truncated,
+    undatedEntries: filtered.undatedCount,
   };
 }
 
@@ -784,9 +956,10 @@ function logGeneration(
   req: AuthenticatedRequest,
   body: GenerateDiaryBody,
   p: DiaryProvenance,
-  startedAt: number
+  startedAt: number,
+  resolved?: ResolvedDiaryRequest
 ): void {
-  const entries = Array.isArray(body.entries) ? body.entries : [];
+  const entries = resolved ? resolved.entries : Array.isArray(body.entries) ? body.entries : [];
   console.log("[ai] generate-diary", {
     reqid: (req.headers["x-request-id"] as string) || null,
     generator: p.generator,
@@ -798,6 +971,15 @@ function logGeneration(
     photoCount: entries.reduce((n, e) => n + (Array.isArray(e.photos) ? e.photos.length : 0), 0),
     companyId: req.auth.companyId,
     siteId: cleanString(body.siteId, "") || null,
+    // Identifiers, dates and counts. No note text, no addresses, no captions.
+    // `windowMode` is the one that answers a question the logs could not: how
+    // many reports are still being generated by clients that send no range.
+    windowFrom: resolved?.window.from ?? null,
+    windowTo: resolved?.window.to ?? null,
+    windowMode: resolved?.window.mode ?? null,
+    entriesIncluded: resolved ? resolved.entries.length : null,
+    undatedEntries: resolved?.undatedEntries ?? null,
+    truncatedAtCeiling: resolved?.truncatedAtCeiling ?? null,
   });
 }
 
@@ -820,13 +1002,27 @@ aiRouter.post("/generate-diary", requireAuth, rateLimitByCompany("generate-diary
   try {
     const resolved = await resolveDiaryRequest(req as AuthenticatedRequest, body);
     if (resolved.entries.length === 0) {
-      return res.status(400).json({ error: "No entries are available for the selected report period." });
+      return res.status(400).json({
+        // The dates are in the message because the old one — "the selected
+        // report period" — named a window the caller had no way to see and, on
+        // the anchored path, had not chosen. AUDIT L92.
+        error:
+          `No entries are available between ${resolved.window.from} and ${resolved.window.to}.`,
+        reportWindow: resolved.window,
+        undatedEntries: resolved.undatedEntries,
+      });
     }
     const { diary, provenance } = await tryGenerateWithOpenAI(resolved, (req as AuthenticatedRequest).auth);
-    logGeneration(req as AuthenticatedRequest, body, provenance, startedAt);
+    logGeneration(req as AuthenticatedRequest, body, provenance, startedAt, resolved);
     return res.json({
       success: true,
       diary,
+      // The window the report actually covers, so the client can label it and a
+      // reader can tell a requested range from an inferred one.
+      reportWindow: resolved.window,
+      entriesIncluded: resolved.entries.length,
+      ...(resolved.undatedEntries > 0 ? { undatedEntries: resolved.undatedEntries } : {}),
+      ...(resolved.truncatedAtCeiling ? { truncatedAtCeiling: true, entryCeiling: REPORT_ENTRY_CEILING } : {}),
       // Signed so the save request that follows cannot claim a generator that
       // never ran. Surfaced as `warning` too, because existing clients read
       // that field and would otherwise show a degraded run as a clean one.
@@ -834,6 +1030,15 @@ aiRouter.post("/generate-diary", requireAuth, rateLimitByCompany("generate-diary
       warning: provenance.warning ?? undefined,
     });
   } catch (err: unknown) {
+    // A range the caller cannot have meant is a 400 about the request, and it
+    // must not fall through to the template-fallback path below: that path
+    // re-resolves the same request, would throw the same error again, and the
+    // reader would get "Failed to generate diary." for a fixable typo in a
+    // date. Nothing is logged as a generation because none was attempted.
+    if (err instanceof ReportWindowError) {
+      return res.status(400).json({ error: err.message });
+    }
+
     const statusFromOpenAI =
       typeof err === "object" && err !== null
         ? ((err as OpenAIErrorLike).status ?? (err as OpenAIErrorLike).response?.status)
@@ -855,7 +1060,7 @@ aiRouter.post("/generate-diary", requireAuth, rateLimitByCompany("generate-diary
 
     try {
       const resolved = await resolveDiaryRequest(req as AuthenticatedRequest, body);
-      const fallbackDiary = buildDiaryFromEntries(resolved.entries, resolved.period);
+      const fallbackDiary = buildDiaryFromEntries(resolved.entries, resolved.period, resolved.window);
       // A 400 is the provider telling us the REQUEST is wrong — an unsupported
       // parameter, a model name that does not exist, a malformed input. It is a
       // configuration fault on our side and it will repeat on every single
@@ -876,10 +1081,14 @@ aiRouter.post("/generate-diary", requireAuth, rateLimitByCompany("generate-diary
               ? `${FALLBACK_NOTICE} OpenAI quota or credits are exhausted (429).`
               : `${FALLBACK_NOTICE} The AI service was unavailable.`;
       const provenance = fallbackProvenance(warning);
-      logGeneration(req as AuthenticatedRequest, body, provenance, startedAt);
+      logGeneration(req as AuthenticatedRequest, body, provenance, startedAt, resolved);
       return res.json({
         success: true,
         diary: fallbackDiary,
+        reportWindow: resolved.window,
+        entriesIncluded: resolved.entries.length,
+        ...(resolved.undatedEntries > 0 ? { undatedEntries: resolved.undatedEntries } : {}),
+        ...(resolved.truncatedAtCeiling ? { truncatedAtCeiling: true, entryCeiling: REPORT_ENTRY_CEILING } : {}),
         generation: signProvenance(provenance, (req as AuthenticatedRequest).auth.companyId),
         warning,
       });
