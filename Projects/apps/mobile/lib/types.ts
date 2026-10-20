@@ -72,6 +72,21 @@ export interface Photo {
   kind?: "original" | "annotated";
   derivedFromId?: string;
   annotationVector?: AnnotationVector;
+  /**
+   * The account that drew the annotation, on an `annotated` derivative only.
+   *
+   * ABSENT is a real state and must not be filled in from the entry's author:
+   * whoever annotated may be a manager marking up someone else's entry, so the
+   * entry author is a different person from the annotator often enough that
+   * substituting them would put a false name against a mark made on evidence.
+   *
+   * It is also self-asserted by the client, because the API stores this array
+   * as opaque JSONB and does not parse it. The set of accounts that can write a
+   * false value here is already the set that can edit the entry at all, so this
+   * is strictly more provenance than the nothing it replaces — but it is an
+   * attribution, not a verified identity, and the UI must not imply otherwise.
+   */
+  annotatedBy?: string;
 }
 
 export interface HourlyNote {
@@ -83,6 +98,15 @@ export interface DailyEntry {
   id: string;
   siteId: string;
   date: string;
+  /**
+   * The account that logged the entry, as the API already returns it on every
+   * entry in `/projects/bootstrap`. It was absent from this interface, so the
+   * value arrived and was discarded unread.
+   *
+   * Optional because an entry created offline has not been assigned one yet.
+   * It is who LOGGED the entry, not provably who took any photograph in it.
+   */
+  ownerEmail?: string;
   locationAddress?: string;
   weather: string;
   crewCount: string;
