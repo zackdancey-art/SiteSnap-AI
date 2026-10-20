@@ -1,5 +1,4 @@
 import { v4 as uuidv4 } from "uuid";
-import { getPgPool } from "./postgres";
 import { Actor } from "./actor";
 import { withTenant } from "./tenant";
 
@@ -34,22 +33,6 @@ function mapRow(row: {
     weather: row.weather,
     createdAt: row.created_at.toISOString(),
   };
-}
-
-export async function initTemplateSchema(): Promise<void> {
-  if (!useDatabase()) return;
-  await getPgPool().query(`
-    CREATE TABLE IF NOT EXISTS entry_templates (
-      id          TEXT PRIMARY KEY,
-      owner_email TEXT NOT NULL REFERENCES auth_users(email) ON DELETE CASCADE,
-      name        TEXT NOT NULL,
-      notes       TEXT NOT NULL DEFAULT '',
-      crew_count  TEXT NOT NULL DEFAULT '',
-      weather     TEXT NOT NULL DEFAULT '',
-      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
 }
 
 export async function listTemplates(actor: Actor): Promise<EntryTemplate[]> {
