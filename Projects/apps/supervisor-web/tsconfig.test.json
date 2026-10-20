@@ -32,6 +32,8 @@
     "lib/photo-capture-time.ts",
     "lib/photo-capture-time.test.ts",
     "lib/photo-provenance.ts",
-    "lib/photo-provenance.test.ts"
+    "lib/photo-provenance.test.ts",
+    "lib/photo-viewer-set.ts",
+    "lib/photo-viewer-set.test.ts"
   ]
 }

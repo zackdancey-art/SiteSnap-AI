@@ -11,9 +11,16 @@ import {
   approveDiary, signUploadPaths,
 } from "@/lib/api";
 import type {
-  BootstrapData, Diary, Entry, User,
+  BootstrapData, Diary, Entry, EntryPhoto, User,
   Timecard, Incident, Inspection, Delivery,
 } from "@/lib/api";
+import { describeCaptureTime } from "@/lib/photo-capture-time";
+import {
+  describePhotoAuthor, describePhotoDerivation, describePhotoPlace,
+  describePhotoRecord, stepPhotoIndex,
+} from "@/lib/photo-provenance";
+import { buildViewerShots, buildViewerShotsForRecords } from "@/lib/photo-viewer-set";
+import type { ViewerShot as LibViewerShot } from "@/lib/photo-viewer-set";
 
 type Tab = "overview" | "entries" | "timesheets" | "incidents" | "inspections" | "dockets" | "photos" | "reports";
 
@@ -74,8 +81,27 @@ function formatTime(t?: string) {
   return `${h % 12 || 12}:${String(m).padStart(2, "0")} ${h >= 12 ? "PM" : "AM"}`;
 }
 
-type PhotoView = { uri: string; caption?: string };
-type Shot = { url: string; caption?: string };
+/**
+ * One photograph together with the record it belongs to.
+ *
+ * The entry travels with the photograph because three of the four questions the
+ * viewer has to answer cannot be answered from the image alone: the entry
+ * supplies the work date, the stand-in address when the photograph carries no
+ * coordinates of its own, and the account that logged it. The Photos tab
+ * flattens every entry's photographs into one grid, so without this pairing a
+ * photograph in that grid has no way back to its record.
+ *
+ * The shape and the two functions that build it live in `lib/photo-viewer-set.ts`
+ * and are tested there. This is only the concrete instantiation for the portal's
+ * own `EntryPhoto` and `Entry`.
+ */
+type ViewerShot = LibViewerShot<EntryPhoto, Entry>;
+
+/** What the lightbox is showing: a set to step through, and where in it we are. */
+type Lightbox = { shots: ViewerShot[]; index: number };
+
+const MAX_ZOOM = 6;
+const clampZoom = (value: number) => Math.min(MAX_ZOOM, Math.max(1, value));
 
 /**
  * One photograph tile, in whichever of its three states applies: signed and
@@ -89,20 +115,26 @@ type Shot = { url: string; caption?: string };
 function PhotoTile({
   photo, index, signedUrls, errors, compact, onOpen,
 }: {
-  photo: PhotoView;
+  photo: EntryPhoto;
   index: number;
   signedUrls: Map<string, string>;
   errors: Map<string, string>;
   /** Small, with the caption rendered beneath by the caller rather than over the image. */
   compact?: boolean;
-  onOpen: (shot: Shot) => void;
+  /**
+   * Opens the viewer on THIS tile. It takes no argument on purpose: the tile
+   * knows which photograph it is, but only the caller knows which ordered set
+   * that position belongs to, and a tile that built its own set would disagree
+   * with the grid it sits in.
+   */
+  onOpen: () => void;
 }) {
   const signedUrl = signedUrls.get(photo.uri);
   const failure = signedUrl ? undefined : errors.get(photo.uri);
 
   return (
     <div
-      onClick={() => signedUrl && onOpen({ url: signedUrl, caption: photo.caption })}
+      onClick={() => signedUrl && onOpen()}
       title={failure ?? photo.caption ?? undefined}
       style={{
         borderRadius: compact ? 8 : 12, overflow: "hidden",
@@ -153,35 +185,273 @@ function PhotoTile({
   );
 }
 
-/** The full-screen view of one photograph. Shared for the same reason as the tile. */
-function PhotoLightbox({ shot, onClose }: { shot: Shot; onClose: () => void }) {
+/**
+ * One metadata line in the viewer.
+ *
+ * `degraded` is what makes the three states of a question visibly different
+ * rather than three sentences in the same grey. A photograph whose location is
+ * the entry's address and one whose location is its own must not read the same,
+ * because the first is a stand-in and an auditor is entitled to know that.
+ */
+function ViewerFact({ text, degraded }: { text: string; degraded?: boolean }) {
+  return (
+    <div style={{
+      fontSize: 13, lineHeight: 1.45,
+      color: degraded ? "var(--warning)" : "rgba(255,255,255,0.88)",
+    }}>
+      {degraded && <span style={{ marginRight: 6 }}>⚠</span>}
+      {text}
+    </div>
+  );
+}
+
+/**
+ * The full-screen view of one photograph, with what is known about it and a way
+ * through the rest of its record.
+ *
+ * Every label comes from `lib/photo-capture-time.ts` and `lib/photo-provenance.ts`,
+ * which are the pinned twins of mobile's copies — so the two surfaces state the
+ * same thing about the same photograph, and neither one formats its own
+ * sentence. Nothing here decides what is true; it decides only how an already
+ * decided answer is laid out.
+ *
+ * `toLocaleString` runs inside `describeCaptureTime`, which is a hydration
+ * hazard everywhere else in this portal (AUDIT L49) and is safe here for a
+ * structural reason rather than a lucky one: this component only ever mounts in
+ * response to a click, so it is never part of the server-rendered tree and
+ * there is no server output for it to disagree with.
+ *
+ * NOT VERIFIED IN A BROWSER: this environment has no browser and no Playwright,
+ * so the pointer arithmetic for pinch and pan below is reasoned, not observed.
+ * The zoom buttons and the keyboard controls exist so the viewer is fully
+ * usable even if that arithmetic needs tuning on a real trackpad.
+ */
+function PhotoLightbox({
+  shots, index, signedUrls, onIndex, onClose,
+}: {
+  shots: ViewerShot[];
+  index: number;
+  signedUrls: Map<string, string>;
+  onIndex: (next: number) => void;
+  onClose: () => void;
+}) {
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  /**
+   * Mirrors `dragFrom` as state rather than reading the ref in render. A ref
+   * mutation does not re-render, so a cursor or a transition driven off
+   * `dragFrom.current` would be read once and then never updated — it would
+   * look like working code and do nothing.
+   */
+  const [dragging, setDragging] = useState(false);
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const dragFrom = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
+  const pointers = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const pinchFrom = useRef<{ distance: number; zoom: number } | null>(null);
+
+  // Escape to leave, arrows to move. A viewer whose only exit is a 38px mouse
+  // target is not an exit for someone on a keyboard, and L51's tap-target work
+  // is still open — so the keyboard path is the one that is certainly usable.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { onClose(); return; }
+      if (e.key === "ArrowLeft") { e.preventDefault(); onIndex(stepPhotoIndex(index, -1, shots.length)); }
+      if (e.key === "ArrowRight") { e.preventDefault(); onIndex(stepPhotoIndex(index, 1, shots.length)); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [index, shots.length, onIndex, onClose]);
+
+  // A new photograph starts unzoomed. Carrying a 4x zoom and its pan offset
+  // across a step would leave the next image showing an arbitrary corner of
+  // itself with no indication why.
+  useEffect(() => { setZoom(1); setOffset({ x: 0, y: 0 }); setDragging(false); }, [index]);
+
+  // Registered by hand rather than as an `onWheel` prop because React attaches
+  // wheel listeners passively, where `preventDefault()` is ignored and the page
+  // scrolls behind the viewer while it zooms.
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      setZoom((z) => clampZoom(z * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+    };
+    stage.addEventListener("wheel", onWheel, { passive: false });
+    return () => stage.removeEventListener("wheel", onWheel);
+  }, []);
+
+  const shot = shots[index];
+  // Hooks above this line, unconditionally. An out-of-range index is reachable
+  // if the set shrinks under an open viewer, so it is handled rather than
+  // assumed away.
+  if (!shot) return null;
+
+  const signedUrl = signedUrls.get(shot.photo.uri);
+  const capture = describeCaptureTime(shot.photo);
+  const place = describePhotoPlace(shot.photo, shot.entry);
+  const author = describePhotoAuthor(shot.photo, shot.entry);
+  const derivation = describePhotoDerivation(shot, shots);
+  // Pan is discarded, not stored, while the image fits the stage — there is
+  // nothing off-screen to pan to, and a remembered offset would make the next
+  // zoom jump.
+  const pan = zoom > 1 ? offset : { x: 0, y: 0 };
+  const atFirst = index === 0;
+  const atLast = index === shots.length - 1;
+
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.current.size === 2) {
+      const [a, b] = [...pointers.current.values()];
+      pinchFrom.current = { distance: Math.hypot(a.x - b.x, a.y - b.y), zoom };
+      dragFrom.current = null;
+      setDragging(false);
+      return;
+    }
+    if (zoom > 1) {
+      dragFrom.current = { x: e.clientX, y: e.clientY, ox: offset.x, oy: offset.y };
+      setDragging(true);
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+    }
+  };
+
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!pointers.current.has(e.pointerId)) return;
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const pinch = pinchFrom.current;
+    if (pointers.current.size >= 2 && pinch && pinch.distance > 0) {
+      const [a, b] = [...pointers.current.values()];
+      setZoom(clampZoom(pinch.zoom * (Math.hypot(a.x - b.x, a.y - b.y) / pinch.distance)));
+      return;
+    }
+    const from = dragFrom.current;
+    if (!from) return;
+    setOffset({ x: from.ox + (e.clientX - from.x), y: from.oy + (e.clientY - from.y) });
+  };
+
+  const endPointer = (e: React.PointerEvent<HTMLDivElement>) => {
+    pointers.current.delete(e.pointerId);
+    if (pointers.current.size < 2) pinchFrom.current = null;
+    if (pointers.current.size === 0) { dragFrom.current = null; setDragging(false); }
+  };
+
+  const navButton = (spent: boolean): React.CSSProperties => ({
+    background: "rgba(255,255,255,0.15)", border: "none", color: "#fff",
+    borderRadius: 10, width: 38, height: 38, fontSize: 18,
+    cursor: spent ? "default" : "pointer",
+    opacity: spent ? 0.3 : 1,
+  });
+
   return (
     <div
       style={{
         position: "fixed", inset: 0, zIndex: 1000,
-        background: "rgba(10,18,30,0.92)",
-        display: "flex", alignItems: "center", justifyContent: "center",
-        padding: 24,
+        background: "rgba(10,18,30,0.94)",
+        display: "flex", flexDirection: "column",
       }}
       onClick={onClose}
     >
-      <button
-        onClick={onClose}
-        style={{ position: "absolute", top: 20, right: 20, background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: 10, width: 38, height: 38, fontSize: 20, cursor: "pointer" }}
-      >
-        ✕
-      </button>
-      <img
-        src={shot.url}
-        alt={shot.caption ?? "Site photo"}
-        style={{ maxWidth: "90vw", maxHeight: "85vh", borderRadius: 12, objectFit: "contain", boxShadow: "0 20px 60px rgba(0,0,0,0.5)" }}
+      {/* ── top bar: where we are, how to zoom, how to leave ── */}
+      <div
         onClick={(e) => e.stopPropagation()}
-      />
-      {shot.caption && (
-        <div style={{ position: "absolute", bottom: 28, left: "50%", transform: "translateX(-50%)", color: "#fff", fontSize: 14, fontWeight: 500, background: "rgba(0,0,0,0.5)", padding: "6px 16px", borderRadius: 20 }}>
-          {shot.caption}
+        style={{
+          display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+          padding: "14px 18px", color: "#fff", fontSize: 13,
+        }}
+      >
+        <span style={{ fontWeight: 600 }}>
+          {shots.length > 1 ? `${index + 1} of ${shots.length}` : "1 photograph"}
+        </span>
+        <span style={{ flex: 1 }} />
+        <button onClick={() => setZoom((z) => clampZoom(z / 1.4))} style={navButton(zoom <= 1)} title="Zoom out" aria-label="Zoom out">−</button>
+        <button onClick={() => { setZoom(1); setOffset({ x: 0, y: 0 }); }} style={{ ...navButton(zoom === 1), width: "auto", padding: "0 12px", fontSize: 13 }} title="Fit to screen">
+          {Math.round(zoom * 100)}%
+        </button>
+        <button onClick={() => setZoom((z) => clampZoom(z * 1.4))} style={navButton(zoom >= MAX_ZOOM)} title="Zoom in" aria-label="Zoom in">+</button>
+        <button onClick={onClose} style={navButton(false)} title="Close (Escape)" aria-label="Close">✕</button>
+      </div>
+
+      {/* ── the photograph ── */}
+      <div
+        ref={stageRef}
+        onClick={(e) => e.stopPropagation()}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endPointer}
+        onPointerCancel={endPointer}
+        style={{
+          flex: 1, minHeight: 0, overflow: "hidden",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          touchAction: "none",
+          cursor: zoom > 1 ? (dragging ? "grabbing" : "grab") : "default",
+        }}
+      >
+        {signedUrl ? (
+          <img
+            src={signedUrl}
+            alt={shot.photo.caption ?? `Photograph ${index + 1}`}
+            draggable={false}
+            style={{
+              maxWidth: "100%", maxHeight: "100%", objectFit: "contain",
+              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+              transformOrigin: "center center",
+              transition: dragging ? "none" : "transform 0.08s linear",
+              userSelect: "none",
+            }}
+          />
+        ) : (
+          // The grid can show a refused photograph as unavailable; so must this,
+          // rather than an empty black rectangle that reads as a slow load.
+          <div style={{ color: "rgba(255,255,255,0.7)", fontSize: 14, textAlign: "center", padding: 24 }}>
+            <div style={{ fontSize: 32, opacity: 0.5, marginBottom: 8 }}>⚠</div>
+            This photograph could not be loaded.
+          </div>
+        )}
+      </div>
+
+      {/* ── what is known about it, and the way through the record ── */}
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          padding: "14px 18px 20px", display: "flex", gap: 16,
+          alignItems: "flex-end", flexWrap: "wrap",
+          background: "linear-gradient(transparent, rgba(0,0,0,0.45))",
+        }}
+      >
+        <div style={{ flex: 1, minWidth: 220, display: "flex", flexDirection: "column", gap: 5 }}>
+          {shot.photo.caption && (
+            <div style={{ fontSize: 15, fontWeight: 600, color: "#fff" }}>{shot.photo.caption}</div>
+          )}
+          <ViewerFact text={capture.label} degraded={capture.state !== "known"} />
+          <ViewerFact text={place.label} degraded={place.state !== "photograph"} />
+          <ViewerFact text={author.label} degraded={author.state === "annotator-unrecorded" || author.state === "unknown"} />
+          <ViewerFact text={describePhotoRecord(shot.entry)} />
+          <ViewerFact text={derivation.label} degraded={derivation.state === "annotation-orphaned"} />
         </div>
-      )}
+
+        {shots.length > 1 && (
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              onClick={() => onIndex(stepPhotoIndex(index, -1, shots.length))}
+              disabled={atFirst}
+              style={navButton(atFirst)}
+              title="Previous (left arrow)"
+              aria-label="Previous photograph"
+            >
+              ‹
+            </button>
+            <button
+              onClick={() => onIndex(stepPhotoIndex(index, 1, shots.length))}
+              disabled={atLast}
+              style={navButton(atLast)}
+              title="Next (right arrow)"
+              aria-label="Next photograph"
+            >
+              ›
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -222,17 +492,27 @@ function PhotoFailureBanner({
 }
 
 function PhotosTab({
-  photos, signedUrls, errors, requestError, signing, onRetry,
+  entries, signedUrls, errors, requestError, signing, onRetry,
 }: {
-  photos: PhotoView[];
+  /**
+   * The ENTRIES, not a flat photo list. The grid is still flat, but a tile has
+   * to be able to answer which record it came from, and a flattened
+   * `EntryPhoto[]` has thrown that away before this component sees it.
+   */
+  entries: Entry[];
   signedUrls: Map<string, string>;
   errors: Map<string, string>;
   requestError: string | null;
   signing: boolean;
   onRetry: () => void;
 }) {
-  const [lightbox, setLightbox] = useState<Shot | null>(null);
-  const failedCount = photos.filter((p) => errors.has(p.uri)).length;
+  const [lightbox, setLightbox] = useState<Lightbox | null>(null);
+
+  // Ordered per record and concatenated, so the grid and the viewer step
+  // through the photographs in the same order. If they disagreed, clicking the
+  // fourth tile would open the fifth photograph.
+  const shots = useMemo(() => buildViewerShotsForRecords<EntryPhoto, Entry>(entries), [entries]);
+  const failedCount = shots.filter((s) => errors.has(s.photo.uri)).length;
 
   return (
     <>
@@ -240,11 +520,11 @@ function PhotosTab({
         <div className="card-header">
           <span>📷</span>
           <span className="card-title">Site Photos</span>
-          <span className="card-count">{photos.length}</span>
+          <span className="card-count">{shots.length}</span>
           {signing && (
             <span style={{ marginLeft: 8, fontSize: 12, color: "var(--text-secondary)" }}>
-              {photos.length > SIGN_BATCH_SIZE
-                ? `Loading ${signedUrls.size} of ${photos.length}…`
+              {shots.length > SIGN_BATCH_SIZE
+                ? `Loading ${signedUrls.size} of ${shots.length}…`
                 : "Loading…"}
             </span>
           )}
@@ -253,21 +533,39 @@ function PhotosTab({
         {/* A manager looking at grey squares is told what went wrong and can ask
             again. Shown whether the failure was per-path or whole-request. */}
         {!signing && (
-          <PhotoFailureBanner failedCount={failedCount} total={photos.length} requestError={requestError} onRetry={onRetry} />
+          <PhotoFailureBanner failedCount={failedCount} total={shots.length} requestError={requestError} onRetry={onRetry} />
         )}
 
-        {photos.length === 0 ? (
+        {shots.length === 0 ? (
           <div className="empty-state"><p>No photos uploaded yet.</p></div>
         ) : (
           <div style={{ padding: 20, display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 14 }}>
-            {photos.map((p, i) => (
-              <PhotoTile key={`${p.uri}-${i}`} photo={p} index={i} signedUrls={signedUrls} errors={errors} onOpen={setLightbox} />
+            {shots.map((shot, i) => (
+              <PhotoTile
+                key={`${shot.photo.uri}-${i}`}
+                photo={shot.photo}
+                index={i}
+                signedUrls={signedUrls}
+                errors={errors}
+                onOpen={() => setLightbox({ shots, index: i })}
+              />
             ))}
           </div>
         )}
       </div>
 
-      {lightbox && <PhotoLightbox shot={lightbox} onClose={() => setLightbox(null)} />}
+      {/* The site-wide set: this grid is every record's photographs at once, so
+          stepping forward from the last photograph of one day lands on the
+          first of the next, which is the order the grid itself shows. */}
+      {lightbox && (
+        <PhotoLightbox
+          shots={lightbox.shots}
+          index={lightbox.index}
+          signedUrls={signedUrls}
+          onIndex={(index) => setLightbox((open) => (open ? { ...open, index } : open))}
+          onClose={() => setLightbox(null)}
+        />
+      )}
     </>
   );
 }
@@ -296,7 +594,7 @@ function EntriesTab({
   onRetry: () => void;
   formatDate: (value?: string | null, options?: Intl.DateTimeFormatOptions) => string;
 }) {
-  const [lightbox, setLightbox] = useState<Shot | null>(null);
+  const [lightbox, setLightbox] = useState<Lightbox | null>(null);
 
   // Newest first — the office reads the most recent day first. `date` is the
   // work date and `timestamp` when it was logged; the second breaks ties within
@@ -334,7 +632,11 @@ function EntriesTab({
         ) : (
           <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 14 }}>
             {ordered.map((entry) => {
-              const photos = entry.photos ?? [];
+              // Scoped to THIS record, which is what "swipe between the
+              // photographs on one record" asks for: stepping forward from the
+              // last photograph of an entry stops there rather than silently
+              // crossing into another day's evidence.
+              const shots = buildViewerShots<EntryPhoto, Entry>(entry);
               return (
                 <article
                   key={entry.id}
@@ -373,24 +675,24 @@ function EntriesTab({
                     {entry.notes?.trim() || "No notes recorded for this entry."}
                   </p>
 
-                  {photos.length > 0 && (
+                  {shots.length > 0 && (
                     <div style={{
                       marginTop: 12, display: "grid",
                       gridTemplateColumns: "repeat(auto-fill, minmax(104px, 1fr))", gap: 10,
                     }}>
-                      {photos.map((photo, i) => (
-                        <figure key={`${photo.uri}-${i}`} style={{ margin: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+                      {shots.map((shot, i) => (
+                        <figure key={`${shot.photo.uri}-${i}`} style={{ margin: 0, display: "flex", flexDirection: "column", gap: 4 }}>
                           <PhotoTile
-                            photo={photo}
+                            photo={shot.photo}
                             index={i}
                             signedUrls={signedUrls}
                             errors={errors}
                             compact
-                            onOpen={setLightbox}
+                            onOpen={() => setLightbox({ shots, index: i })}
                           />
-                          {photo.caption && (
+                          {shot.photo.caption && (
                             <figcaption style={{ fontSize: 10, lineHeight: 1.3, color: "var(--text-secondary)" }}>
-                              {photo.caption}
+                              {shot.photo.caption}
                             </figcaption>
                           )}
                         </figure>
@@ -404,7 +706,15 @@ function EntriesTab({
         )}
       </div>
 
-      {lightbox && <PhotoLightbox shot={lightbox} onClose={() => setLightbox(null)} />}
+      {lightbox && (
+        <PhotoLightbox
+          shots={lightbox.shots}
+          index={lightbox.index}
+          signedUrls={signedUrls}
+          onIndex={(index) => setLightbox((open) => (open ? { ...open, index } : open))}
+          onClose={() => setLightbox(null)}
+        />
+      )}
     </>
   );
 }
@@ -902,7 +1212,7 @@ export default function SiteDetailPage() {
           {/* ── Photos ── */}
           {!loadingMain && tab === "photos" && (
             <PhotosTab
-              photos={photos}
+              entries={entries}
               signedUrls={signedPhotoUrls}
               errors={photoErrors}
               requestError={photoRequestError}
