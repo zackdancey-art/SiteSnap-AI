@@ -21,6 +21,16 @@ import {
   resolveAuthorName,
   toolboxTalkFromStoredRow,
 } from "../utils/reportPayload";
+import {
+  describePhotoShortfall,
+  MAX_REPORT_IMAGES,
+  photoCitation,
+  selectPhotographs,
+  summarisePhotoOutcome,
+  type PhotoAccounting,
+  type PhotoDropCounts,
+  type PhotoDropReason,
+} from "../utils/reportPhotos";
 import { listCompanyMembers } from "../storage/authStore";
 import { uploadBelongsToActorCompany } from "../storage/uploadsStore";
 import { Actor } from "../storage/actor";
@@ -240,6 +250,14 @@ type DiaryOutput = {
 type GenerationResult = {
   diary: DiaryOutput;
   provenance: DiaryProvenance;
+  /**
+   * What happened to the period's photographs, or null on a path that never
+   * tried to attach any — the template path with no API key. A report whose
+   * images were capped or could not be loaded is the case AUDIT L95 describes
+   * as "indistinguishable from one that was not taken", so this travels out to
+   * the response and the log line rather than staying inside the generator.
+   */
+  photos: PhotoAccounting | null;
 };
 
 /**
@@ -247,7 +265,7 @@ type GenerationResult = {
  * Stamped into every generated diary so a report can be traced to the prompt
  * that wrote it.
  */
-export const PROMPT_VERSION = "2026-10-v2";
+export const PROMPT_VERSION = "2026-10-v3";
 
 const FALLBACK_NOTICE =
   "Written by the built-in template generator, not AI.";
@@ -473,7 +491,28 @@ function buildFullReport(args: {
   return lines.join("\n");
 }
 
-async function normalizeBase64Image(photo: GenerateDiaryPhoto, actor: Pick<Actor, "companyId">) {
+/**
+ * A photograph resolved to an image the model can be shown, or the REASON it
+ * could not be.
+ *
+ * This used to return `string | null`, with five distinct conditions sharing
+ * the one `null` and the caller doing `if (!imageUrl) continue;` for all of
+ * them. A photograph refused by the H7 cross-tenant ownership check produced no
+ * log line, no counter and nothing in the response: the report returned 200 and
+ * read as though those photographs were never taken. AUDIT L95.
+ *
+ * The refusals themselves are unchanged. Every `return` below sends back the
+ * same decision it sent before; the only difference is that the decision now
+ * has a name the caller can count.
+ */
+type NormalizedImage =
+  | { ok: true; imageUrl: string }
+  | { ok: false; reason: PhotoDropReason };
+
+async function normalizeBase64Image(
+  photo: GenerateDiaryPhoto,
+  actor: Pick<Actor, "companyId">
+): Promise<NormalizedImage> {
   const raw = String(photo.base64 || "").trim();
   const mimeType = ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(
     cleanString(photo.mimeType, "image/jpeg")
@@ -484,9 +523,11 @@ async function normalizeBase64Image(photo: GenerateDiaryPhoto, actor: Pick<Actor
   if (raw) {
     if (raw.startsWith("data:")) {
       const [, base64Part] = raw.split(",", 2);
-      return base64Part ? `data:${mimeType};base64,${base64Part}` : null;
+      return base64Part
+        ? { ok: true, imageUrl: `data:${mimeType};base64,${base64Part}` }
+        : { ok: false, reason: "malformed-data-url" };
     }
-    return `data:${mimeType};base64,${raw}`;
+    return { ok: true, imageUrl: `data:${mimeType};base64,${raw}` };
   }
 
   const storageKey = cleanString(photo.storageKey, "");
@@ -500,57 +541,94 @@ async function normalizeBase64Image(photo: GenerateDiaryPhoto, actor: Pick<Actor
     // tenant's file despite passing the check.
     const uploadId = extractUploadId(storageKey);
     const canonical = /^uploads\/\d+-[0-9a-f]+-[A-Za-z0-9._-]+$/.test(storageKey);
-    if (!uploadId || !canonical || !(await uploadBelongsToActorCompany(actor, uploadId))) {
-      return null;
+    // Three separate refusals, in the order the guard evaluates them, each with
+    // its own code. They are not interchangeable: a non-canonical key is a
+    // client sending the wrong shape, while a key the caller's company does not
+    // own is the cross-tenant case H7 exists for, and an operator reading a
+    // report's drop counts needs to be able to tell those apart.
+    if (!uploadId) return { ok: false, reason: "unresolvable-storage-key" };
+    if (!canonical) return { ok: false, reason: "non-canonical-storage-key" };
+    if (!(await uploadBelongsToActorCompany(actor, uploadId))) {
+      return { ok: false, reason: "not-owned-by-company" };
     }
     try {
       const filename = storageKey.slice(`uploads/${uploadId}-`.length);
       const file = await mediaStorage.readFile(storageKey, filename);
-      return `data:${mimeType};base64,${file.toString("base64")}`;
+      return { ok: true, imageUrl: `data:${mimeType};base64,${file.toString("base64")}` };
     } catch (error) {
       console.warn("[ai] Failed to read stored photo for analysis", { storageKey, error });
+      return { ok: false, reason: "storage-read-failed" };
     }
   }
-  return null;
+  return { ok: false, reason: "no-image-data" };
 }
 
-async function buildVisionInputs(entries: GenerateDiaryEntry[], actor: Pick<Actor, "companyId">) {
+/**
+ * The images for one generation, with an account of everything not attached.
+ *
+ * THE NESTED LOOP IS GONE ON PURPOSE. It had a `break` that left only the inner
+ * photo loop, so the outer entry loop kept running after the ceiling was
+ * reached and re-broke once per remaining entry (AUDIT L93's second defect).
+ * There is now one flat pass over a selection made up front, so the condition
+ * that bug lived in no longer exists rather than being corrected.
+ *
+ * Returns the per-entry attached tally as well as the totals, because L94 is
+ * the defect of a payload carrying a total from one place and per-entry counts
+ * from another. Both now come out of this one call.
+ */
+// Exported for the tests only. The drop reasons AUDIT L95 is about are
+// decided inside this function and two of them depend on the uploads store, so
+// the alternative to calling it directly is asserting against a live OpenAI
+// generation — which no test suite can do deterministically.
+export async function buildVisionInputs(entries: GenerateDiaryEntry[], actor: Pick<Actor, "companyId">) {
   const content: OpenAIContentItem[] = [];
-  let includedImages = 0;
-  const maxImages = 12;
+  const selection = selectPhotographs(entries, MAX_REPORT_IMAGES);
+  const droppedByReason: PhotoDropCounts = {};
+  const attachedByEntry = entries.map(() => 0);
 
-  for (const [entryIndex, entry] of entries.entries()) {
-    const photos = Array.isArray(entry.photos) ? entry.photos : [];
-    for (const [photoIndex, photo] of photos.entries()) {
-      if (includedImages >= maxImages) break;
-      const imageUrl = await normalizeBase64Image(photo, actor);
-      if (!imageUrl) continue;
-      includedImages += 1;
-      content.push({
-        type: "input_text",
-        text: JSON.stringify({
-          imageRef: `entry-${entryIndex + 1}-photo-${photoIndex + 1}`,
-          entryDate: entry.date || "",
-          entryLocation: entry.locationAddress || "",
-          photoTimestamp: photo.timestamp || "",
-          userCaption: photo.caption || "",
-          instruction: [
-            "Analyse this construction site photograph thoroughly.",
-            "Describe exactly what is visible: construction stage and progress, structural elements, plant and equipment, scaffolding and access systems, materials on site, PPE and safety compliance, signage, weather conditions, and any visible hazards or issues.",
-            "Write specific professional observations using construction industry terminology.",
-            "Reference this image in the photoAnalysis field as 'Photo " + includedImages + "'.",
-          ].join(" "),
-        }),
-      });
-      content.push({
-        type: "input_image",
-        image_url: imageUrl,
-        detail: "auto",
-      });
+  for (const candidate of selection.selected) {
+    const result = await normalizeBase64Image(candidate.photo, actor);
+    if (!result.ok) {
+      // AUDIT L95: counted by reason instead of silently skipped. The count
+      // reaches the response and the generation log; the reason codes carry no
+      // filename, key or caption.
+      droppedByReason[result.reason] = (droppedByReason[result.reason] ?? 0) + 1;
+      continue;
     }
+    attachedByEntry[candidate.entryIndex] += 1;
+    content.push({
+      type: "input_text",
+      text: JSON.stringify({
+        // The citation the model is told to use, and the only label in here a
+        // reader of the finished report can resolve. AUDIT L93.
+        imageRef: photoCitation(candidate.entryDate, candidate.photoIndex),
+        entryDate: candidate.entryDate,
+        entryLocation: candidate.entryLocation,
+        photoTimestamp: candidate.photo.timestamp || "",
+        userCaption: candidate.photo.caption || "",
+        instruction: [
+          "Analyse this construction site photograph thoroughly.",
+          "Describe exactly what is visible: construction stage and progress, structural elements, plant and equipment, scaffolding and access systems, materials on site, PPE and safety compliance, signage, weather conditions, and any visible hazards or issues.",
+          "Write specific professional observations using construction industry terminology.",
+          `Reference this image in the photoAnalysis field as '${photoCitation(candidate.entryDate, candidate.photoIndex)}'.`,
+        ].join(" "),
+      }),
+    });
+    content.push({
+      type: "input_image",
+      image_url: result.imageUrl,
+      detail: "auto",
+    });
   }
 
-  return { content, imageCount: includedImages };
+  const accounting = summarisePhotoOutcome({
+    available: selection.totalAvailable,
+    selected: selection.selected.length,
+    ceiling: selection.ceiling,
+    droppedByReason,
+  });
+
+  return { content, accounting, attachedByEntry, selection };
 }
 
 export function buildDiaryFromEntries(
@@ -614,7 +692,8 @@ PHOTO ANALYSIS REQUIREMENTS:
 - Study every photograph in detail before writing
 - Identify and describe: construction stage and structural progress, plant and equipment in use, scaffolding and access systems, materials stored or being installed, ground conditions, weather visibility, PPE compliance among visible workers, safety signage and barriers, any visible defects or concerns
 - Use precise construction industry terminology (e.g. "reinforced concrete pad foundation", "structural steelwork erection", "blockwork cavity wall construction", "formwork striking", "mechanical and electrical first fix")
-- Each photo reference must appear in the photoAnalysis field as "Photo 1:", "Photo 2:", etc.
+- Cite each photograph by the imageRef string supplied with it, which names the entry date and the photograph's position in that entry (for example "2026-03-02 photo 2:"). Do not number the images by the order you were given them: that number means nothing to the reader of the report, who has the dated entries and not this request
+- Describe ONLY the photographs attached to this request. The reportContext states how many photographs were recorded in the period and how many are attached, and those numbers will often differ because one report carries a limited number of images. Never describe, infer, summarise or account for the contents of a photograph that is not attached, and never write as though you have seen more images than you were given
 - Never write "N/A" for photoAnalysis when images have been provided
 
 PROFESSIONAL WRITING STANDARDS:
@@ -798,6 +877,9 @@ async function tryGenerateWithOpenAI(
     return {
       diary: buildDiaryFromEntries(entries, period, window),
       provenance: fallbackProvenance(`${FALLBACK_NOTICE} No OpenAI API key is configured.`),
+      // No images were attempted on this path, which is not the same claim as
+      // "none were attached".
+      photos: null,
     };
   }
 
@@ -805,7 +887,12 @@ async function tryGenerateWithOpenAI(
   const model = resolveModel();
   const client = getOpenAIClient();
 
-  const { content: visionInputs, imageCount } = await buildVisionInputs(entries, actor);
+  const {
+    content: visionInputs,
+    accounting: photoAccounting,
+    attachedByEntry,
+  } = await buildVisionInputs(entries, actor);
+  const photoShortfall = describePhotoShortfall(photoAccounting);
 
   const structuredPayload = {
     reportContext: {
@@ -816,9 +903,18 @@ async function tryGenerateWithOpenAI(
       // AUDIT L92.
       reportingWindow: { from: window.from, to: window.to, days: windowLengthInDays(window.from, window.to) },
       totalEntries: entries.length,
-      totalPhotosAttached: imageCount,
+      // AUDIT L94. This used to be the attached count sitting beside per-entry
+      // counts that summed higher, with nothing saying which images were
+      // missing — and a model told both was observed describing photographs it
+      // could not see. Every number here comes out of one selection, and the
+      // shortfall is stated in words rather than left to be inferred.
+      totalPhotosAttached: photoAccounting.attached,
+      totalPhotosRecorded: photoAccounting.available,
+      photographsOmittedForLimit: photoAccounting.droppedToCeiling,
+      photographsUnavailable: photoAccounting.droppedTotal,
+      ...(photoShortfall ? { photographNotice: photoShortfall } : {}),
     },
-    entries: entries.map((entry) => {
+    entries: entries.map((entry, entryIndex) => {
       const notes = effectiveEntryNotes(entry);
       return {
         date: entry.date || "",
@@ -841,7 +937,12 @@ async function tryGenerateWithOpenAI(
         // Three states, kept as three. `null` is "never answered", which is not
         // the same claim as `false`.
         toolboxTalk: entry.toolboxTalk ?? null,
-        photoCount: (entry.photos || []).length,
+        // Two numbers, not one. `photosRecorded` is what the site team
+        // captured for this day and `photosAttached` is how many of them are in
+        // this request — so a day whose photographs were capped away says so,
+        // instead of the model reconciling the gap for itself. AUDIT L94.
+        photosRecorded: (entry.photos || []).length,
+        photosAttached: attachedByEntry[entryIndex] ?? 0,
         photoCaptions: (entry.photos || [])
           .map((p) => p.caption || "")
           .filter(Boolean),
@@ -870,6 +971,7 @@ async function tryGenerateWithOpenAI(
     return {
       diary: fallback,
       provenance: fallbackProvenance(`${FALLBACK_NOTICE} The AI returned an empty response.`),
+      photos: photoAccounting,
     };
   }
 
@@ -880,6 +982,7 @@ async function tryGenerateWithOpenAI(
     return {
       diary: fallback,
       provenance: fallbackProvenance(`${FALLBACK_NOTICE} The AI response could not be parsed.`),
+      photos: photoAccounting,
     };
   }
 
@@ -925,6 +1028,7 @@ async function tryGenerateWithOpenAI(
       generatedAtMs: Date.now(),
       tokenUsage: usage,
     },
+    photos: photoAccounting,
   };
 }
 
@@ -1099,7 +1203,8 @@ function logGeneration(
   body: GenerateDiaryBody,
   p: DiaryProvenance,
   startedAt: number,
-  resolved?: ResolvedDiaryRequest
+  resolved?: ResolvedDiaryRequest,
+  photos?: PhotoAccounting | null
 ): void {
   const entries = resolved ? resolved.entries : Array.isArray(body.entries) ? body.entries : [];
   console.log("[ai] generate-diary", {
@@ -1129,6 +1234,15 @@ function logGeneration(
     // companies are reaching a compliance document unattributed.
     unattributedEntries: resolved?.unattributedEntries ?? null,
     ambiguousAuthorNames: resolved ? resolved.ambiguousAuthorNames.length : null,
+    // AUDIT L95: the rate at which photographs silently fail to reach the model
+    // is the number this product had no way to ask for. Reason CODES and counts
+    // only — never a storage key, which ends in the uploaded filename, and
+    // never a caption.
+    photosRecorded: photos?.available ?? null,
+    photosAttached: photos?.attached ?? null,
+    photosOmittedForLimit: photos?.droppedToCeiling ?? null,
+    photosUnavailable: photos?.droppedTotal ?? null,
+    photoDropReasons: photos && photos.droppedTotal > 0 ? photos.droppedByReason : null,
   });
 }
 
@@ -1161,8 +1275,11 @@ aiRouter.post("/generate-diary", requireAuth, rateLimitByCompany("generate-diary
         undatedEntries: resolved.undatedEntries,
       });
     }
-    const { diary, provenance } = await tryGenerateWithOpenAI(resolved, (req as AuthenticatedRequest).auth);
-    logGeneration(req as AuthenticatedRequest, body, provenance, startedAt, resolved);
+    const { diary, provenance, photos } = await tryGenerateWithOpenAI(
+      resolved,
+      (req as AuthenticatedRequest).auth
+    );
+    logGeneration(req as AuthenticatedRequest, body, provenance, startedAt, resolved, photos);
     return res.json({
       success: true,
       diary,
@@ -1181,6 +1298,24 @@ aiRouter.post("/generate-diary", requireAuth, rateLimitByCompany("generate-diary
         ? { ambiguousAuthorNames: resolved.ambiguousAuthorNames }
         : {}),
       ...(resolved.truncatedAtCeiling ? { truncatedAtCeiling: true, entryCeiling: REPORT_ENTRY_CEILING } : {}),
+      // What happened to the period's photographs, present only when something
+      // did happen to them. A report that attached every photograph recorded
+      // says nothing here; one that capped or failed to load any says which and
+      // how many, because the alternative — the behaviour this replaces — is a
+      // 200 that reads as though those photographs were never taken.
+      // AUDIT L93, L94, L95.
+      ...(photos && (photos.droppedToCeiling > 0 || photos.droppedTotal > 0)
+        ? {
+            photographs: {
+              recorded: photos.available,
+              attached: photos.attached,
+              omittedForLimit: photos.droppedToCeiling,
+              unavailable: photos.droppedTotal,
+              imageCeiling: photos.ceiling,
+              ...(photos.droppedTotal > 0 ? { unavailableByReason: photos.droppedByReason } : {}),
+            },
+          }
+        : {}),
       // Signed so the save request that follows cannot claim a generator that
       // never ran. Surfaced as `warning` too, because existing clients read
       // that field and would otherwise show a degraded run as a clean one.
