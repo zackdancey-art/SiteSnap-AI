@@ -10,6 +10,8 @@ import {
   ActivityIndicator,
   Modal,
   Linking,
+  FlatList,
+  useWindowDimensions,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -19,6 +21,15 @@ import { useData } from "@/lib/data-context";
 import Colors from "@/constants/colors";
 import { Photo, type AnnotationVector } from "@/lib/types";
 import { describeCaptureTime } from "@/lib/photo-capture-time";
+import {
+  describePhotoAuthor,
+  describePhotoDerivation,
+  describePhotoPlace,
+  describePhotoRecord,
+  orderPhotosForViewer,
+  stepPhotoIndex,
+} from "@/lib/photo-provenance";
+import { useAuth } from "@/lib/auth-context";
 import {
   buildEntryPhotosReportHtml,
   runReportExport,
@@ -39,8 +50,39 @@ export default function EntryDetailScreen() {
 
   const webTopInset = Platform.OS === "web" ? 67 : 0;
   const webBottomInset = Platform.OS === "web" ? 34 : 0;
-  const [previewPhoto, setPreviewPhoto] = React.useState<Photo | null>(null);
+  const { user } = useAuth();
+  const { width: windowWidth } = useWindowDimensions();
+  const pagerRef = React.useRef<FlatList<Photo> | null>(null);
+
+  /**
+   * The viewer is addressed by POSITION, not by photograph, because next and
+   * previous are positional questions. Holding the photograph instead and
+   * searching for its index on each step would re-derive the order on every
+   * swipe and disagree with the grid the moment an annotation was added.
+   *
+   * `orderPhotosForViewer` groups each original with its own annotations, and
+   * the GRID below is rendered from the same list — so the order a reader
+   * swipes is the order they were just looking at.
+   */
+  const orderedPhotos = orderPhotosForViewer(entry?.photos ?? []);
+  const [previewIndex, setPreviewIndex] = React.useState<number | null>(null);
+  const previewPhoto =
+    previewIndex === null ? null : (orderedPhotos[previewIndex] ?? null);
   const captureTime = previewPhoto ? describeCaptureTime(previewPhoto) : null;
+  const closePreview = () => setPreviewIndex(null);
+
+  /**
+   * Both controls move the SAME index the swipe reports, so the two paths
+   * cannot drift apart. `stepPhotoIndex` clamps rather than wrapping, which is
+   * what lets these be disabled at the ends instead of silently looping.
+   */
+  const stepPreview = (delta: number) => {
+    if (previewIndex === null) return;
+    const next = stepPhotoIndex(previewIndex, delta, orderedPhotos.length);
+    if (next === previewIndex) return;
+    setPreviewIndex(next);
+    pagerRef.current?.scrollToIndex({ index: next, animated: true });
+  };
   const [annotatingPhoto, setAnnotatingPhoto] = React.useState<Photo | null>(null);
   const [savingAnnotation, setSavingAnnotation] = React.useState(false);
 
@@ -71,6 +113,20 @@ export default function EntryDetailScreen() {
   const unavailablePhotoCount = entry.photos.filter(
     (photo) => photoStatuses[photo.id] === "unavailable"
   ).length;
+
+  /**
+   * The other three of the four claims the viewer makes. Each comes back as a
+   * state as well as a sentence, and the state is what decides the colour: a
+   * stand-in or an unrecorded value is amber, so it cannot be skim-read as the
+   * real thing. None of these can be rendered from the photograph alone —
+   * "who" and "which entry" are properties of the entry — which is why they are
+   * derived here rather than inside the tile.
+   */
+  const previewPlace = previewPhoto ? describePhotoPlace(previewPhoto, entry) : null;
+  const previewAuthor = previewPhoto ? describePhotoAuthor(previewPhoto, entry) : null;
+  const previewDerivation = previewPhoto
+    ? describePhotoDerivation(previewPhoto, orderedPhotos)
+    : null;
 
   const handleDelete = () => {
     if (Platform.OS === "web") {
@@ -163,6 +219,12 @@ export default function EntryDetailScreen() {
       longitude: source.longitude,
       kind: "annotated",
       derivedFromId: source.id,
+      // Who drew it. 2.4 asks for who AND when; `timestamp` above was already
+      // the when, and this was the half that was missing. Omitted rather than
+      // written empty when there is no signed-in email, because
+      // `describePhotoAuthor` reports an absent annotator as unrecorded and
+      // must never be handed a blank string to render as a name.
+      ...(user?.email ? { annotatedBy: user.email } : {}),
       annotationVector: vector,
     };
 
@@ -351,11 +413,11 @@ export default function EntryDetailScreen() {
             </View>
           ) : (
             <View style={styles.photoGrid}>
-              {entry.photos.map((photo) => (
+              {orderedPhotos.map((photo, index) => (
                 <Pressable
                   key={photo.id}
                   style={styles.photoThumb}
-                  onPress={() => setPreviewPhoto(photo)}
+                  onPress={() => setPreviewIndex(index)}
                 >
                   <EvidenceImage
                     photo={photo}
@@ -371,36 +433,123 @@ export default function EntryDetailScreen() {
       </ScrollView>
 
       <Modal
-        visible={!!previewPhoto}
+        visible={previewIndex !== null}
         transparent
         animationType="fade"
-        onRequestClose={() => setPreviewPhoto(null)}
+        onRequestClose={closePreview}
       >
         <View style={styles.previewBackdrop}>
-          <Pressable style={styles.previewClose} onPress={() => setPreviewPhoto(null)}>
+          <Pressable style={styles.previewClose} onPress={closePreview}>
             <Ionicons name="close" size={26} color={Colors.white} />
           </Pressable>
-          {!!previewPhoto && captureTime && (
+          {!!previewPhoto && captureTime && previewPlace && previewAuthor && previewDerivation && (
             <>
-              <ScrollView
-                style={styles.previewScroll}
-                contentContainerStyle={styles.previewScrollContent}
-                maximumZoomScale={4}
-                minimumZoomScale={1}
-                bouncesZoom
-                centerContent
+              {/*
+                One page per photograph, each page its own zoomable ScrollView.
+                Paging rather than a single image because swiping between the
+                photographs of one record is the point of the screen; a
+                ScrollView per page rather than one shared zoom because a zoom
+                level is a property of the photograph being examined, not of
+                the set.
+
+                `windowSize` is the load-bearing prop. These are the 3024x4032
+                originals, so mounting all twelve of a full record would decode
+                ~26 MB of image to show one of them. Three pages means the one
+                in view and the two it can be swiped to, and nothing is decoded
+                until the viewer opens because the whole subtree is unmounted
+                while it is closed.
+
+                UNVERIFIED ON DEVICE: this environment has no simulator and no
+                device, so the gesture arbitration between the horizontal pager
+                and the inner zoom is reasoned, not observed. The explicit
+                previous/next controls below exist so the screen is navigable
+                even if that arbitration needs tuning.
+              */}
+              <FlatList
+                ref={pagerRef}
+                data={orderedPhotos}
+                keyExtractor={(photo) => photo.id}
+                horizontal
+                pagingEnabled
                 showsHorizontalScrollIndicator={false}
-                showsVerticalScrollIndicator={false}
-              >
-                <EvidenceImage
-                  photo={previewPhoto}
-                  style={styles.previewImage}
-                  resizeMode="contain"
-                  variant="full"
-                  tone="dark"
-                />
-              </ScrollView>
+                initialScrollIndex={previewIndex ?? 0}
+                getItemLayout={(_, index) => ({
+                  length: windowWidth,
+                  offset: windowWidth * index,
+                  index,
+                })}
+                windowSize={3}
+                initialNumToRender={1}
+                maxToRenderPerBatch={1}
+                removeClippedSubviews
+                onMomentumScrollEnd={(event) => {
+                  const page = Math.round(event.nativeEvent.contentOffset.x / windowWidth);
+                  // Clamped through the same helper the buttons use, so an
+                  // overscroll cannot land the index outside the set.
+                  setPreviewIndex(stepPhotoIndex(page, 0, orderedPhotos.length));
+                }}
+                style={styles.previewPager}
+                renderItem={({ item }) => (
+                  <ScrollView
+                    style={[styles.previewScroll, { width: windowWidth }]}
+                    contentContainerStyle={styles.previewScrollContent}
+                    maximumZoomScale={4}
+                    minimumZoomScale={1}
+                    bouncesZoom
+                    centerContent
+                    showsHorizontalScrollIndicator={false}
+                    showsVerticalScrollIndicator={false}
+                  >
+                    <EvidenceImage
+                      photo={item}
+                      style={styles.previewImage}
+                      resizeMode="contain"
+                      variant="full"
+                      tone="dark"
+                    />
+                  </ScrollView>
+                )}
+              />
               <View style={styles.previewMeta}>
+                {/*
+                  Previous and next, and the position within the set. The
+                  position matters as much as the controls: a reader checking
+                  they have seen every photograph attached to a record needs to
+                  know how many there are, and a pager that wrapped would never
+                  let them find out. Disabled at each end for the same reason.
+                */}
+                {orderedPhotos.length > 1 && (
+                  <View style={styles.previewNav}>
+                    <Pressable
+                      style={[
+                        styles.previewNavButton,
+                        (previewIndex ?? 0) === 0 && styles.previewNavButtonSpent,
+                      ]}
+                      disabled={(previewIndex ?? 0) === 0}
+                      onPress={() => stepPreview(-1)}
+                      accessibilityRole="button"
+                      accessibilityLabel="Previous photograph"
+                    >
+                      <Ionicons name="chevron-back" size={22} color={Colors.white} />
+                    </Pressable>
+                    <Text style={styles.previewPosition}>
+                      {(previewIndex ?? 0) + 1} of {orderedPhotos.length}
+                    </Text>
+                    <Pressable
+                      style={[
+                        styles.previewNavButton,
+                        (previewIndex ?? 0) === orderedPhotos.length - 1 &&
+                          styles.previewNavButtonSpent,
+                      ]}
+                      disabled={(previewIndex ?? 0) === orderedPhotos.length - 1}
+                      onPress={() => stepPreview(1)}
+                      accessibilityRole="button"
+                      accessibilityLabel="Next photograph"
+                    >
+                      <Ionicons name="chevron-forward" size={22} color={Colors.white} />
+                    </Pressable>
+                  </View>
+                )}
                 {/*
                   This said "Captured <timestamp>" — and `timestamp` is when the
                   record was created, not when the photograph was taken. For a
@@ -417,6 +566,49 @@ export default function EntryDetailScreen() {
                   ]}
                 >
                   {captureTime.label}
+                </Text>
+                {/*
+                  WHERE. The photograph's own coordinates when it has them;
+                  otherwise the ENTRY's address, said in words that make clear
+                  it is the entry's and not the photograph's. These coordinates
+                  have been persisted on every photograph since L32 and were
+                  displayed nowhere, so until now the only location a reader
+                  could see was the entry's, unlabelled.
+                */}
+                <Text
+                  style={[
+                    styles.previewMetaText,
+                    previewPlace.state !== "photograph" && styles.previewMetaUnknown,
+                  ]}
+                >
+                  {previewPlace.label}
+                </Text>
+                {/*
+                  WHO. For an annotated copy this is the annotator; for an
+                  original it is who logged the entry, which is what the label
+                  says rather than claiming a photographer. An annotation with
+                  no recorded annotator says so and borrows nobody's name.
+                */}
+                <Text
+                  style={[
+                    styles.previewMetaText,
+                    (previewAuthor.state === "annotator-unrecorded" ||
+                      previewAuthor.state === "unknown") &&
+                      styles.previewMetaUnknown,
+                  ]}
+                >
+                  {previewAuthor.label}
+                </Text>
+                {/* WHICH ENTRY, and whether this is an original or a mark-up of one. */}
+                <Text style={styles.previewCaption}>{describePhotoRecord(entry)}</Text>
+                <Text
+                  style={[
+                    styles.previewCaption,
+                    previewDerivation.state === "annotation-orphaned" &&
+                      styles.previewMetaUnknown,
+                  ]}
+                >
+                  {previewDerivation.label}
                 </Text>
                 {!!previewPhoto.caption && (
                   <Text style={styles.previewCaption}>{previewPhoto.caption}</Text>
@@ -442,7 +634,7 @@ export default function EntryDetailScreen() {
                     style={styles.previewAnnotate}
                     onPress={() => {
                       const target = previewPhoto;
-                      setPreviewPhoto(null);
+                      closePreview();
                       setAnnotatingPhoto(target);
                     }}
                   >
@@ -714,9 +906,11 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  previewPager: {
+    flex: 1,
+  },
   previewScroll: {
     flex: 1,
-    width: "100%",
   },
   previewScrollContent: {
     flexGrow: 1,
@@ -735,6 +929,31 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   previewMetaText: {
+    color: Colors.white,
+    fontSize: 13,
+    fontFamily: "Inter_600SemiBold",
+  },
+  previewNav: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 6,
+  },
+  previewNavButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.18)",
+  },
+  // Dimmed rather than hidden: a control that disappears at the end of the set
+  // reads as a layout glitch, where one that is visibly spent says "that was
+  // the last photograph".
+  previewNavButtonSpent: {
+    opacity: 0.3,
+  },
+  previewPosition: {
     color: Colors.white,
     fontSize: 13,
     fontFamily: "Inter_600SemiBold",
