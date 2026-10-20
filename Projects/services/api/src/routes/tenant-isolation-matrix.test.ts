@@ -680,6 +680,55 @@ test(
     );
     assert.equal(bSign.status, 200);
     assert.equal(bSign.body.signed[0].url, null, "Company B must not receive a signed URL for Company A's file");
+
+    // ── The batch form answers each path on its own merits ──────────────────
+    //
+    // /uploads/sign used to run the single-id ownership check once per path
+    // inside a `Promise.all`, i.e. one `withTenant` TRANSACTION per path. It now
+    // asks once with `id = ANY(...)` and reads the answers out of a set, which
+    // introduces a failure mode the old shape could not have: the verdict for
+    // path i no longer comes from a call made for path i, so a filtered-out
+    // element or a mis-zipped index hands one tenant's permission to another
+    // tenant's file. Every assertion above passes a SINGLE path and would read
+    // green against exactly that bug.
+    //
+    // The interleaving is deliberate: the unparseable entry sits BETWEEN two
+    // owned ones, so an implementation that drops it before querying and zips
+    // the results back shifts the third answer onto the second path.
+    const aBatch = await req<{ signed: { path: string; url: string | null; error?: string }[] }>(
+      "POST", "/uploads/sign", { paths: [uploaded.url, "not-an-upload-path", uploaded.url] }, tokenA
+    );
+    assert.equal(aBatch.status, 200);
+    assert.deepEqual(
+      aBatch.body.signed.map((s) => s.path),
+      [uploaded.url, "not-an-upload-path", uploaded.url],
+      "the answers must come back aligned with the paths that were sent"
+    );
+    assert.equal(aBatch.body.signed[1].url, null, "an unparseable path must not be signed");
+    assert.equal(aBatch.body.signed[1].error, "Invalid upload path.");
+    // Positive controls either side of it, in the same response.
+    for (const index of [0, 2]) {
+      assert.ok(
+        typeof aBatch.body.signed[index].url === "string" && aBatch.body.signed[index].url!.includes("sig="),
+        `Company A must receive a signed URL at index ${index}, got ${JSON.stringify(aBatch.body.signed[index])}`
+      );
+    }
+
+    // And the refusal stays attached to the right path when B sends a mixed
+    // batch. The positive control for this is A's batch immediately above, on
+    // the same endpoint in the same test: B owns no file here, so there is
+    // nothing for B to legitimately sign.
+    const bBatch = await req<{ signed: { path: string; url: string | null; error?: string }[] }>(
+      "POST", "/uploads/sign", { paths: ["not-an-upload-path", uploaded.url] }, tokenB
+    );
+    assert.equal(bBatch.status, 200);
+    assert.equal(bBatch.body.signed[0].error, "Invalid upload path.");
+    assert.equal(
+      bBatch.body.signed[1].url,
+      null,
+      "Company B must not receive a signed URL for Company A's file inside a batch"
+    );
+    assert.equal(bBatch.body.signed[1].error, "Not found.");
   }
 );
 
