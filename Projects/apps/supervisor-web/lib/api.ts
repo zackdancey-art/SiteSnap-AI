@@ -351,6 +351,44 @@ export async function approveDiary(diaryId: string): Promise<Diary> {
 }
 
 /**
+ * Replace the photographs array on one diary entry.
+ *
+ * This is the save path for a portal annotation, and it uses an endpoint that
+ * already existed — `PATCH /api/projects/entries/:id`, defined at
+ * services/api/src/routes/projects.ts:243. NO ROUTE WAS ADDED OR WIDENED for
+ * annotation, and in particular the `Cross-Origin-Resource-Policy: same-site`
+ * scope on the media route (routes/uploads.ts:160-215) is untouched: the portal
+ * draws a vector overlay in the DOM and stores coordinates, so it never needs to
+ * read the image's pixels back and never needs a CORS-enabled image load.
+ *
+ * Why the whole array rather than one photograph: `photos` on that route is
+ * `z.array(z.record(z.unknown()))` (projects.ts:56-73) and the store writes it
+ * with `JSON.stringify` as opaque JSONB, so there is no per-photograph
+ * addressing to use. The caller therefore sends the complete set, which is
+ * exactly what `buildAnnotationDerivative` returns — original included.
+ *
+ * THE RACE THIS CANNOT WIN, stated rather than hidden: a whole-array write is
+ * last-write-wins. If someone annotates on mobile while someone annotates the
+ * same entry on the portal, the second save drops the first annotation. The
+ * endpoint offers no version or ETag to send, so there is nothing to build on
+ * here; the honest mitigation is that the caller re-reads the entry immediately
+ * after saving, so the losing client at least sees the true stored set rather
+ * than its own optimistic copy. A real fix is a server-side append, and it is
+ * flagged rather than improvised.
+ */
+export async function updateEntryPhotos(
+  entryId: string,
+  photos: EntryPhoto[]
+): Promise<Entry> {
+  const data = await request<{ entry: Entry }>(
+    "PATCH",
+    `/api/projects/entries/${entryId}`,
+    { photos }
+  );
+  return data.entry;
+}
+
+/**
  * Ask the API to generate a diary for one site and period.
  *
  * SENDS `siteId` AND `period` AND NOTHING ELSE, and that is the fix for AUDIT

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo, useRef } from "react";
+import { useCallback, useEffect, useState, useMemo, useRef } from "react";
 import { useRouter, useParams } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import ProfileDropdown from "@/components/ProfileDropdown";
@@ -8,7 +8,7 @@ import { SkeletonTable } from "@/components/Skeleton";
 import {
   fetchBootstrap, getSavedUser, isAuthenticated,
   fetchTimecards, fetchIncidents, fetchInspections, fetchDeliveries,
-  approveDiary, signUploadPaths,
+  approveDiary, signUploadPaths, updateEntryPhotos,
 } from "@/lib/api";
 import type {
   BootstrapData, Diary, Entry, EntryPhoto, User,
@@ -20,6 +20,8 @@ import {
   describePhotoRecord, stepPhotoIndex,
 } from "@/lib/photo-provenance";
 import { buildViewerShots, buildViewerShotsForRecords } from "@/lib/photo-viewer-set";
+import PhotoAnnotator from "@/components/PhotoAnnotator";
+import { buildAnnotationDerivative, type AnnotationVector } from "@/lib/annotation-derivative";
 import type { ViewerShot as LibViewerShot } from "@/lib/photo-viewer-set";
 
 type Tab = "overview" | "entries" | "timesheets" | "incidents" | "inspections" | "dockets" | "photos" | "reports";
@@ -97,8 +99,19 @@ function formatTime(t?: string) {
  */
 type ViewerShot = LibViewerShot<EntryPhoto, Entry>;
 
-/** What the lightbox is showing: a set to step through, and where in it we are. */
-type Lightbox = { shots: ViewerShot[]; index: number };
+/**
+ * What the lightbox is showing: WHICH set, and where in it we are.
+ *
+ * `entryId` names the set rather than holding it — null meaning "every
+ * photograph on this site", an id meaning "just that record's". It held the
+ * built `ViewerShot[]` instead, and that was wrong in a way nothing would have
+ * reported: the array is a snapshot taken when the viewer opened, so saving an
+ * annotation appended a photograph the open viewer could not see. The person
+ * would have clicked Save, seen nothing change, and had no way to tell whether
+ * it had worked. Naming the set means the viewer re-derives it from the entries
+ * on every render, so a save shows up where it was made.
+ */
+type Lightbox = { entryId: string | null; index: number };
 
 const MAX_ZOOM = 6;
 const clampZoom = (value: number) => Math.min(MAX_ZOOM, Math.max(1, value));
@@ -227,13 +240,22 @@ function ViewerFact({ text, degraded }: { text: string; degraded?: boolean }) {
  * usable even if that arithmetic needs tuning on a real trackpad.
  */
 function PhotoLightbox({
-  shots, index, signedUrls, onIndex, onClose,
+  shots, index, signedUrls, onIndex, onClose, actorEmail, onAnnotated,
 }: {
   shots: ViewerShot[];
   index: number;
   signedUrls: Map<string, string>;
   onIndex: (next: number) => void;
   onClose: () => void;
+  /**
+   * Who is signed in, for the annotation's provenance. Optional because the
+   * page resolves it from localStorage after mount, so the viewer can briefly
+   * open without it — and an unknown annotator is recorded as ABSENT rather
+   * than as a blank string (see buildAnnotationDerivative).
+   */
+  actorEmail?: string;
+  /** The entry as the API returned it after a save, so the page stops showing a guess. */
+  onAnnotated?: (entry: Entry) => void;
 }) {
   const [zoom, setZoom] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
@@ -244,6 +266,9 @@ function PhotoLightbox({
    * look like working code and do nothing.
    */
   const [dragging, setDragging] = useState(false);
+  const [annotating, setAnnotating] = useState(false);
+  const [savingAnnotation, setSavingAnnotation] = useState(false);
+  const [annotationError, setAnnotationError] = useState<string | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const dragFrom = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
   const pointers = useRef<Map<number, { x: number; y: number }>>(new Map());
@@ -254,13 +279,17 @@ function PhotoLightbox({
   // is still open — so the keyboard path is the one that is certainly usable.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // With the annotator open these keys belong to it: Escape closes the
+      // annotator (it handles its own, in the capture phase) and an arrow must
+      // NOT step the photograph out from under a drawing in progress.
+      if (annotating) return;
       if (e.key === "Escape") { onClose(); return; }
       if (e.key === "ArrowLeft") { e.preventDefault(); onIndex(stepPhotoIndex(index, -1, shots.length)); }
       if (e.key === "ArrowRight") { e.preventDefault(); onIndex(stepPhotoIndex(index, 1, shots.length)); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [index, shots.length, onIndex, onClose]);
+  }, [index, shots.length, onIndex, onClose, annotating]);
 
   // A new photograph starts unzoomed. Carrying a 4x zoom and its pan offset
   // across a step would leave the next image showing an arbitrary corner of
@@ -296,6 +325,63 @@ function PhotoLightbox({
   // nothing off-screen to pan to, and a remembered offset would make the next
   // zoom jump.
   const pan = zoom > 1 ? offset : { x: 0, y: 0 };
+  /**
+   * Annotation is offered on an ORIGINAL that has an id, and nowhere else.
+   *
+   * The id requirement is not a style choice: `derivedFromId` has to match the
+   * source's stored `id`, because that is what mobile's renderer and the
+   * viewer's own `describePhotoDerivation` match on. A photograph recorded
+   * before ids existed has nothing to point at, so a derivative of it would be
+   * an orphan by construction — `buildAnnotationDerivative` returns null for
+   * exactly that case, and the button is hidden rather than offered and refused.
+   *
+   * Originals-only is a narrower rule than the data allows: the builder
+   * supports annotating an annotation and is tested for it. That is a UI policy
+   * — one annotation layer per photograph keeps the provenance a reader has to
+   * follow one step deep — and loosening it later needs no data change.
+   */
+  const canAnnotate =
+    !!signedUrl && !!shot.photo.id && !!shot.entry.id && shot.photo.kind !== "annotated";
+
+  const saveAnnotation = async (vector: AnnotationVector) => {
+    const sourceId = shot.photo.id;
+    const entryId = shot.entry.id;
+    if (!sourceId || !entryId) return;
+    setSavingAnnotation(true);
+    setAnnotationError(null);
+    try {
+      const photos = buildAnnotationDerivative({
+        photos: shot.entry.photos ?? [],
+        sourceId,
+        vector,
+        // `crypto.randomUUID` needs a secure context, which the portal is
+        // (https in production, localhost in dev). The fallback is not a
+        // weaker id generator — a duplicate id here would attach the next
+        // annotation to the wrong photograph — it is refusing to save.
+        id: typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : "",
+        now: new Date().toISOString(),
+        annotatedBy: actorEmail,
+      });
+      if (!photos || !photos[photos.length - 1]?.id) {
+        setAnnotationError("Could not record this annotation against the original.");
+        return;
+      }
+      const entry = await updateEntryPhotos(entryId, photos);
+      // The page's copy is replaced with what the API returned, not with the
+      // array just sent: if another client changed the entry, this is where the
+      // true set arrives, and the last-write-wins caveat becomes visible rather
+      // than papered over by an optimistic update.
+      onAnnotated?.(entry);
+      setAnnotating(false);
+    } catch (err) {
+      setAnnotationError(
+        err instanceof Error ? err.message : "Could not save the annotation."
+      );
+    } finally {
+      setSavingAnnotation(false);
+    }
+  };
+
   const atFirst = index === 0;
   const atLast = index === shots.length - 1;
 
@@ -363,6 +449,15 @@ function PhotoLightbox({
           {shots.length > 1 ? `${index + 1} of ${shots.length}` : "1 photograph"}
         </span>
         <span style={{ flex: 1 }} />
+        {canAnnotate && (
+          <button
+            onClick={() => { setAnnotationError(null); setAnnotating(true); }}
+            style={{ ...navButton(false), width: "auto", padding: "0 14px", fontSize: 13, fontWeight: 600 }}
+            title="Mark up a copy of this photograph"
+          >
+            Annotate
+          </button>
+        )}
         <button onClick={() => setZoom((z) => clampZoom(z / 1.4))} style={navButton(zoom <= 1)} title="Zoom out" aria-label="Zoom out">−</button>
         <button onClick={() => { setZoom(1); setOffset({ x: 0, y: 0 }); }} style={{ ...navButton(zoom === 1), width: "auto", padding: "0 12px", fontSize: 13 }} title="Fit to screen">
           {Math.round(zoom * 100)}%
@@ -370,6 +465,23 @@ function PhotoLightbox({
         <button onClick={() => setZoom((z) => clampZoom(z * 1.4))} style={navButton(zoom >= MAX_ZOOM)} title="Zoom in" aria-label="Zoom in">+</button>
         <button onClick={onClose} style={navButton(false)} title="Close (Escape)" aria-label="Close">✕</button>
       </div>
+
+      {/* ── the annotator, over the top of the viewer ──
+          Rendered inside the viewer so closing it returns to the same
+          photograph at the same place in the set, rather than to the grid. */}
+      {annotating && signedUrl && (
+        <div onClick={(e) => e.stopPropagation()}>
+          <PhotoAnnotator
+            src={signedUrl}
+            alt={shot.photo.caption ?? `Photograph ${index + 1}`}
+            caption={shot.photo.caption}
+            saving={savingAnnotation}
+            error={annotationError}
+            onSave={saveAnnotation}
+            onCancel={() => { if (!savingAnnotation) { setAnnotating(false); setAnnotationError(null); } }}
+          />
+        </div>
+      )}
 
       {/* ── the photograph ── */}
       <div
@@ -492,7 +604,7 @@ function PhotoFailureBanner({
 }
 
 function PhotosTab({
-  entries, signedUrls, errors, requestError, signing, onRetry,
+  entries, signedUrls, errors, requestError, signing, onRetry, actorEmail, onAnnotated,
 }: {
   /**
    * The ENTRIES, not a flat photo list. The grid is still flat, but a tile has
@@ -505,6 +617,10 @@ function PhotosTab({
   requestError: string | null;
   signing: boolean;
   onRetry: () => void;
+  /** Who is signed in, and where a saved annotation goes back to. Threaded
+   *  rather than read here, so the page stays the single owner of entry state. */
+  actorEmail?: string;
+  onAnnotated?: (entry: Entry) => void;
 }) {
   const [lightbox, setLightbox] = useState<Lightbox | null>(null);
 
@@ -547,7 +663,7 @@ function PhotosTab({
                 index={i}
                 signedUrls={signedUrls}
                 errors={errors}
-                onOpen={() => setLightbox({ shots, index: i })}
+                onOpen={() => setLightbox({ entryId: null, index: i })}
               />
             ))}
           </div>
@@ -559,11 +675,15 @@ function PhotosTab({
           first of the next, which is the order the grid itself shows. */}
       {lightbox && (
         <PhotoLightbox
-          shots={lightbox.shots}
+          /* Derived here, not stored in `lightbox`, so an annotation saved
+             from inside the viewer appears in the set it was added to. */
+          shots={shots}
           index={lightbox.index}
           signedUrls={signedUrls}
           onIndex={(index) => setLightbox((open) => (open ? { ...open, index } : open))}
           onClose={() => setLightbox(null)}
+          actorEmail={actorEmail}
+          onAnnotated={onAnnotated}
         />
       )}
     </>
@@ -584,7 +704,7 @@ function PhotosTab({
  * with a photograph fix.
  */
 function EntriesTab({
-  entries, signedUrls, errors, requestError, signing, onRetry, formatDate,
+  entries, signedUrls, errors, requestError, signing, onRetry, formatDate, actorEmail, onAnnotated,
 }: {
   entries: Entry[];
   signedUrls: Map<string, string>;
@@ -593,6 +713,10 @@ function EntriesTab({
   signing: boolean;
   onRetry: () => void;
   formatDate: (value?: string | null, options?: Intl.DateTimeFormatOptions) => string;
+  /** Who is signed in, and where a saved annotation goes back to. Threaded
+   *  rather than read here, so the page stays the single owner of entry state. */
+  actorEmail?: string;
+  onAnnotated?: (entry: Entry) => void;
 }) {
   const [lightbox, setLightbox] = useState<Lightbox | null>(null);
 
@@ -610,6 +734,20 @@ function EntriesTab({
 
   const allPhotos = entries.flatMap((e) => e.photos ?? []);
   const failedCount = allPhotos.filter((p) => errors.has(p.uri)).length;
+
+  /**
+   * The open viewer's set: just the record it was opened from.
+   *
+   * Empty when that record is no longer in `entries` — the viewer renders
+   * nothing for an out-of-range index, so a record that disappears closes the
+   * viewer rather than showing another day's photographs under its caption.
+   */
+  const openShots = useMemo(() => {
+    const open = lightbox?.entryId
+      ? entries.find((e) => e.id === lightbox.entryId)
+      : undefined;
+    return open ? buildViewerShots<EntryPhoto, Entry>(open) : [];
+  }, [lightbox?.entryId, entries]);
 
   return (
     <>
@@ -688,7 +826,7 @@ function EntriesTab({
                             signedUrls={signedUrls}
                             errors={errors}
                             compact
-                            onOpen={() => setLightbox({ shots, index: i })}
+                            onOpen={() => setLightbox({ entryId: entry.id, index: i })}
                           />
                           {shot.photo.caption && (
                             <figcaption style={{ fontSize: 10, lineHeight: 1.3, color: "var(--text-secondary)" }}>
@@ -708,11 +846,15 @@ function EntriesTab({
 
       {lightbox && (
         <PhotoLightbox
-          shots={lightbox.shots}
+          /* Rebuilt from the named record every render, for the same reason:
+             the set an annotation lands in is the one on screen. */
+          shots={openShots}
           index={lightbox.index}
           signedUrls={signedUrls}
           onIndex={(index) => setLightbox((open) => (open ? { ...open, index } : open))}
           onClose={() => setLightbox(null)}
+          actorEmail={actorEmail}
+          onAnnotated={onAnnotated}
         />
       )}
     </>
@@ -786,6 +928,29 @@ export default function SiteDetailPage() {
       setDeliveries(del);
     }).catch(console.error).finally(() => setLoadingMain(false));
   }, [siteId]);
+
+  /**
+   * Replace one entry in the loaded bootstrap with the version the API returned.
+   *
+   * `entries` is derived from `bootstrap` by filter, so this is the only place
+   * an entry change can be applied — and it is applied by id rather than by
+   * refetching the whole bootstrap, because a refetch would discard the signed
+   * photo URLs and blank every tile on the page for a second.
+   *
+   * An annotation derivative shares its original's `uri`, so the signing
+   * pipeline already holds a signed URL for it and the new photograph renders
+   * immediately with no second round trip. That is a consequence of storing a
+   * vector rather than new bytes; if annotation ever rasterises to a new object
+   * key, this comment is the thing that stops being true and the signing effect
+   * will need to re-run.
+   */
+  const applyEntryUpdate = useCallback((updated: Entry) => {
+    setBootstrap((prev) =>
+      prev
+        ? { ...prev, entries: prev.entries.map((e) => (e.id === updated.id ? updated : e)) }
+        : prev
+    );
+  }, []);
 
   const photos = useMemo(() => {
     return entries.flatMap((e) => (e.photos ?? []));
@@ -1206,6 +1371,8 @@ export default function SiteDetailPage() {
               signing={signingPhotos}
               onRetry={retryPhotos}
               formatDate={localDate}
+              actorEmail={user?.email}
+              onAnnotated={applyEntryUpdate}
             />
           )}
 
@@ -1218,6 +1385,8 @@ export default function SiteDetailPage() {
               requestError={photoRequestError}
               signing={signingPhotos}
               onRetry={retryPhotos}
+              actorEmail={user?.email}
+              onAnnotated={applyEntryUpdate}
             />
           )}
 

@@ -29,6 +29,8 @@
   },
   "include": [],
   "files": [
+    "lib/annotation-derivative.ts",
+    "lib/annotation-derivative.test.ts",
     "lib/photo-capture-time.ts",
     "lib/photo-capture-time.test.ts",
     "lib/photo-provenance.ts",
