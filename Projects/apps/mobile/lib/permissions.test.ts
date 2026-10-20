@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   FORBIDDEN_MESSAGE,
+  TIMECARD_APPROVAL_STATUSES,
+  TIMECARD_EDITABLE_STATUSES,
   TIMECARD_LOCKED_CODE,
   TIMECARD_LOCKED_MESSAGE,
   canApproveDiary,
@@ -13,7 +15,9 @@ import {
   canSeeSupervisorDashboard,
   describeFailure,
   isForbidden,
+  isTimecardEditable,
   isTimecardLocked,
+  normaliseApprovalStatus,
 } from "./permissions";
 import * as permissionsModule from "./permissions";
 import { SESSION_EXPIRED_MESSAGE, SessionExpiredError, isSessionExpired } from "./session";
@@ -311,4 +315,90 @@ test("the three refusals read as three different things, and a feature failure k
   assert.doesNotMatch(TIMECARD_LOCKED_MESSAGE, /failed|try again|error/i);
   assert.match(TIMECARD_LOCKED_MESSAGE, /reopen/i);
   assert.doesNotMatch(FORBIDDEN_MESSAGE, /reopen/i, "control: the rank refusal must not suggest reopening anything");
+});
+
+test("an unrecognised or absent approval status reads as pending, not as locked", () => {
+  // The three real states first, as the positive control. Without these,
+  // returning "pending" unconditionally would pass every assertion below and
+  // the test would be checking a constant.
+  assert.equal(normaliseApprovalStatus("pending"), "pending");
+  assert.equal(normaliseApprovalStatus("approved"), "approved");
+  assert.equal(normaliseApprovalStatus("rejected"), "rejected");
+
+  // And the list those three came from is the whole list, so a fourth status
+  // added to the API without being added here fails this rather than appearing
+  // silently as "pending" on every card.
+  assert.deepEqual([...TIMECARD_APPROVAL_STATUSES], ["pending", "approved", "rejected"]);
+
+  // Everything else falls to "pending", which is the direction that keeps the
+  // controls usable. The cost of being wrong this way is one clear 409 from
+  // the server; the cost of the other way is edit and delete greyed out on
+  // every card with no error raised anywhere.
+  for (const value of [
+    undefined,
+    null,
+    "",
+    "APPROVED",        // the API's values are lower case; a case-insensitive
+                       // match here would be a contract the server does not have
+    "approved ",       // and no trimming either, for the same reason
+    "archived",        // a status a later API might add
+    "locked",
+    0,
+    1,
+    true,
+    {},
+    [],
+    ["approved"],
+    () => "approved",
+  ]) {
+    assert.equal(
+      normaliseApprovalStatus(value),
+      "pending",
+      `${String(value)} should read as pending, so an out-of-date build stays usable`
+    );
+  }
+
+  // CONTROL on the direction, stated as an assertion rather than as a comment:
+  // whatever the fallback is, it must be a state the author can still edit.
+  // A default of "approved" would satisfy "returns a known status" and lock
+  // every card in the app.
+  assert.ok(
+    isTimecardEditable(normaliseApprovalStatus("something new")),
+    "the fallback status must be an editable one, or an out-of-date build locks every card"
+  );
+});
+
+test("an approved timecard is the only one its author cannot edit", () => {
+  // Positive controls first: the two states that stay open.
+  assert.equal(isTimecardEditable("pending"), true);
+  assert.equal(isTimecardEditable("rejected"), true);
+
+  // The refusal. This is the feature — a payroll row anybody can still edit
+  // was never approved in any useful sense.
+  assert.equal(isTimecardEditable("approved"), false);
+
+  // Derived from the module rather than written out, so the next status added
+  // to TIMECARD_APPROVAL_STATUSES is covered without anybody remembering to
+  // extend this test. The hand-written version of the predicate list in this
+  // file was already one entry short of the module by the time it mattered.
+  const editable = TIMECARD_APPROVAL_STATUSES.filter(isTimecardEditable);
+  const locked = TIMECARD_APPROVAL_STATUSES.filter((s) => !isTimecardEditable(s));
+  assert.deepEqual([...editable], [...TIMECARD_EDITABLE_STATUSES]);
+  assert.deepEqual(locked, ["approved"], "exactly one status locks a card, and it is approval");
+
+  // Both sides non-empty, so neither "everything is editable" nor "nothing is"
+  // can pass. A predicate returning a constant satisfies one of the two
+  // deepEquals above on its own.
+  assert.ok(editable.length > 0, "no status is editable — the screen would offer no edit at all");
+  assert.ok(locked.length > 0, "no status is locked — approval would not lock anything");
+
+  // The sentence shown when the lock is hit has to be true of this exact set:
+  // it names approval, because approval is what locks, and a sent-back card is
+  // still editable.
+  assert.match(TIMECARD_LOCKED_MESSAGE, /approved/i);
+  assert.doesNotMatch(
+    TIMECARD_LOCKED_MESSAGE,
+    /sent back|rejected/i,
+    "control: a rejected card is editable, so the lock message must not claim otherwise"
+  );
 });

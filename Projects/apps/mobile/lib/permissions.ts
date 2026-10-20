@@ -31,6 +31,14 @@
  * Keeping the decision here and the rendering in the screens is what makes it
  * testable at all. See lib/permissions.test.ts.
  *
+ * TWO KINDS OF DECISION LIVE HERE, AND THEY ARE NOT THE SAME KIND
+ * Everything above is keyed on a company ROLE. Below FORBIDDEN_MESSAGE there
+ * is a second kind, keyed on a ROW'S STATE: an approved timecard is closed to
+ * everybody, including the manager who approved it, and no rank opens it. They
+ * sit in one module because one screen has to tell them apart to say anything
+ * true to the person it refuses, and because both are decisions rather than
+ * rendering — which is what makes them testable here and nowhere else.
+ *
  * THIS IS NOT THE ENFORCEMENT. Hiding a control is not a permission: every one
  * of these is refused independently by the API, because a hidden button is still
  * a reachable route. The server side is in services/api/src/routes — the three
@@ -222,6 +230,70 @@ export function isTimecardLocked(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const e = err as { status?: unknown; code?: unknown };
   return e.status === 409 && e.code === TIMECARD_LOCKED_CODE;
+}
+
+// ── What state a timecard is in ──────────────────────────────────────────────
+
+/**
+ * The approval states a timecard can be in, mirrored from the API's
+ * TIMECARD_APPROVAL_STATUSES (services/api/src/storage/crewStore.ts).
+ *
+ * THIS IS A DELIBERATE COPY, NOT AN OVERSIGHT. apps/mobile has no dependency
+ * on @sitesnap/shared — read its package.json — and that package emits .d.ts
+ * only, so there is no runtime list for a client to import even if the
+ * dependency existed, and adding one is out of scope (CLAUDE.md §8). The copy
+ * is the only option available; normaliseApprovalStatus is what makes it safe
+ * for the copy to fall out of date.
+ *
+ * It lives in this module rather than in app/crew/[siteId].tsx for the reason
+ * the header gives: that screen imports react-native and the node test program
+ * cannot compile it, so a constant placed there is a constant nothing checks.
+ */
+export const TIMECARD_APPROVAL_STATUSES = ["pending", "approved", "rejected"] as const;
+export type TimecardApprovalStatus = (typeof TIMECARD_APPROVAL_STATUSES)[number];
+
+/**
+ * The states whose card its author may still change. `approved` is absent and
+ * that absence is the whole feature: an approved timecard is payroll, and a
+ * payroll row anybody can still edit was never approved in any useful sense. A
+ * manager wanting to correct one reopens it first, which records that they did.
+ *
+ * Mirrors TIMECARD_EDITABLE_STATUSES in the store, where it is enforced under
+ * a row lock. This copy decides which controls a screen draws.
+ */
+export const TIMECARD_EDITABLE_STATUSES: readonly TimecardApprovalStatus[] = Object.freeze([
+  "pending",
+  "rejected",
+]);
+
+export function isTimecardEditable(status: TimecardApprovalStatus): boolean {
+  return TIMECARD_EDITABLE_STATUSES.includes(status);
+}
+
+/**
+ * Anything unrecognised reads as "pending", and the DIRECTION of that default
+ * is chosen rather than convenient.
+ *
+ * Optimism costs one clear refusal: the edit control appears, the person
+ * presses it, and the API answers 409, which isTimecardLocked turns into "ask
+ * a manager to reopen it". Pessimism — reading an unknown status as locked —
+ * would grey out edit and delete on every card the moment the API learns a
+ * fourth status, with no error raised anywhere and no way for the person to
+ * tell "this card is locked" from "this app is out of date". That breaks daily
+ * work silently, which is the worse of the two failures.
+ *
+ * This is the opposite default from isRole() at the top of the file, and
+ * deliberately so: there, being wrong shows somebody a control they may not
+ * use, so unknown means least access. Here, being wrong hides a control from
+ * the person whose own record it is, and the server refuses anyway.
+ *
+ * A missing field is the same case as an unknown one: an API older than this
+ * build sends no approvalStatus at all, and nothing on that API is locked.
+ */
+export function normaliseApprovalStatus(value: unknown): TimecardApprovalStatus {
+  return TIMECARD_APPROVAL_STATUSES.includes(value as TimecardApprovalStatus)
+    ? (value as TimecardApprovalStatus)
+    : "pending";
 }
 
 /**
