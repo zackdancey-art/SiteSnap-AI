@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from "uuid";
 import { Actor } from "./actor";
 import { canEditRow, canReadRow, editOwnershipSql, readVisibilitySql } from "./recordScope";
 import { withTenant } from "./tenant";
+import { liveOnly, softDeleteAssignment } from "./softDelete";
 
 export type TimecardRecord = {
   id: string;
@@ -66,7 +67,7 @@ export async function listTimecards(actor: Actor, siteId?: string): Promise<Time
       .sort((a, b) => b.date.localeCompare(a.date));
   }
   const params: unknown[] = [actor.companyId];
-  const conditions = ["deleted_at IS NULL", `company_id = $1`];
+  const conditions = [liveOnly("crew_timecards"), `company_id = $1`];
   const visibility = readVisibilitySql(actor, "timesheet", params);
   if (visibility) conditions.push(visibility);
   if (siteId) { params.push(siteId); conditions.push(`site_id = $${params.length}`); }
@@ -98,11 +99,11 @@ export async function deleteTimecard(actor: Actor, id: string): Promise<boolean>
     return true;
   }
   const params: unknown[] = [id, actor.companyId];
-  const conditions = ["id = $1", "company_id = $2", "deleted_at IS NULL"];
+  const conditions = ["id = $1", "company_id = $2", liveOnly("crew_timecards")];
   const ownership = editOwnershipSql(actor, "timesheet", params);
   if (ownership) conditions.push(ownership);
   const result = await withTenant(actor, (client) => client.query(
-    `UPDATE crew_timecards SET deleted_at = NOW() WHERE ${conditions.join(" AND ")}`,
+    `UPDATE crew_timecards SET ${softDeleteAssignment("crew_timecards")} WHERE ${conditions.join(" AND ")}`,
     params
   ));
   return (result.rowCount ?? 0) > 0;
@@ -129,7 +130,7 @@ export async function findTimecardOwner(
   }
   const result = await withTenant(actor, (client) =>
     client.query<{ owner_email: string; company_id: string }>(
-      `SELECT owner_email, company_id FROM crew_timecards WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL LIMIT 1`,
+      `SELECT owner_email, company_id FROM crew_timecards WHERE id = $1 AND company_id = $2 AND ${liveOnly("crew_timecards")} LIMIT 1`,
       [id, actor.companyId]
     )
   );

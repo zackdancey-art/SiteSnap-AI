@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from "uuid";
 import { Actor } from "./actor";
 import { canEditRow, canReadRow, editOwnershipSql, readVisibilitySql } from "./recordScope";
 import { withTenant } from "./tenant";
+import { liveOnly, softDeleteAssignment } from "./softDelete";
 
 export type IncidentSeverity = "near-miss" | "minor" | "major" | "critical";
 export type IncidentStatus = "open" | "closed";
@@ -126,7 +127,7 @@ export async function listIncidents(actor: Actor, siteId?: string): Promise<Inci
   const params: unknown[] = [actor.companyId];
   // `company_id = $1` is kept as belt-and-braces alongside the RLS policy
   // (migration 019), which is the authoritative company filter.
-  const conditions = ["deleted_at IS NULL", `company_id = $1`];
+  const conditions = [liveOnly("incidents"), `company_id = $1`];
   const visibility = readVisibilitySql(actor, "incident", params);
   if (visibility) conditions.push(visibility);
   if (siteId) { params.push(siteId); conditions.push(`site_id = $${params.length}`); }
@@ -189,7 +190,7 @@ export async function updateIncident(actor: Actor, id: string, patch: Partial<Pi
   // path above had one, so a crew member could rewrite anyone's incident in
   // production and the suite stayed green. editOwnershipSql is that check.
   const params: unknown[] = [id, actor.companyId, patch.status ?? null, patch.correctiveAction ?? null, patch.severity ?? null];
-  const conditions = ["id = $1", "company_id = $2", "deleted_at IS NULL"];
+  const conditions = ["id = $1", "company_id = $2", liveOnly("incidents")];
   const ownership = editOwnershipSql(actor, "incident", params);
   if (ownership) conditions.push(ownership);
   const result = await withTenant(actor, (client) =>
@@ -215,11 +216,11 @@ export async function deleteIncident(actor: Actor, id: string): Promise<boolean>
     return true;
   }
   const params: unknown[] = [id, actor.companyId];
-  const conditions = ["id = $1", "company_id = $2", "deleted_at IS NULL"];
+  const conditions = ["id = $1", "company_id = $2", liveOnly("incidents")];
   const ownership = editOwnershipSql(actor, "incident", params);
   if (ownership) conditions.push(ownership);
   const result = await withTenant(actor, (client) =>
-    client.query(`UPDATE incidents SET deleted_at = NOW() WHERE ${conditions.join(" AND ")}`, params)
+    client.query(`UPDATE incidents SET ${softDeleteAssignment("incidents")} WHERE ${conditions.join(" AND ")}`, params)
   );
   return (result.rowCount ?? 0) > 0;
 }
@@ -245,7 +246,7 @@ export async function findIncidentOwner(
   }
   const result = await withTenant(actor, (client) =>
     client.query<{ owner_email: string; company_id: string }>(
-      `SELECT owner_email, company_id FROM incidents WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL LIMIT 1`,
+      `SELECT owner_email, company_id FROM incidents WHERE id = $1 AND company_id = $2 AND ${liveOnly("incidents")} LIMIT 1`,
       [id, actor.companyId]
     )
   );
