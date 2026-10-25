@@ -170,6 +170,15 @@ async function publicRequest<T>(method: string, path: string, body?: unknown): P
  */
 export async function registerStart(payload: {
   email: string; phone: string; fullName: string; password: string;
+  // Terms and privacy consent. REQUIRED, not optional, and the reason is the
+  // same one authStore.upsertPendingRegistration gives for its own required
+  // parameter: an optional field lets a future call site drop somebody's
+  // consent by forgetting an argument, and the failure would be a missing legal
+  // record rather than a type error. The API's own check treats a body with
+  // SOME of these fields as a 400 (utils/signupConsent.ts), so a partial
+  // payload cannot get through here either.
+  acceptedTerms: true; acceptedPrivacy: true;
+  termsVersion: string; privacyVersion: string;
 }): Promise<{ devCodes?: { emailCode: string } }> {
   return publicRequest("POST", "/api/auth/register", payload);
 }

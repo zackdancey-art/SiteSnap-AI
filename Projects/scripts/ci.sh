@@ -309,6 +309,63 @@ assert_legal_copy_census() {
   echo "  $label: $count copies, exactly the ones enumerated."
 }
 
+# ── The portal's version constant
+#
+# The portal has no copy of either document — the fourth copies it used to carry
+# were removed, which is what closed A6 — so it links to the hosted pages and
+# states the version it is linking to in one constant file. That constant is
+# sent with a portal signup and written into the consent ledger, so a stale
+# string there means a legal record naming text the person was never shown.
+#
+# This reads the `Last updated:` line OUT OF the canonical markdown and compares
+# it. Nothing here is typed twice: the expected value is whatever the document
+# says today.
+#
+# Why this is a separate check rather than a fourth entry in PRIVACY_COPIES:
+# the constant is not a copy of the document, it is a copy of one LINE of it,
+# and `assert_legal_copies` compares whole word streams — enumerating it there
+# would fail on every one of the other four hundred words. The census is also
+# unaffected, because the constant carries none of the marker phrases: a file
+# holding a date is not a copy of a legal document, and should not be reported
+# as one.
+PORTAL_LEGAL_VERSIONS="apps/supervisor-web/lib/legal-versions.ts"
+
+assert_legal_version_constant() {
+  doc="$1"; constant="$2"
+  canon="../docs/legal/$doc.md"
+
+  # Anchored, so the header prose that mentions the `Last updated` line in
+  # passing is not mistaken for the line itself.
+  line="$(sed -n '/^Last updated: /p' "$canon" | head -1)"
+  if [ -z "$line" ]; then
+    echo "ci.sh: no 'Last updated:' line found in $canon." >&2
+    echo "  Either the document lost it or its wording changed. This check" >&2
+    echo "  compares against that line, so it will not report a pass having" >&2
+    echo "  read nothing." >&2
+    exit 1
+  fi
+
+  actual="$(grep -E "^export const $constant" "$PORTAL_LEGAL_VERSIONS" | head -1)"
+  if [ -z "$actual" ]; then
+    echo "ci.sh: $PORTAL_LEGAL_VERSIONS does not export $constant." >&2
+    echo "  The portal signup sends it; without it the consent record would" >&2
+    echo "  name no version." >&2
+    exit 1
+  fi
+
+  case "$actual" in
+    *"$line"*) ;;
+    *)
+      echo "ci.sh: $constant does not match $canon." >&2
+      echo "  canonical: $line" >&2
+      echo "  constant:  $actual" >&2
+      echo "  A portal signup would record a version the person was not shown." >&2
+      exit 1
+      ;;
+  esac
+  echo "  $doc: the portal constant says '$line', which is what the document says."
+}
+
 step "Structural: the legal documents have not drifted from their source"
 assert_legal_copies privacy-policy privacy
 assert_legal_copies terms-of-service terms
@@ -316,6 +373,10 @@ assert_legal_copies terms-of-service terms
 step "Structural: no unenumerated copy of a legal document has appeared"
 assert_legal_copy_census privacy-policy "$PRIVACY_COPIES" "$PRIVACY_PHRASES"
 assert_legal_copy_census terms-of-service "$TERMS_COPIES" "$TERMS_PHRASES"
+
+step "Structural: the portal's legal version constant matches the documents"
+assert_legal_version_constant terms-of-service TERMS_VERSION
+assert_legal_version_constant privacy-policy PRIVACY_VERSION
 
 step "Build shared types"
 # @sitesnap/shared emits .d.ts only; TypeScript project references in the API
