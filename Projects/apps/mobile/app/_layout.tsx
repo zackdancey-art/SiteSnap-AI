@@ -283,6 +283,7 @@ function RootLayoutNav() {
           header below it. Two back affordances, one screen. Same omission as
           terms-of-service above, different symptom. AUDIT L59. */}
       <Stack.Screen name="settings/offline-sync" options={{ headerShown: false }} />
+      <Stack.Screen name="settings/site-bin" options={{ headerShown: false }} />
     </Stack>
     </>
   );

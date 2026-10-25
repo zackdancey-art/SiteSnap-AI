@@ -16,6 +16,7 @@ import { useAuth } from "@/lib/auth-context";
 import { authedFetch } from "@/lib/authed-fetch";
 import { isSessionExpired } from "@/lib/session";
 import { SettingsRow, SettingsDivider } from "@/components/SettingsRow";
+import { canSeeSiteBin } from "@/lib/permissions";
 import { SettingsCard, SettingsSection } from "@/components/SettingsSection";
 import { TabScreenInsets, useTabScreenInsets } from "@/lib/useScreenInsets";
 import Colors from "@/constants/colors";
@@ -194,6 +195,28 @@ function SettingsContent() {
                   }
                   danger={failedOps.length > 0}
                   onPress={() => router.push("/settings/offline-sync")}
+                />
+                <SettingsDivider />
+              </>
+            )}
+            {/* Manager+ only, matching the two routes behind it
+                (requireAtLeast("manager")) and canDeleteSite, which is who can
+                put a site in the bin in the first place. A row leading to a
+                screen that can only 403 reads as a broken feature, which is why
+                the predicate is shared rather than restated here.
+
+                Unlike the Offline Sync row above, this one is NOT conditional
+                on having something to show: it costs a request to find out
+                whether the bin is empty, and a person looking for a site they
+                deleted needs to find the bin by looking at Settings, not by the
+                row happening to be there. Phase 6. */}
+            {canSeeSiteBin(user?.companyRole) && (
+              <>
+                <SettingsRow
+                  icon="trash-bin-outline"
+                  label="Deleted Sites"
+                  description="Restore a site that was deleted."
+                  onPress={() => router.push("/settings/site-bin")}
                 />
                 <SettingsDivider />
               </>

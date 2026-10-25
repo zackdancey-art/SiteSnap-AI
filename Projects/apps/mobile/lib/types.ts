@@ -8,6 +8,23 @@ export interface Site {
   createdAt: string;
 }
 
+/**
+ * A site in the bin, as `GET /projects/sites/bin` returns it.
+ *
+ * Separate from `Site` rather than two optional fields on it, because every
+ * screen that renders a `Site` renders a CURRENT site, and a binned one must
+ * not be assignable to those props. A deleted site appearing in the sites list
+ * because the types allowed it is the failure this shape rules out.
+ *
+ * `daysInBin` and `retentionDays` are computed by the API, not here. Two clients
+ * each doing their own date arithmetic against a server timestamp is how they
+ * end up disagreeing about when something will be destroyed.
+ */
+export interface BinnedSite extends Site {
+  deletedAt: string;
+  daysInBin: number | null;
+}
+
 export interface AnnotationStroke {
   path: string;
   color: string;

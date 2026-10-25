@@ -32,8 +32,8 @@ import {
  * a screen, so the change is deliberate and visible in review rather than a
  * count drifting unobserved — the same bargain as scripts/run-tests.sh.
  */
-const EXPECTED_ROUTES = 33;
-const EXPECTED_SCREEN_HEADER = 11;
+const EXPECTED_ROUTES = 34;
+const EXPECTED_SCREEN_HEADER = 12;
 const EXPECTED_NATIVE_HEADER = 9;
 const EXPECTED_LAYOUTS = 2;
 
