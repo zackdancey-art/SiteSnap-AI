@@ -24,6 +24,9 @@ import {
   updateUserPassword,
   loadSessionIdentity,
   revokeAllSessions,
+  recordSignupConsent,
+  listConsents,
+  type SignupConsent,
 } from "../storage/authStore";
 import { acceptSiteInvite, deleteAllUserProjectData } from "../storage/projectsStore";
 import { soloCompanyIdForEmail } from "../utils/authToken";
@@ -42,6 +45,7 @@ import {
 } from "../middleware/auth";
 import { createAuthToken, verifyAuthTokenForRefresh } from "../utils/authToken";
 import { isDisposableEmailDomain } from "../utils/disposableDomains";
+import { parseSignupConsent } from "../utils/signupConsent";
 import {
   isRateLimitedByIp,
   isRateLimitedByAccount,
@@ -138,6 +142,31 @@ async function initiateRegistration(req: Request, res: Response) {
     return res.status(400).json({ error: "Password must be at least 8 characters." });
   }
 
+  // Terms and privacy consent (L60 / workstream 7). Read here, with the other
+  // field validations and BEFORE any OTP quota is spent, so a client that sends
+  // a malformed consent is refused without costing the account an email or an
+  // SMS allowance.
+  //
+  // `absent` passes deliberately. See utils/signupConsent.ts for why -- in
+  // short, shipped clients do not send these fields yet and the API deploys
+  // ahead of them, so requiring consent here would break every signup for the
+  // length of that window. The clients are what refuse; this records.
+  const consentResult = parseSignupConsent(req.body);
+  if (consentResult.kind === "invalid") {
+    return res.status(400).json({ error: consentResult.error });
+  }
+  // The server's clock, not the handset's. The version string is evidence of
+  // what the client displayed, which only the client knows; the time is
+  // evidence against the client, and a device clock is not evidence at all.
+  const signupConsent: SignupConsent | null =
+    consentResult.kind === "accepted"
+      ? {
+          termsVersion: consentResult.termsVersion,
+          privacyVersion: consentResult.privacyVersion,
+          acceptedAt: new Date(),
+        }
+      : null;
+
   // OTP send limits checked after field validation so only real-looking addresses consume quota
   if (await isRateLimitedByAccount(email, "otp-send", LIMITS.otpSendPerAccount.max, LIMITS.otpSendPerAccount.windowMs)) {
     return res.status(429).json({ error: "Too many verification codes requested for this account. Please try again shortly." });
@@ -199,7 +228,8 @@ async function initiateRegistration(req: Request, res: Response) {
       `${passwordHash}::${fullName}::${role}::${companyName ?? ""}`,
       phone,
       emailCode,
-      new Date(Date.now() + verificationTtlMs)
+      new Date(Date.now() + verificationTtlMs),
+      signupConsent
     );
 
     // STAGE 1 — email only. No SMS is sent here, and none can be until this
@@ -448,6 +478,45 @@ router.post("/auth/register/verify", async (req, res) => {
     // partial index makes that possible, and for the one consequence: such a
     // row cannot be looked up by phone.
     const phoneToStore = isTestPhoneNumber(pending.phone) ? null : pending.phone;
+
+    // Consent is written BEFORE the user row, and the ordering is the point.
+    //
+    // user_consents has no foreign key to auth_users (migration 035 says why),
+    // so it may be written first -- and writing it first makes the legal record
+    // a precondition of the account rather than a step that can be skipped
+    // after the account exists. If this throws, the signup 500s with no user
+    // created and the person simply retries; the pending row is still here,
+    // untouched, because it is deleted below. The other ordering fails the
+    // other way: an account that exists with no record of what its owner
+    // agreed to, and a 500 that cannot be retried because the email is now
+    // taken.
+    //
+    // The cost of this ordering is a consent row for an account that then
+    // failed to create. That row is harmless -- it records something true, that
+    // this address accepted these documents at this time -- and the ledger is
+    // append-only, so the eventual successful signup adds its own.
+    //
+    // A pending row with no consent is an older client (see
+    // utils/signupConsent.ts). Nothing is written for it, rather than a row
+    // claiming an agreement nobody gave.
+    const consentRecorded = Boolean(
+      pending.consentAcceptedAt && pending.termsVersion && pending.privacyVersion
+    );
+    if (consentRecorded) {
+      await recordSignupConsent(
+        email,
+        {
+          termsVersion: pending.termsVersion as string,
+          privacyVersion: pending.privacyVersion as string,
+          // The time the person actually ticked the boxes at stage 1, not now.
+          // Now is minutes later and two verification codes away, and stamping
+          // it would make the record look precise while being wrong.
+          acceptedAt: new Date(pending.consentAcceptedAt as string),
+        },
+        "signup"
+      );
+    }
+
     await createUser(email, passwordHash, phoneToStore, fullName, legacyRole, companyId, companyRole);
     await deletePendingRegistration(email);
 
@@ -484,6 +553,11 @@ router.post("/auth/register/verify", async (req, res) => {
         companyId: user.companyId,
         companyRole: user.companyRole,
       },
+      // Whether a consent record was written for this account. False means the
+      // client did not send consent -- an older build -- not that it was
+      // refused. Reported rather than silent so that the gap is observable from
+      // outside the database while the clients catch up.
+      consentRecorded,
     });
   } catch (error) {
     if (isUniqueViolation(error)) {
@@ -605,6 +679,35 @@ const AccountSettingsPatchSchema = z.object({
   display: DisplaySettingsSchema,
   export: ExportSettingsSchema,
 }).partial().strict();
+
+/**
+ * What this person agreed to, and when.
+ *
+ * The read side of the consent record. It exists because a consent record the
+ * person it concerns cannot see is evidence for one party only, and because the
+ * privacy policy this records agreement to is a document about them.
+ *
+ * SCOPING. `auth.email` comes from the verified token (middleware/auth.ts), and
+ * it is the only input -- there is no path parameter, no query parameter and no
+ * body. user_consents has no row level security, deliberately (migration 035),
+ * so this line is the entire isolation for the table and is written as narrowly
+ * as it can be: no caller can name another address.
+ *
+ * Called from Projects/apps/mobile/app/settings/data-privacy.tsx, the screen
+ * that already links to both documents.
+ */
+router.get("/auth/consents", requireAuth, async (req: Request, res: Response) => {
+  const auth = (req as AuthenticatedRequest).auth;
+  const consents = await listConsents(auth.email);
+  return res.json({
+    consents: consents.map((consent) => ({
+      document: consent.document,
+      version: consent.version,
+      acceptedAt: consent.acceptedAt,
+      source: consent.source,
+    })),
+  });
+});
 
 router.get("/account/settings", requireAuth, async (req: Request, res: Response) => {
   const auth = (req as AuthenticatedRequest).auth;

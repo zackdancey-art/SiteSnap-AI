@@ -224,6 +224,21 @@ module.exports = {
       //                   company_id predicate, so there is no tenant context
       //                   for withTenant to set here. Exact filename again.
         "services/api/src/routes/sessions-and-tokens-db.test.ts",
+      //   routes/signup-consent-db.test.ts
+      //                   migrations and the drain as above, plus three reads a
+      //                   store cannot give it, all of them about the schema
+      //                   rather than about data: that the `document` CHECK
+      //                   constraint actually refuses a third value, that
+      //                   `auth_pending_registrations` holds no row for a
+      //                   refused signup (a 400 response does not say whether a
+      //                   row was left behind), and that `user_consents` is NOT
+      //                   row-level-security-forced, which is a deliberate
+      //                   decision recorded in migration 035 and is a fact only
+      //                   pg_class can answer. `user_consents` has no company_id
+      //                   at all, so there is no tenant context for withTenant
+      //                   to set; every row the file writes through the product
+      //                   goes through authStore. Exact filename again.
+        "services/api/src/routes/signup-consent-db.test.ts",
       ],
       rules: {
         "no-restricted-imports": [
