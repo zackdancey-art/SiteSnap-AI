@@ -273,6 +273,29 @@ module.exports = {
       //                   company_id predicate, so there is no tenant context
       //                   for withTenant to set here. Exact filename again.
         "services/api/src/routes/sessions-and-tokens-db.test.ts",
+      //   routes/site-bin-db.test.ts
+      //                   migrations and the drain as above, plus two kinds of
+      //                   read that are deliberately NOT tenanted: four
+      //                   information_schema/catalogue queries (which prove the
+      //                   soft-delete column exists with the right type and
+      //                   nullability, and that it does NOT exist on the tables
+      //                   the registry says are hard-deleted), and two reads of
+      //                   `auth_users`, which carries no RLS and no company_id
+      //                   predicate -- one of them being what supplies the
+      //                   tenant for everything else.
+      //
+      //                   Every read of a tenanted table in that file goes
+      //                   through withTenant, and this rule is why. Four of them
+      //                   were written as bare pool queries against
+      //                   project_sites and project_entries -- both FORCE ROW
+      //                   LEVEL SECURITY -- and would have matched zero rows
+      //                   with no error. The partition assertion among them
+      //                   would have read `0 + 0 === 0` and PASSED: a vacuous
+      //                   assertion in the suite guarding the one destructive
+      //                   feature in the phase. There is no Postgres in the
+      //                   environment it was written in, so nothing would have
+      //                   run it; this rule is what caught it. Exact filename.
+        "services/api/src/routes/site-bin-db.test.ts",
       ],
       rules: {
         "no-restricted-imports": [
