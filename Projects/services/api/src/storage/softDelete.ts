@@ -119,15 +119,63 @@ export function assertSoftDeletable(table: string): SoftDeletableTable {
  * every statement it appears in), but requiring the argument is what makes the
  * type check load-bearing rather than decorative.
  */
-export function liveOnly(table: SoftDeletableTable): string {
+export function liveOnly(table: SoftDeletableTable, alias?: string): string {
   assertSoftDeletable(table);
-  return `${SOFT_DELETE_COLUMN} IS NULL`;
+  return `${qualifier(alias)}${SOFT_DELETE_COLUMN} IS NULL`;
 }
 
 /** `deleted_at IS NOT NULL` — the predicate for "in the bin", for bin listings. */
-export function deletedOnly(table: SoftDeletableTable): string {
+export function deletedOnly(table: SoftDeletableTable, alias?: string): string {
   assertSoftDeletable(table);
-  return `${SOFT_DELETE_COLUMN} IS NOT NULL`;
+  return `${qualifier(alias)}${SOFT_DELETE_COLUMN} IS NOT NULL`;
+}
+
+/**
+ * Optional table qualifier for the predicates above, e.g. `s.` for `s.deleted_at`.
+ *
+ * Needed by exactly two shapes: a join that selects from `project_sites` under
+ * an alias, and the correlated subquery in `onLiveSite` below. Unqualified is
+ * correct everywhere else, because no statement in this codebase mentions two
+ * tables that both have the column.
+ *
+ * The alias is interpolated into SQL, so it is checked rather than trusted. It
+ * is always a literal written by us a few lines from the call — never input —
+ * but "never input" is what was believed about the L99 predicate too.
+ */
+function qualifier(alias?: string): string {
+  if (alias === undefined) return "";
+  if (!/^[a-z_][a-z0-9_]*$/i.test(alias)) {
+    throw new Error(`invalid SQL alias ${JSON.stringify(alias)}: expected a plain identifier`);
+  }
+  return `${alias}.`;
+}
+
+/**
+ * `EXISTS (SELECT 1 FROM project_sites … )` — "this child row's site is not in
+ * the bin".
+ *
+ * Binning a site has to hide its entries and diaries, or the field app shows a
+ * feed of entries belonging to a site that is no longer listed, with no way to
+ * open or restore them. That is worse than either state on its own.
+ *
+ * It is a correlated EXISTS rather than a join because the callers build their
+ * WHERE as an array of conditions and a join would change their shape — and
+ * because `project_entries` and `project_diaries` have no `deleted_at` of their
+ * own, so there is nothing to confuse the unqualified column with.
+ *
+ * `siteIdExpr` is the OUTER column, qualified by the caller if its statement has
+ * aliases. Same identifier check as `qualifier`, for the same reason.
+ */
+export function onLiveSite(siteIdExpr = "site_id"): string {
+  if (!/^[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*)?$/i.test(siteIdExpr)) {
+    throw new Error(
+      `invalid column reference ${JSON.stringify(siteIdExpr)}: expected name or alias.name`
+    );
+  }
+  return (
+    `EXISTS (SELECT 1 FROM project_sites AS live_site ` +
+    `WHERE live_site.id = ${siteIdExpr} AND ${liveOnly("project_sites", "live_site")})`
+  );
 }
 
 /**

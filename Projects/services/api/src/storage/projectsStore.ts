@@ -8,6 +8,14 @@ import { canEditRow, canReadRow, editOwnershipSql, readVisibilitySql } from "./r
 import { FileBackedStore } from "./fileStore";
 import { findUserByEmail, setUserCompany, invalidateSessionIdentity } from "./authStore";
 import { withTenant } from "./tenant";
+import {
+  SOFT_DELETE_COLUMN,
+  deletedOnly,
+  liveOnly,
+  onLiveSite,
+  restoreAssignment,
+  softDeleteAssignment,
+} from "./softDelete";
 import { DiaryProvenance } from "../services/diaryProvenance";
 import { normalizeEmail, sameEmail } from "../utils/emailAddresses";
 
@@ -26,14 +34,13 @@ export type SiteRecord = {
   status: SiteStatus;
   createdAt: string;
   progressPercent?: number;
-  // NO `deletedAt`. A site is HARD deleted in both stores — `deleteSite` does
-  // `memory.sites.delete(...)` and `DELETE FROM project_sites`, and
-  // `project_sites` has no `deleted_at` column in any migration. The field used
-  // to be declared here and was never written by anything, which is how a
-  // `deleted_at IS NULL` predicate came to sit in `updateSiteProgress` against
-  // a column that does not exist. Soft-delete for sites is Phase 6, with the
-  // bin and the 90-day purge; it arrives with a migration, a mapper and a list
-  // filter, the way the other four record types have it. See AUDIT L99.
+  // Phase 6. This field used to be declared here, be written by nothing, and
+  // have no column behind it — which is how a `deleted_at IS NULL` predicate
+  // came to sit in `updateSiteProgress` against a column that did not exist
+  // (AUDIT L99). It now has all three: migration 034 adds the column, the bin
+  // writes it, and every predicate naming it comes from storage/softDelete.ts
+  // rather than being written out. ISO string when binned, null when live.
+  deletedAt?: string | null;
 };
 
 export type EntryRecord = {
@@ -274,6 +281,7 @@ function mapSite(row: {
   start_date: string;
   status: SiteStatus;
   created_at: Date;
+  deleted_at?: Date | null;
 }): SiteRecord {
   return {
     id: row.id,
@@ -285,6 +293,7 @@ function mapSite(row: {
     startDate: row.start_date,
     status: row.status,
     createdAt: row.created_at.toISOString(),
+    deletedAt: row.deleted_at ? row.deleted_at.toISOString() : null,
   };
 }
 
@@ -370,6 +379,7 @@ type SiteRow = {
   start_date: string;
   status: SiteStatus;
   created_at: Date;
+  deleted_at: Date | null;
 };
 
 export async function listSites(actor: Actor, limit = 200, offset = 0): Promise<SiteRecord[]> {
@@ -377,6 +387,7 @@ export async function listSites(actor: Actor, limit = 200, offset = 0): Promise<
     await ensureMemoryLoaded();
     return Array.from(memory.sites.values())
       .filter((site) => canReadRow(actor, "site", site))
+      .filter((site) => !site.deletedAt)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(offset, offset + limit);
   }
@@ -386,7 +397,7 @@ export async function listSites(actor: Actor, limit = 200, offset = 0): Promise<
   const result = await withTenant(actor, (client) =>
     client.query<SiteRow>(
       `SELECT * FROM project_sites
-       WHERE company_id = $1
+       WHERE company_id = $1 AND ${liveOnly("project_sites")}
        ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
       [actor.companyId, limit, offset]
     )
@@ -422,12 +433,37 @@ export async function createSite(
   return mapSite(result.rows[0]);
 }
 
+/**
+ * Puts a site in the bin. NOTHING IS REMOVED.
+ *
+ * WHAT THIS REPLACED, because the difference is the whole justification for the
+ * migration: `deleteSite` used to run `DELETE FROM project_sites`, and nine
+ * tables carry `REFERENCES project_sites(id) ON DELETE CASCADE` —
+ * project_entries, project_diaries, project_templates, site_members,
+ * site_invites, crew_timecards, incidents, inspections, material_deliveries.
+ * So one manager tapping Delete destroyed every photograph, diary, timecard,
+ * incident, inspection and delivery record on that site, irrecoverably and with
+ * no confirmation step beyond the client's own.
+ *
+ * Four of those nine tables — crew_timecards, incidents, inspections,
+ * material_deliveries — were deliberately given a `deleted_at` column precisely
+ * because they hold compliance evidence that must survive deletion. Their soft
+ * delete was defeated by the hard delete of their parent. This is the finding
+ * that makes the bin strictly safer than what shipped, rather than merely
+ * nicer: a site in the bin keeps all nine tables' rows intact, and restoring it
+ * brings back the records, not just the row.
+ *
+ * Returns false for a site that is already in the bin, so a double delete is
+ * not reported as two successful deletions.
+ */
 export async function deleteSite(actor: Actor, siteId: string): Promise<boolean> {
   if (!useDatabase()) {
     await ensureMemoryLoaded();
     const existing = memory.sites.get(siteId);
     // Cross-company guard: never touch another company's site.
     if (!existing || existing.companyId !== actor.companyId) return false;
+    // Already in the bin — not an error, but not a second deletion either.
+    if (existing.deletedAt) return false;
     // Crew may only delete sites they own — which is none, since crew cannot
     // create a site. This is deliberately NOT routed through canEditRow: the
     // route is requireAtLeast("manager"), so the branch is unreachable for
@@ -437,28 +473,102 @@ export async function deleteSite(actor: Actor, siteId: string): Promise<boolean>
     // cascade rather than express the rule. The two layers disagreeing is the
     // point; see the note on RECORD_CLASS in recordScope.ts.
     if (isCrew(actor) && existing.ownerEmail !== actor.email) return false;
-    memory.sites.delete(siteId);
-    for (const [entryId, entry] of memory.entries.entries()) {
-      if (entry.siteId === siteId) memory.entries.delete(entryId);
-    }
-    for (const [diaryId, diary] of memory.diaries.entries()) {
-      if (diary.siteId === siteId) memory.diaries.delete(diaryId);
-    }
+    memory.sites.set(siteId, { ...existing, deletedAt: new Date().toISOString() });
+    // The entry and diary loops that used to be here are GONE, not moved. They
+    // mirrored the Postgres CASCADE by deleting children from the maps; keeping
+    // them would mean the in-memory store still destroyed what Postgres now
+    // retains, which is the exact store-divergence class this project keeps
+    // finding. Children are hidden by the `onLiveSite` filter on their listings,
+    // not deleted.
     await persistMemory();
     return true;
   }
   const result = await withTenant(actor, (client) =>
     isCrew(actor)
       ? client.query(
-          `DELETE FROM project_sites WHERE id = $1 AND company_id = $2 AND owner_email = $3`,
+          `UPDATE project_sites SET ${softDeleteAssignment("project_sites")}
+           WHERE id = $1 AND company_id = $2 AND owner_email = $3 AND ${liveOnly("project_sites")}`,
           [siteId, actor.companyId, actor.email]
         )
       : client.query(
-          `DELETE FROM project_sites WHERE id = $1 AND company_id = $2`,
+          `UPDATE project_sites SET ${softDeleteAssignment("project_sites")}
+           WHERE id = $1 AND company_id = $2 AND ${liveOnly("project_sites")}`,
           [siteId, actor.companyId]
         )
   );
   return (result.rowCount ?? 0) > 0;
+}
+
+/**
+ * The bin: sites deleted but not purged, newest deletion first.
+ *
+ * Deliberately NOT a `listSites` flag. A boolean parameter on the live listing
+ * would mean every existing caller is one typo away from showing deleted sites
+ * as current ones, and the compiler could not tell the difference. A separate
+ * function has a separate call site, which is a thing a reader can find.
+ */
+export async function listBinnedSites(actor: Actor, limit = 200, offset = 0): Promise<SiteRecord[]> {
+  if (!useDatabase()) {
+    await ensureMemoryLoaded();
+    return Array.from(memory.sites.values())
+      .filter((site) => canReadRow(actor, "site", site))
+      .filter((site) => Boolean(site.deletedAt))
+      .sort((a, b) => String(b.deletedAt).localeCompare(String(a.deletedAt)))
+      .slice(offset, offset + limit);
+  }
+  const result = await withTenant(actor, (client) =>
+    client.query<SiteRow>(
+      `SELECT * FROM project_sites
+       WHERE company_id = $1 AND ${deletedOnly("project_sites")}
+       ORDER BY ${SOFT_DELETE_COLUMN} DESC LIMIT $2 OFFSET $3`,
+      [actor.companyId, limit, offset]
+    )
+  );
+  return result.rows.map(mapSite);
+}
+
+/**
+ * Takes a site back out of the bin.
+ *
+ * Authorization is spelled out here rather than delegated to `canManageSite`,
+ * and that is not duplication: `canManageSite` now requires the site to be
+ * LIVE, because a binned site must not accept member changes or progress
+ * updates. Restore is the one operation that must see a binned site, so it
+ * cannot ask a question whose answer is always no. The rule it applies is the
+ * same one `deleteSite` applies, read from the same row.
+ *
+ * Returns false for a site that is already live, so restoring twice is not
+ * reported as two restores.
+ */
+export async function restoreSite(actor: Actor, siteId: string): Promise<SiteRecord | null> {
+  if (!useDatabase()) {
+    await ensureMemoryLoaded();
+    const existing = memory.sites.get(siteId);
+    if (!existing || existing.companyId !== actor.companyId) return null;
+    if (!existing.deletedAt) return null;
+    if (isCrew(actor) && existing.ownerEmail !== actor.email) return null;
+    const restored: SiteRecord = { ...existing, deletedAt: null };
+    memory.sites.set(siteId, restored);
+    await persistMemory();
+    return restored;
+  }
+  const result = await withTenant(actor, (client) =>
+    isCrew(actor)
+      ? client.query<SiteRow>(
+          `UPDATE project_sites SET ${restoreAssignment("project_sites")}
+           WHERE id = $1 AND company_id = $2 AND owner_email = $3 AND ${deletedOnly("project_sites")}
+           RETURNING *`,
+          [siteId, actor.companyId, actor.email]
+        )
+      : client.query<SiteRow>(
+          `UPDATE project_sites SET ${restoreAssignment("project_sites")}
+           WHERE id = $1 AND company_id = $2 AND ${deletedOnly("project_sites")}
+           RETURNING *`,
+          [siteId, actor.companyId]
+        )
+  );
+  if (result.rowCount === 0) return null;
+  return mapSite(result.rows[0]);
 }
 
 export async function listEntries(actor: Actor, siteId?: string, limit = 200, offset = 0): Promise<EntryRecord[]> {
@@ -467,6 +577,7 @@ export async function listEntries(actor: Actor, siteId?: string, limit = 200, of
     return Array.from(memory.entries.values())
       .filter((entry) => canReadRow(actor, "entry", entry))
       .filter((entry) => (siteId ? entry.siteId === siteId : true))
+      .filter((entry) => !memory.sites.get(entry.siteId)?.deletedAt)
       .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
       .slice(offset, offset + limit);
   }
@@ -474,7 +585,7 @@ export async function listEntries(actor: Actor, siteId?: string, limit = 200, of
   // Always company-scoped, and for entries that is the whole of it — a company
   // crew member reads every entry on every site. See readVisibility.
   const params: unknown[] = [actor.companyId];
-  const queryParts: string[] = [`company_id = $1`];
+  const queryParts: string[] = [`company_id = $1`, onLiveSite()];
   const visibility = readVisibilitySql(actor, "entry", params);
   if (visibility) queryParts.push(visibility);
   if (siteId) {
@@ -639,11 +750,12 @@ export async function listDiaries(actor: Actor, siteId?: string, limit = 200, of
     return Array.from(memory.diaries.values())
       .filter((diary) => canReadRow(actor, "diary", diary))
       .filter((diary) => (siteId ? diary.siteId === siteId : true))
+      .filter((diary) => !memory.sites.get(diary.siteId)?.deletedAt)
       .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt))
       .slice(offset, offset + limit);
   }
   const params: unknown[] = [actor.companyId];
-  const queryParts: string[] = [`company_id = $1`];
+  const queryParts: string[] = [`company_id = $1`, onLiveSite()];
   const visibility = readVisibilitySql(actor, "diary", params);
   if (visibility) queryParts.push(visibility);
   if (siteId) {
@@ -890,7 +1002,7 @@ export async function getSupervisorReport(actor: Actor): Promise<SupervisorRepor
       FROM project_sites s
       LEFT JOIN project_entries e ON e.site_id = s.id
       LEFT JOIN project_diaries d ON d.site_id = s.id
-      WHERE s.company_id = $1
+      WHERE s.company_id = $1 AND ${liveOnly("project_sites", "s")}
       GROUP BY s.id, s.name, s.client, s.status, s.owner_email
       ORDER BY s.created_at DESC
     `, [actor.companyId])
@@ -1138,12 +1250,17 @@ async function canManageSite(actor: Actor, siteId: string): Promise<boolean> {
     await ensureMemoryLoaded();
     const site = memory.sites.get(siteId);
     if (!site || site.companyId !== actor.companyId) return false;
+    // A site in the bin accepts no management: no member changes, no invites, no
+    // progress. `restoreSite` deliberately does NOT call this, because the one
+    // operation a binned site must accept is coming back out.
+    if (site.deletedAt) return false;
     if (actor.companyRole === "owner" || actor.companyRole === "manager") return true;
     return site.ownerEmail === actor.email;
   }
   const r = await withTenant(actor, (client) =>
     client.query<{ owner_email: string; company_id: string }>(
-      `SELECT owner_email, company_id FROM project_sites WHERE id = $1 LIMIT 1`,
+      `SELECT owner_email, company_id FROM project_sites
+       WHERE id = $1 AND ${liveOnly("project_sites")} LIMIT 1`,
       [siteId]
     )
   );
@@ -1805,6 +1922,8 @@ export async function updateSiteProgress(actor: Actor, siteId: string, progressP
     // RECORD_CLASS calls it `shared-site-attribute` and canEditRow admits
     // anyone in the company, which is what production already did.
     if (!canEditRow(actor, "site", existing)) return null;
+    // A site in the bin takes no progress updates.
+    if (existing.deletedAt) return null;
     const updated: SiteRecord = { ...existing, progressPercent: pct };
     memory.sites.set(siteId, updated);
     await persistMemory();
@@ -1812,12 +1931,19 @@ export async function updateSiteProgress(actor: Actor, siteId: string, progressP
   }
   const result = await withTenant(actor, (client) =>
     client.query<SiteRow & { progress_percent: number }>(
-      // No `deleted_at IS NULL` here: project_sites has no such column, so this
-      // statement used to fail with `column "deleted_at" does not exist` on
-      // EVERY call against Postgres. AUDIT L99. Removing the predicate is the
-      // fix rather than adding the column — soft-delete is Phase 6.
+      // THIS IS THE L99 STATEMENT. It carried a hand-written `deleted_at IS
+      // NULL` against a table with no such column, so every progress update
+      // against Postgres failed with `column "deleted_at" does not exist` —
+      // site progress had never once worked in production. It was fixed by
+      // deleting the predicate, with a note that soft-delete was Phase 6.
+      //
+      // This is Phase 6. The predicate is back because it is now correct: the
+      // column exists (migration 034) and the predicate comes from
+      // storage/softDelete.ts, where the table name is type-checked against the
+      // explicit list of tables that have it. The same words, arrived at the
+      // other way round.
       `UPDATE project_sites SET progress_percent = $2
-       WHERE id = $1 AND company_id = $3 RETURNING *`,
+       WHERE id = $1 AND company_id = $3 AND ${liveOnly("project_sites")} RETURNING *`,
       [siteId, pct, actor.companyId]
     )
   );
