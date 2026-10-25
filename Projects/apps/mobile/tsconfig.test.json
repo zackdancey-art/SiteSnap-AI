@@ -65,6 +65,8 @@
     "lib/session-routing-audit.ts",
     "lib/session-routing-audit.test.ts",
     "lib/native-permission-audit.ts",
-    "lib/native-permission-audit.test.ts"
+    "lib/native-permission-audit.test.ts",
+    "lib/consent-summary.ts",
+    "lib/consent-summary.test.ts"
   ]
 }
