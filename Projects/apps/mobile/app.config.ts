@@ -26,39 +26,59 @@ const IS_DEV = APP_ENV !== "production";
 const UPDATES_ENABLED = APP_ENV === "production" || APP_ENV === "preview";
 
 /**
- * The iOS location purpose string -- ONE constant, used in both places that
- * set it.
+ * LOCATION PERMISSION DECLARATIONS -- REMOVED DELIBERATELY, AND CHEAP TO RESTORE.
  *
- * Two problems, one fix.
+ * AUDIT L60. This app declared the iOS NSLocationWhenInUseUsageDescription
+ * purpose string (twice -- once here in `ios.infoPlist` and once through the
+ * `expo-location` config plugin, both writing the same Info.plist key) and the
+ * Android ACCESS_FINE_LOCATION / ACCESS_COARSE_LOCATION permissions, for a
+ * feature that has no entry point in the shipping app.
  *
- * FIRST, it was set twice with different wording: `ios.infoPlist`
- * .NSLocationWhenInUseUsageDescription said "...for site diary entries" and
- * the `expo-location` plugin's `locationWhenInUsePermission` said "...for site
- * entries". Both write the same Info.plist key during prebuild, so which text
- * a user actually saw depended on mod ordering, and nothing reported the
- * disagreement. One constant makes the question stop mattering.
+ * lib/location-service.ts still exports requestPermissionAndStart, startTracking
+ * and setLocationTrackingEnabled, and nothing calls any of them. The module's
+ * only external importer is app/_layout.tsx, which calls resumeTrackingIfEnabled;
+ * the persisted flag that resumes can never have been set, because its only
+ * writer is requestPermissionAndStart. So the binary was telling App Store
+ * review that SiteSnap collects location, for a capability no user can switch
+ * on. Declaring a permission the app cannot request is a documented review
+ * rejection reason, and nobody has asked for the feature yet.
  *
- * SECOND, and the reason this is being touched now: both said the location was
- * used to auto-fill WEATHER. That was true of the only caller that existed.
- * Part 3 turns on location tracking, which is a materially different thing --
- * it is employee monitoring, and the people monitored are crew members invited
- * by their employer. A permission prompt that says "weather" while the app
- * records where someone is working is a false statement at the exact moment
- * consent is being asked for.
+ * WHAT WAS REMOVED IS WRITTEN OUT BELOW RATHER THAN DELETED, so restoring it is
+ * uncommenting rather than rediscovering. Four places, all in this file:
  *
- * So the string is widened now, in the one native commit, rather than at the
- * point the feature lands. Declaring a purpose before the feature ships is
- * harmless -- iOS only surfaces the string when the permission is actually
- * requested -- and it means Part 3 costs no second native build.
+ * // const LOCATION_WHEN_IN_USE_PURPOSE =
+ * //   "SiteSnap uses your location to record where site photos and diary entries were made, " +
+ * //   "and to fill in local weather conditions. If your employer enables location tracking, " +
+ * //   "SiteSnap also records your location while you are using the app for work; you can see " +
+ * //   "whether that is on in Settings.";
+ * //
+ * // ios.infoPlist:       NSLocationWhenInUseUsageDescription: LOCATION_WHEN_IN_USE_PURPOSE,
+ * // android.permissions: "ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION",
+ * // plugins:             ["expo-location", { locationWhenInUsePermission: LOCATION_WHEN_IN_USE_PURPOSE }],
  *
- * The in-app explanation Part 3 shows BEFORE this prompt is a separate thing
- * and is not a substitute for it.
+ * The three use sites are each marked `L60:` where they stood.
+ *
+ * KEEP THAT WORDING if the feature comes back. The string above is already the
+ * repaired one: the two declarations used to carry different text (`ios.infoPlist`
+ * said "...for site diary entries", the plugin said "...for site entries"), and
+ * because both write the same key, which sentence a user actually saw depended on
+ * config-plugin mod ordering with nothing reporting the disagreement. It was then
+ * widened from weather-only to cover tracking, because a prompt that says
+ * "weather" while the app records where someone is working is a false statement at
+ * the exact moment consent is being asked for.
+ *
+ * `expo-location` stays in package.json on purpose. Expo autolinking reads
+ * dependencies, not this `plugins` array, so the native module is still linked and
+ * the surviving `import * as Location from "expo-location"` in
+ * lib/location-service.ts compiles and boots exactly as before -- removing a
+ * plugin entry removes the Info.plist string, not the module.
+ *
+ * Restoring any of this needs a NATIVE REBUILD. None of it takes effect through
+ * `eas update`.
+ *
+ * Guarded by lib/app-config-permissions.test.ts, which asserts over this file's
+ * source with comments stripped first -- so the block above cannot satisfy it.
  */
-const LOCATION_WHEN_IN_USE_PURPOSE =
-  "SiteSnap uses your location to record where site photos and diary entries were made, " +
-  "and to fill in local weather conditions. If your employer enables location tracking, " +
-  "SiteSnap also records your location while you are using the app for work; you can see " +
-  "whether that is on in Settings.";
 
 const buildStamp = new Date().toISOString().replace("T", " ").slice(0, 16);
 
@@ -138,7 +158,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
           "SiteSnap accesses your photo library to attach existing site photos to diary entries.",
         NSPhotoLibraryAddUsageDescription:
           "SiteSnap saves exported site diaries and photos to your library.",
-        NSLocationWhenInUseUsageDescription: LOCATION_WHEN_IN_USE_PURPOSE,
+        // L60: NSLocationWhenInUseUsageDescription removed -- see the block at the top of this file.
         NSMicrophoneUsageDescription:
           "SiteSnap may use the microphone when recording video on site.",
         NSLocalNetworkUsageDescription:
@@ -171,8 +191,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       permissions: [
         "CAMERA",
         "READ_MEDIA_IMAGES",
-        "ACCESS_FINE_LOCATION",
-        "ACCESS_COARSE_LOCATION",
+        // L60: ACCESS_FINE_LOCATION and ACCESS_COARSE_LOCATION removed -- see the block at the top of this file.
         "RECEIVE_BOOT_COMPLETED",
         "VIBRATE",
       ],
@@ -210,14 +229,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         },
       ],
       ...(UPDATES_ENABLED ? ["expo-updates"] : []),
-      [
-        "expo-location",
-        {
-          // Same constant as `ios.infoPlist` above, deliberately: both write
-          // NSLocationWhenInUseUsageDescription.
-          locationWhenInUsePermission: LOCATION_WHEN_IN_USE_PURPOSE,
-        },
-      ],
+      // L60: the "expo-location" plugin entry removed -- see the block at the top of this file.
       [
         "expo-notifications",
         {
