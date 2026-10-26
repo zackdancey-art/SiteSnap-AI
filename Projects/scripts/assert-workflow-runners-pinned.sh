@@ -81,7 +81,7 @@ fi
 #    supposed to be regulating.
 PINNED="$(grep -rcE '^[[:space:]]*runs-on:[[:space:]]*ubuntu-[0-9]' "$WORKFLOW_DIR" \
           | awk -F: '{n+=$2} END {print n+0}')"
-EXPECTED_PINNED=3  # ci.yml has two jobs, build-mobile.yml one (deploy-api.yml deleted: HALF-BUILT F3)
+EXPECTED_PINNED=3  # build-mobile.yml has two jobs, ci.yml one (deploy-api.yml deleted: HALF-BUILT F3)
 if [ "$PINNED" != "$EXPECTED_PINNED" ]; then
   echo "FAIL: matched $PINNED pinned 'runs-on:' lines, expected $EXPECTED_PINNED." >&2
   echo "  Either a job was added or removed -- update this number in the same" >&2
