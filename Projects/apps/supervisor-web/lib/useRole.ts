@@ -2,7 +2,6 @@
 
 import { getSavedUser } from "./api";
 
-const RANK: Record<string, number> = { crew: 0, viewer: 1, manager: 2, owner: 3 };
 
 /**
  * The one role this phase's decision is about.
@@ -113,10 +112,21 @@ export function landingPath(companyRole: string | null | undefined): string {
 
 export function useRole() {
   const user = getSavedUser();
+  // AUDIT L83's fail-open used to be live through here. `isAtLeast` compared
+  // RANK[companyRole] with `?? 1` as its own fallback, so an unrecognised role
+  // -- a renamed role, a truncated field, a stale localStorage blob from an
+  // older build -- resolved to viewer RANK and was granted everything a viewer
+  // may do. It had no callers in the portal (HALF-BUILT F7), so the fail-open
+  // was latent rather than exploitable, and it is now deleted rather than left
+  // for the first caller to make live.
+  //
+  // What remains of the default is this string, which is a LABEL: it is
+  // returned for display and compared for exact equality below. Equality
+  // comparison fails closed on an unrecognised role, which is the property the
+  // rank comparison did not have.
   const companyRole = user?.companyRole ?? "viewer";
   return {
     companyRole,
-    isAtLeast: (min: string) => (RANK[companyRole] ?? 1) >= (RANK[min] ?? 0),
     isOwner: companyRole === "owner",
     isManager: companyRole === "manager" || companyRole === "owner",
     // Computed from the RAW value, not from `companyRole` above. The
