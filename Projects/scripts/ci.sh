@@ -120,14 +120,26 @@ step "Structural: workflow runners are pinned and action majors are current"
 step "Structural: exactly one @types/react in the installed tree"
 node ./scripts/assert-single-react-types.mjs
 
-# `project_sites.status` is declared five times in three packages with nothing
+# `project_sites.status` is declared six times in three packages with nothing
 # connecting any declaration to another, and the portal's two copies spelled
 # On Hold `on_hold` against the API's `on-hold` for the life of the feature —
 # three user-visible defects from one character, invisible to tsc because the
 # portal types that field as `string`. The portal has no test runner, so this is
-# the only thing that can hold the five in agreement.
-step "Structural: the site/diary status vocabularies agree across all packages"
+# the only thing that can hold the six in agreement. It now also compares the
+# two clients' LABELS, which is what let a finished site read "Complete" on the
+# portal and "Completed" on the phone.
+step "Structural: the site/diary status vocabularies and labels agree across all packages"
 node ./scripts/assert-site-status-vocabulary.mjs
+
+# One sentence of policy — the supervisor dashboard is manager+ on every
+# surface, invisible to crew — implemented twice, in two packages. They had
+# already disagreed for the life of the portal: mobile manager+, portal viewer+.
+# Mobile's half is a real test (lib/permissions.test.ts, all four roles both
+# ways); the portal's half has nothing, because apps/supervisor-web has no test
+# program, and reverting its predicate to viewer+ was measured to leave
+# typecheck, lint and both other suites green.
+step "Structural: both clients agree on who may see the supervisor dashboard"
+node ./scripts/assert-dashboard-rank.mjs
 
 # AUDIT L63. The exported diary/inspection PDF is the compliance evidence, and
 # its templates carried their own undocumented 14-colour palette — five frozen

@@ -44,7 +44,7 @@ function MetricCard({ label, value, accent, iconBg, icon, sub }: {
 
 export default function DashboardPage() {
   const user = getSavedUser();
-  const { canSeeSupervisorDashboard } = useRole();
+  const { canSeeSupervisorDashboard, isUnknownRole } = useRole();
   const bootstrap = useBootstrap();
   const data = bootstrap.status === "ok" ? bootstrap.data : null;
   const loading = bootstrap.status === "loading";
@@ -116,8 +116,25 @@ export default function DashboardPage() {
    * conditional, and `/projects/bootstrap` is a route crew are entitled to in
    * any case, since the whole field product reads it. What is withheld is the
    * supervision VIEW of that data, which is what the decision names. The
-   * dashboard's own route, GET /projects/reports/supervisor, is viewer+ and
-   * refuses crew at the API regardless of what this component does.
+   * route this screen's figures come from, GET /projects/summary, is viewer+ and
+   * refuses CREW at the API regardless of what this component does — but it
+   * does answer a viewer, who no longer sees this screen. So for a viewer this
+   * is a screen withheld, not data withheld, and the PR body says so rather
+   * than letting the refusal imply otherwise.
+   *
+   * GET /projects/reports/supervisor is viewer+ too and is often described as
+   * this screen's other route. It is not: nothing in either client calls it.
+   * Both export their report HTML locally from bootstrap data. Checked with
+   * `grep -rn "reports/supervisor" Projects/apps`, which returns only comments.
+   *
+   * TWO REFUSALS, NOT ONE
+   *
+   * An absent or unrecognised role is refused here, same as crew — the
+   * predicate names the two roles it admits. But it is a different problem with
+   * a different fix: `companyRole` is optional on the saved user, so a session
+   * stored by an older build can carry none, and telling a manager the
+   * dashboard is for managers would be both untrue and unactionable. The second
+   * branch tells them the one thing that fixes it.
    */
   if (!canSeeSupervisorDashboard) {
     return (
@@ -127,14 +144,29 @@ export default function DashboardPage() {
           <Topbar title="Dashboard" />
           <div className="page-body">
             <div className="card" style={{ padding: 28, maxWidth: 560 }}>
-              <h1 style={{ fontSize: 18, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>
-                You don&apos;t have access to this
-              </h1>
-              <p style={{ fontSize: 14, color: "var(--text-secondary)", marginBottom: 0 }}>
-                The dashboard is for managers and owners. Everything else you need — sites,
-                diaries, photos, timesheets and deliveries — is yours, and the quickest place
-                to do it is the SiteSnap app on your phone.
-              </p>
+              {isUnknownRole ? (
+                <>
+                  <h1 style={{ fontSize: 18, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>
+                    Sign in again to see this
+                  </h1>
+                  <p style={{ fontSize: 14, color: "var(--text-secondary)", marginBottom: 0 }}>
+                    We can&apos;t tell what your account&apos;s role is from this browser&apos;s saved
+                    session, so the dashboard is held back. Signing out and back in will settle it.
+                    Everything else in the portal still works in the meantime.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <h1 style={{ fontSize: 18, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>
+                    You don&apos;t have access to this
+                  </h1>
+                  <p style={{ fontSize: 14, color: "var(--text-secondary)", marginBottom: 0 }}>
+                    The dashboard is for managers and owners. Everything else you need — sites,
+                    diaries, photos, timesheets and deliveries — is yours, and the quickest place
+                    to do it is the SiteSnap app on your phone.
+                  </p>
+                </>
+              )}
             </div>
           </div>
         </div>
