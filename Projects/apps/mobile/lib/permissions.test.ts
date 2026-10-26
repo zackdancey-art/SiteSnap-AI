@@ -8,6 +8,7 @@ import {
   canInvite,
   canManageSiteMembers,
   canSeeSupervisorDashboard,
+  canVoidSignature,
   describeFailure,
   isForbidden,
 } from "./permissions";
@@ -76,6 +77,7 @@ test("crew are the only operational role refused nothing else — every predicat
     canManageSiteMembers,
     canChangeCompanySettings,
     canApproveDiary,
+    canVoidSignature,
   ];
   for (const p of predicates) {
     assert.equal(p("crew"), false, `${p.name} must refuse crew`);
@@ -114,6 +116,29 @@ test("approving a diary is manager+, and that is not the same as using diaries",
     Object.keys(permissionsModule).filter((k) => /diar/i.test(k)),
     ["canApproveDiary"],
     "exactly one diary predicate — a second one is probably a refusal of editing"
+  );
+});
+
+test("voiding a signature is manager+, and signing one is not", () => {
+  // AUDIT L91. Matches requireAtLeast("manager") on
+  // POST /inspections/:id/signatures/:sigId/void.
+  assert.equal(canVoidSignature("crew"), false);
+  assert.equal(canVoidSignature("viewer"), false);
+  assert.equal(canVoidSignature("manager"), true);
+  assert.equal(canVoidSignature("owner"), true);
+
+  // The same shape of trap as the diary predicate, in its sharpest form here:
+  // the fix for "crew can void" must not become "crew cannot sign". Crew are
+  // the inspectors — the signature this gate protects is usually theirs — so a
+  // canSignInspection predicate would be the defect, not the fix, and the
+  // assertion that no such predicate exists is the only one this file can make
+  // about it. The positive half, crew signing and being refused the void on the
+  // same inspection, is a Postgres probe in the API's
+  // routes/crew-permissions-db.test.ts.
+  assert.deepEqual(
+    Object.keys(permissionsModule).filter((k) => /sign(ature)?/i.test(k)),
+    ["canVoidSignature"],
+    "exactly one signature predicate — a second one is probably a refusal of signing"
   );
 });
 

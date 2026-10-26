@@ -31,7 +31,10 @@ set -eu
 cd "$(dirname "$0")/.."
 
 EXPECTED_TEST_FILES=15
-EXPECTED_TESTS=113
+# 114, not 113: lib/permissions.test.ts gained the canVoidSignature test
+# (AUDIT L91). Measured, not incremented -- the run that set this number
+# reported `# tests 114` with the pin still at 113 and failed on it.
+EXPECTED_TESTS=114
 
 FILE_LIST=$(find dist-test -name '*.test.js' | sort)
 

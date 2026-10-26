@@ -21,6 +21,8 @@ import { authedJson as apiJson } from "@/lib/authed-fetch";
 import { isSessionExpired } from "@/lib/session";
 import { describeIncompleteSignature, describeSignatureSaveFailure } from "@/lib/signature-input";
 import { useData, uploadPhotos } from "@/lib/data-context";
+import { useAuth } from "@/lib/auth-context";
+import { canVoidSignature, describeFailure } from "@/lib/permissions";
 import { ensureCameraAccess } from "@/lib/camera-access";
 import { CAPTION_MAX_LENGTH, createStoredPhoto } from "@/lib/photo-capture";
 import {
@@ -264,6 +266,14 @@ function ReadOnlyField({ label, value }: { label: string; value: string }) {
 export default function InspectionsScreen() {
   const { siteId } = useLocalSearchParams<{ siteId: string }>();
   const { getSite } = useData();
+  const { user } = useAuth();
+  /**
+   * AUDIT L91. Everything else on this screen is open to crew on purpose --
+   * crew inspect, and crew sign what they inspected. Retracting a signature is
+   * manager+, matching requireAtLeast("manager") on the void route, and this
+   * screen had no company-role check of any kind before this line.
+   */
+  const mayVoidSignature = canVoidSignature(user?.companyRole);
   const site = getSite(siteId);
   const insets = useSafeAreaInsets();
 
@@ -833,7 +843,12 @@ export default function InspectionsScreen() {
       // on its way to the sign-in screen. This feature must not also blame
       // itself for it - that substitution is the defect.
       if (isSessionExpired(err)) return;
-      Alert.alert("Error", "Failed to void signature.");
+      // And a 403 is neither a dead session nor a feature failure. The control
+      // above is hidden for crew, but hiding is not enforcing: a stale `user`
+      // rehydrated from storage, or a demotion mid-session, reaches this line
+      // with the button still drawn. describeFailure keeps the server's "you
+      // may not do this" from being reported as "it broke" (AUDIT L73).
+      Alert.alert("Error", describeFailure(err, "Failed to void signature."));
     } finally {
       setVoiding(false);
     }
@@ -1271,7 +1286,7 @@ export default function InspectionsScreen() {
                     {sig.status === "voided" && sig.voidedReason ? (
                       <Text style={styles.voidedReason}>Voided: {sig.voidedReason}</Text>
                     ) : null}
-                    {sig.status === "active" && (
+                    {sig.status === "active" && mayVoidSignature && (
                       <Pressable style={styles.voidBtn} onPress={() => setVoidTarget(sig)}>
                         <Text style={styles.voidBtnText}>Void</Text>
                       </Pressable>

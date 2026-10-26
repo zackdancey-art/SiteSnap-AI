@@ -127,7 +127,12 @@ if (!process.env.TEST_DATABASE_URL) {
   // died there on a client timeout. So step 14 never executed, this assertion
   // was never reached, and this count had never been taken. AUDIT L99.
   const EXPECTED_WRITE_STEPS = 14;
-  const EXPECTED_REFUSALS = 15;
+  // 16, not 15. The sixteenth is voiding an inspection signature (AUDIT L91),
+  // which was decided manager+ and then never built: the route carried only
+  // FIELD_ACCESS — identity, not rank — on main and on every feature branch, so
+  // any crew member with a login could retract any signature in their company.
+  // Measured by running this half; see the probe's own comment below.
+  const EXPECTED_REFUSALS = 16;
   const EXPECTED_FIELD_PROBES = 4;
   /**
    * The two populations the corrected decision added, and the reason the four
@@ -791,6 +796,30 @@ if (!process.env.TEST_DATABASE_URL) {
     const revokeId = listed.body.invites.find((i) => i.invitedEmail.toLowerCase() === revokeTarget)?.id;
     assert.ok(revokeId, `no revocable invitation to probe with: ${JSON.stringify(listed.body.invites)}`);
 
+    /**
+     * A real inspection with a real signature on it, so the void probe has a
+     * target that exists and the owner control actually voids something rather
+     * than collecting a 404 from the store.
+     *
+     * Both are created BY THE CREW MEMBER on purpose. Crew do the inspecting
+     * and crew sign what they inspected — that is the whole point of the
+     * capture app — and it is the retraction, not the record, that AUDIT L91
+     * moved to manager+. Seeding them as crew asserts that distinction as a
+     * fact of this suite rather than leaving it to the comment.
+     */
+    const inspection = await seed<{ inspection: { id: string } }>(
+      "POST", "/inspections",
+      { siteId, name: `Crew Perm Inspection ${runId}`, date: "2025-01-01" },
+      crewToken
+    );
+    const inspectionId = inspection.body.inspection.id;
+    const signed = await seed<{ signature: { id: string } }>(
+      "POST", `/inspections/${inspectionId}/signatures`,
+      { role: "inspector", signerName: `Crew Perm Inspector ${runId}`, path: "M0 0 L10 10", viewBox: "0 0 100 50" },
+      crewToken
+    );
+    const signatureId = signed.body.signature.id;
+
     const probes: Array<{ label: string; method: string; path: string; body?: unknown }> = [
       // ── Exception 1: crew cannot invite anyone ────────────────────────────
       { label: "invite someone to a site", method: "POST", path: `/projects/sites/${siteId}/invites`, body: { emails: [`crew-perm-probe-${runId}@example.test`], role: "crew" } },
@@ -810,6 +839,12 @@ if (!process.env.TEST_DATABASE_URL) {
       { label: "create a site", method: "POST", path: "/projects/sites", body: { name: `Probe Site ${runId}`, address: "3 Main St", client: "ACME", startDate: "2025-01-01", status: "active" } },
       { label: "delete a site", method: "DELETE", path: `/projects/sites/${disposableId}` },
       { label: "revoke an invitation", method: "DELETE", path: `/projects/sites/${siteId}/invites/${revokeId}` },
+      // ── AUDIT L91: crew cannot retract a signature they may give ─────────
+      // Destructive in the sense that matters here: the owner control is the
+      // only caller of this probe's resource, and it consumes it. Grouped with
+      // the destructive probes for that reason, not because the row is deleted
+      // — voidSignature stamps voided_at and voided_reason and keeps the row.
+      { label: "void a signature", method: "POST", path: `/inspections/${inspectionId}/signatures/${signatureId}/void`, body: { reason: "signed by the wrong person" } },
       // Last of all: the owner control removes the crew member's own site
       // membership, which nothing below may depend on.
       { label: "remove somebody from a site", method: "DELETE", path: `/projects/sites/${siteId}/members/${encodeURIComponent(CREW)}` },
