@@ -38,6 +38,12 @@ origin/main <branch>` for the base.
 | 8 | `feat/debt-and-cost-out` | yes, 0 unpushed | 17 | API, portal, `eas update` |
 | 9 | `feat/branding-and-dashboard-parity` | yes, 0 unpushed | 5 | API, portal, `eas update` |
 
+**A twelfth branch holds this document.** `docs/nine-workstreams-handover`,
+based on `origin/main`, one file, no code, no deploy. It is separate because the
+instruction was one branch per workstream and this is not a workstream; keeping
+it off `feat/branding-and-dashboard-parity` keeps that PR to its own concerns.
+Merge it, or don't — nothing depends on it.
+
 The deploy column is **derived from the changed paths**, not from memory:
 `git diff --name-only origin/main...<branch>` counted against
 `Projects/services/api/`, `Projects/apps/supervisor-web/`,
