@@ -1,9 +1,9 @@
-// Fails if the five independent declarations of a site's status vocabulary
-// disagree.
+// Fails if the six independent declarations of a site's status vocabulary
+// disagree, or if the two clients print different words for the same status.
 //
 // WHY THIS EXISTS
 //
-// One field, `project_sites.status`, is declared five times in three packages,
+// One field, `project_sites.status`, is declared six times in three packages,
 // and nothing in the toolchain connects any declaration to any other:
 //
 //   1. services/api/src/routes/projects.ts   SiteSchema's `z.enum([...])` — the
@@ -13,6 +13,13 @@
 //                                            inside getPortfolioCounts
 //   4. apps/mobile/lib/types.ts              `Site.status` union
 //   5. apps/supervisor-web/lib/siteStatus.ts the portal's canonical set
+//   6. apps/mobile/lib/siteStatus.ts         this surface's canonical set
+//
+// Declaration 6 is a twin of 5 rather than a shared module because
+// `@sitesnap/shared` emits `.d.ts` only (`"main": "dist/index.d.ts"`), so it
+// cannot carry a runtime constant, and the two clients are separate bundles
+// with separate token files. There is no third place to put it. This check is
+// what keeps the two copies honest; the comments in them are not.
 //
 // The portal's copy was wrong for the life of the feature. It keyed On Hold as
 // `on_hold`, with an underscore, in two separately pasted config objects, and
@@ -37,11 +44,19 @@
 // WHAT IT ASSERTS
 //
 // Declaration 1 is the authority: no other status can be written. Declarations
-// 2, 3 and 4 must equal it exactly. Declaration 5 must COVER it — the portal is
-// additionally allowed values it declares as fallbacks, because it must render
-// whatever is already in the database, and the `inactive` key predates the zod
-// enum. Those extras must be declared in the module's own fallback list, not
-// merely present.
+// 2, 3 and 4 must equal it exactly. Declarations 5 and 6 must COVER it — each
+// client is additionally allowed values it declares as fallbacks, because it
+// must render whatever is already in the database, and the `inactive` key
+// predates the zod enum. Those extras must be declared in the module's own
+// fallback list, not merely present.
+//
+// AND THE LABELS, WHICH IS NEW
+//
+// 5 and 6 must also agree on the WORD shown for each status. They did not: a
+// finished site read "Complete" on the portal and "Completed" on the phone, and
+// the mobile dashboard printed `site.status.toUpperCase()`, so the same site was
+// "ON-HOLD" there and "On Hold" everywhere else. Three renderings of one value,
+// each internally consistent, which is why nothing noticed.
 //
 // Every status in this file is READ from a source file. There are no status
 // literals in the comparison, so a renamed status fails the build instead of
@@ -52,9 +67,14 @@
 //   - Nothing about rows ALREADY in the database. If some row carries a status
 //     outside the enum, this check is silent and the portal's fallback is what
 //     handles it. That is why the fallback exists and why it is permitted here.
-//   - Nothing about the labels or colours each client shows. Two clients may
-//     agree on the vocabulary and still print different words for `on-hold`;
-//     only the set of values is checked.
+//   - Nothing about the COLOURS each client shows. The labels are checked; the
+//     colours are not, because the portal writes hex literals and mobile reads
+//     design tokens, so there is no common form to compare. That agreement is
+//     asserted instead from the mobile side, in
+//     apps/mobile/lib/siteStatus.test.ts, which compares each token against the
+//     portal's published hex.
+//   - Nothing about any OTHER string either client shows for a status. Only the
+//     one label map in each module is read.
 //   - It reads source text, not the running code. A status assembled at runtime
 //     (string concatenation, a value from an API response) is invisible to it.
 
@@ -105,6 +125,7 @@ const routes = read("services/api/src/routes/projects.ts");
 const store = read("services/api/src/storage/projectsStore.ts");
 const mobile = read("apps/mobile/lib/types.ts");
 const portal = read("apps/supervisor-web/lib/siteStatus.ts");
+const mobileStatus = read("apps/mobile/lib/siteStatus.ts");
 
 /** A `status: z.enum([...])` inside one named zod object schema. */
 function zodStatusEnum(src, schemaName) {
@@ -222,53 +243,145 @@ assertExact(
 );
 assertExact("apps/mobile/lib/types.ts `Site.status`", siteEnum, interfaceStatus(mobile, "Site", "apps/mobile/lib/types.ts"));
 
-// The portal is the one declaration allowed to be WIDER than the enum, and only
-// where it says so. It must render whatever is already in the database, and the
-// `inactive` key predates the zod enum.
-let portalSet = null;
-let portalFallbacks = null;
-if (portal) {
-  // The canonical vocabulary is the RIGHT-hand side of the alias map: the left
-  // is deliberately wider (it is where `on_hold` is still accepted, in case a
-  // row carries the old spelling), so reading the left would make this check
-  // pass on exactly the defect it exists to catch.
-  const aliases = regionAfter(portal, "const ALIASES:", "});");
-  const values = aliases && [...aliases.matchAll(/:\s*"([^"]+)"/g)].map((m) => m[1]);
-  portalSet = values && values.length ? new Set(values) : null;
-  if (!portalSet) fail("could not find the ALIASES map in apps/supervisor-web/lib/siteStatus.ts.");
+// The two clients are the declarations allowed to be WIDER than the enum, and
+// only where they say so. Each must render whatever is already in the database,
+// and the `inactive` key predates the zod enum.
 
-  const unknown = regionAfter(portal, "const UNKNOWN: SiteStatusKey =", ";");
-  portalFallbacks = unknown && quotedStrings(unknown);
-  if (!portalFallbacks) {
+/**
+ * One client's status vocabulary and its label map.
+ *
+ * The vocabulary is the RIGHT-hand side of the alias map: the left is
+ * deliberately wider (it is where `on_hold` is still accepted, in case a row
+ * carries the old spelling), so reading the left would make this check pass on
+ * exactly the defect it exists to catch.
+ */
+function clientVocabulary(src, where) {
+  if (!src) return null;
+
+  const aliases = regionAfter(src, "const ALIASES:", "});");
+  const values = aliases && [...aliases.matchAll(/:\s*"([^"]+)"/g)].map((m) => m[1]);
+  const set = values && values.length ? new Set(values) : null;
+  if (!set) fail(`could not find the ALIASES map in ${where}.`);
+
+  // The LEFT-hand side as well — the spellings this client will accept from a
+  // row or a cache. Kept separate from `set` because the two answer different
+  // questions, and conflating them is how the first version of the
+  // client-vs-client check passed while one client quietly stopped recognising
+  // the `on_hold` spelling the other still handled.
+  const spellings = aliases && [...aliases.matchAll(/"([^"]+)"\s*:/g)].map((m) => m[1]);
+  const accepts = spellings && spellings.length ? new Set(spellings) : null;
+  if (!accepts) fail(`could not read the accepted spellings (ALIASES keys) in ${where}.`);
+
+  const unknown = regionAfter(src, "const UNKNOWN: SiteStatusKey =", ";");
+  const fallbacks = unknown && quotedStrings(unknown);
+  if (!fallbacks) {
     fail(
-      "could not find the declared fallback (`const UNKNOWN`) in lib/siteStatus.ts.\n" +
-        "    The portal is allowed statuses the API cannot write only where it says so."
+      `could not find the declared fallback (\`const UNKNOWN\`) in ${where}.\n` +
+        "    A client is allowed statuses the API cannot write only where it says so."
     );
   }
+
+  // key -> label, from the one config map. The key may be bare (`active:`) or
+  // quoted (`"on-hold":`), since the hyphen forces quoting on exactly the entry
+  // this check most needs to read.
+  const cfg = regionAfter(src, "const SITE_STATUS_CFG", "});");
+  const pairs = cfg && [...cfg.matchAll(/(?:"([^"]+)"|([A-Za-z_$][\w$]*))\s*:\s*\{\s*label:\s*"([^"]+)"/g)];
+  const labels = pairs && pairs.length ? new Map(pairs.map((m) => [m[1] ?? m[2], m[3]])) : null;
+  if (!labels) {
+    fail(
+      `could not find the SITE_STATUS_CFG label map in ${where}.\n` +
+        "    Without it the two surfaces' words are unchecked, which is the state\n" +
+        "    that shipped \"Complete\" on one and \"Completed\" on the other."
+    );
+  }
+
+  return { set, accepts, fallbacks, labels };
 }
 
-if (siteEnum && portalSet && portalFallbacks) {
-  const uncovered = diff(siteEnum, portalSet);
+/** Each client must cover the enum, and over-declare only what it names. */
+function assertCovers(where, authority, v) {
+  if (!authority || !v || !v.set || !v.fallbacks) return;
+  const uncovered = diff(authority, v.set);
   if (uncovered.length) {
     fail(
-      "apps/supervisor-web/lib/siteStatus.ts cannot render every status the API\n" +
+      `${where} cannot render every status the API\n` +
         `    can write. Uncovered: ${uncovered.map((x) => `"${x}"`).join(", ")}\n` +
-        `    enum:   ${show(siteEnum)}\n` +
-        `    portal: ${show(portalSet)}\n` +
-        "    A status the portal does not know falls through to its unknown-status\n" +
+        `    enum:   ${show(authority)}\n` +
+        `    client: ${show(v.set)}\n` +
+        "    A status the client does not know falls through to its unknown-status\n" +
         "    fallback, so it renders under the wrong label and its filter tab counts\n" +
         "    zero of it. That is the defect this check was written for."
     );
   }
-  const undeclared = diff(portalSet, siteEnum).filter((x) => !portalFallbacks.has(x));
+  const undeclared = diff(v.set, authority).filter((x) => !v.fallbacks.has(x));
   if (undeclared.length) {
     fail(
-      "apps/supervisor-web/lib/siteStatus.ts declares statuses the API cannot write\n" +
+      `${where} declares statuses the API cannot write\n` +
         `    and does not list as fallbacks: ${undeclared.map((x) => `"${x}"`).join(", ")}\n` +
         "    Either add it to the enum or mark it as the fallback."
     );
   }
 }
+
+const portalV = clientVocabulary(portal, "apps/supervisor-web/lib/siteStatus.ts");
+const mobileV = clientVocabulary(mobileStatus, "apps/mobile/lib/siteStatus.ts");
+
+assertCovers("apps/supervisor-web/lib/siteStatus.ts", siteEnum, portalV);
+assertCovers("apps/mobile/lib/siteStatus.ts", siteEnum, mobileV);
+
+// The two clients against each other: same accepted spellings, same keys, and
+// the same word for each key. This is the check that was missing.
+if (portalV && mobileV) {
+  // Two comparisons, not one. The canonical set is what each client reduces a
+  // status TO; the accepted spellings are what it will reduce FROM. A client can
+  // match on the first and still fail to recognise a spelling the other handles,
+  // which renders the same row differently on the two surfaces — the whole
+  // problem this file exists for.
+  const compare = (what, a, b) => {
+    if (!a || !b) return;
+    const onlyPortal = diff(a, b);
+    const onlyMobile = diff(b, a);
+    if (onlyPortal.length || onlyMobile.length) {
+      fail(
+        `the two clients do not agree on ${what}.\n` +
+          `    portal: ${show(a)}\n` +
+          `    mobile: ${show(b)}` +
+          (onlyPortal.length ? `\n    portal only: ${onlyPortal.map((x) => `"${x}"`).join(", ")}` : "") +
+          (onlyMobile.length ? `\n    mobile only: ${onlyMobile.map((x) => `"${x}"`).join(", ")}` : "") +
+          "\n    A row written once is then read two ways."
+      );
+    }
+  };
+
+  compare("the statuses they reduce TO", portalV.set, mobileV.set);
+  compare("the spellings they accept", portalV.accepts, mobileV.accepts);
+
+  if (portalV.labels && mobileV.labels) {
+    const keys = new Set([...portalV.labels.keys(), ...mobileV.labels.keys()]);
+    for (const key of [...keys].sort()) {
+      const a = portalV.labels.get(key);
+      const b = mobileV.labels.get(key);
+      if (a === undefined || b === undefined) {
+        fail(
+          `only one client has a label for "${key}".\n` +
+            `    portal: ${a === undefined ? "(none)" : `"${a}"`}\n` +
+            `    mobile: ${b === undefined ? "(none)" : `"${b}"`}\n` +
+            "    A key with no config renders as undefined on that surface."
+        );
+      } else if (a !== b) {
+        fail(
+          `the two clients print different words for "${key}".\n` +
+            `    portal: "${a}"\n` +
+            `    mobile: "${b}"\n` +
+            "    Pick one and change both. This is the Complete/Completed defect."
+        );
+      }
+    }
+  }
+}
+
+const portalSet = portalV && portalV.set;
+const portalFallbacks = portalV && portalV.fallbacks;
 
 // ── Diary status ────────────────────────────────────────────────────────────
 //
@@ -314,10 +427,14 @@ if (diaryEnum && diarySql) {
 if (failures.length) {
   console.error("assert-site-status-vocabulary: FAIL\n");
   for (const f of failures) console.error(`  - ${f}\n`);
-  console.error("  One field, five declarations, no compiler link between them.");
+  console.error("  One field, six declarations, no compiler link between them.");
   process.exit(1);
 }
 
-console.log(`  site status:  ${show(siteEnum)} — all 5 declarations agree.`);
+console.log(`  site status:  ${show(siteEnum)} — all 6 declarations agree.`);
+if (portalV && portalV.labels) {
+  const words = [...portalV.labels.entries()].sort().map(([k, v]) => `${k}→"${v}"`).join(", ");
+  console.log(`  labels, identical on both clients: ${words}`);
+}
 console.log(`  diary status: ${show(diaryEnum)} — all 4 API/mobile declarations agree.`);
 console.log(`  portal fallback, not writable by the API: ${show(portalFallbacks)}`);

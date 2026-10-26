@@ -63,6 +63,10 @@
     "lib/permissions.ts",
     "lib/permissions.test.ts",
     "lib/session-routing-audit.ts",
-    "lib/session-routing-audit.test.ts"
+    "lib/session-routing-audit.test.ts",
+    "lib/siteStatus.ts",
+    "lib/siteStatus.test.ts",
+    "lib/portfolio-metrics.ts",
+    "lib/portfolio-metrics.test.ts"
   ]
 }
