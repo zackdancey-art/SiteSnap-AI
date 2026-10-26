@@ -7,16 +7,15 @@ import Topbar from "@/components/Topbar";
 import { SkeletonCard } from "@/components/Skeleton";
 import { getSavedUser } from "@/lib/api";
 import { useBootstrap } from "@/lib/useBootstrap";
+import {
+  SITE_STATUS_FILTERS,
+  canonicalSiteStatus,
+  matchesSiteStatusFilter,
+  siteStatusCfg,
+  siteStatusFilterLabel,
+  type SiteStatusFilter,
+} from "@/lib/siteStatus";
 
-const STATUS_CFG: Record<string, { label: string; color: string; bg: string }> = {
-  active:    { label: "Active",    color: "#22C55E", bg: "#F0FDF4" },
-  inactive:  { label: "Inactive",  color: "#9EAFC2", bg: "#F1F5F9" },
-  completed: { label: "Complete",  color: "#E8731A", bg: "#FFF7ED" },
-  on_hold:   { label: "On Hold",   color: "#F59E0B", bg: "#FFFBEB" },
-};
-function scfg(s: string) { return STATUS_CFG[s] ?? STATUS_CFG.inactive; }
-
-type FilterStatus = "all" | "active" | "inactive" | "completed" | "on_hold";
 
 export default function SitesPage() {
   const user = getSavedUser();
@@ -24,26 +23,32 @@ export default function SitesPage() {
   const data = bootstrap.status === "ok" ? bootstrap.data : null;
   const loading = bootstrap.status === "loading";
   const [search, setSearch] = useState("");
-  const [filterStatus, setFilterStatus] = useState<FilterStatus>("all");
+  const [filterStatus, setFilterStatus] = useState<SiteStatusFilter>("all");
 
   const filtered = useMemo(() => {
     if (!data) return [];
     return data.sites.filter((s) => {
       const q = search.toLowerCase();
       const matchSearch = !q || s.name.toLowerCase().includes(q) || s.client?.toLowerCase().includes(q) || s.address?.toLowerCase().includes(q);
-      const matchStatus = filterStatus === "all" || s.status === filterStatus;
+      const matchStatus = matchesSiteStatusFilter(s.status, filterStatus);
       return matchSearch && matchStatus;
     });
   }, [data, search, filterStatus]);
 
+  // Tallied by canonical status, so a site stored as `on-hold` is counted under
+  // the On Hold tab. The previous version compared against the literal
+  // `"on_hold"` and so always reported 0 — see lib/siteStatus.ts.
   const counts = useMemo(() => {
-    if (!data) return { all: 0, active: 0, completed: 0, on_hold: 0 };
-    return {
-      all: data.sites.length,
-      active: data.sites.filter((s) => s.status === "active").length,
-      completed: data.sites.filter((s) => s.status === "completed").length,
-      on_hold: data.sites.filter((s) => s.status === "on_hold").length,
-    };
+    const tally: Record<SiteStatusFilter, number> = { all: 0, active: 0, completed: 0, "on-hold": 0 };
+    if (!data) return tally;
+    tally.all = data.sites.length;
+    for (const site of data.sites) {
+      const key = canonicalSiteStatus(site.status);
+      // `inactive` is the fallback for an unrecognised status and has no tab;
+      // those sites are reachable under All, which is why `all` is the length.
+      if (key !== "inactive") tally[key] += 1;
+    }
+    return tally;
   }, [data]);
 
   return (
@@ -54,7 +59,7 @@ export default function SitesPage() {
         <div className="page-body">
           {/* Filter bar */}
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            {(["all", "active", "completed", "on_hold"] as FilterStatus[]).map((s) => (
+            {SITE_STATUS_FILTERS.map((s) => (
               <button
                 key={s}
                 onClick={() => setFilterStatus(s)}
@@ -65,8 +70,8 @@ export default function SitesPage() {
                   border: filterStatus === s ? "none" : "1.5px solid var(--border)",
                 }}
               >
-                {s === "all" ? "All" : s === "on_hold" ? "On Hold" : s.charAt(0).toUpperCase() + s.slice(1)}&nbsp;
-                <span style={{ opacity: 0.7 }}>({counts[s as keyof typeof counts] ?? counts.all})</span>
+                {siteStatusFilterLabel(s)}&nbsp;
+                <span style={{ opacity: 0.7 }}>({counts[s]})</span>
               </button>
             ))}
             <input
@@ -96,7 +101,7 @@ export default function SitesPage() {
               {filtered.length === 0 ? (
                 <p style={{ color: "var(--text-secondary)", gridColumn: "1/-1" }}>No sites match your filters.</p>
               ) : filtered.map((site) => {
-                const cfg = scfg(site.status);
+                const cfg = siteStatusCfg(site.status);
                 const entries = data!.entries.filter((e) => e.siteId === site.id);
                 const diaries = data!.diaries.filter((d) => d.siteId === site.id);
                 const approved = diaries.filter((d) => d.status === "approved").length;

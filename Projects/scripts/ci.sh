@@ -120,6 +120,15 @@ step "Structural: workflow runners are pinned and action majors are current"
 step "Structural: exactly one @types/react in the installed tree"
 node ./scripts/assert-single-react-types.mjs
 
+# `project_sites.status` is declared five times in three packages with nothing
+# connecting any declaration to another, and the portal's two copies spelled
+# On Hold `on_hold` against the API's `on-hold` for the life of the feature —
+# three user-visible defects from one character, invisible to tsc because the
+# portal types that field as `string`. The portal has no test runner, so this is
+# the only thing that can hold the five in agreement.
+step "Structural: the site/diary status vocabularies agree across all packages"
+node ./scripts/assert-site-status-vocabulary.mjs
+
 # The Privacy Policy and the Terms each exist in three copies: the canonical
 # markdown in docs/legal/, a data module the mobile app renders, and a page on
 # the marketing site. AUDIT A6 is what happens without this check — the copies

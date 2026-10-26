@@ -5,6 +5,7 @@ import { useRouter, useParams } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import ProfileDropdown from "@/components/ProfileDropdown";
 import { SkeletonTable } from "@/components/Skeleton";
+import { siteStatusCfg } from "@/lib/siteStatus";
 import {
   fetchBootstrap, getSavedUser, isAuthenticated,
   fetchTimecards, fetchIncidents, fetchInspections, fetchDeliveries,
@@ -715,7 +716,9 @@ export default function SiteDetailPage() {
                         ["Client", site.client || "—"],
                         ["Address", site.address || "—"],
                         ["Start Date", localDate(site.startDate)],
-                        ["Status", site.status],
+                        // The raw value ("on-hold") was printed here; the shared label
+                        // is what the badge on every other page shows.
+                        ["Status", siteStatusCfg(site.status).label],
                         ["Total Hours Logged", `${(totalHours.regular + totalHours.overtime).toFixed(1)}h (${totalHours.regular.toFixed(1)}h reg + ${totalHours.overtime.toFixed(1)}h OT)`],
                       ].map(([label, value]) => (
                         <tr key={label}>

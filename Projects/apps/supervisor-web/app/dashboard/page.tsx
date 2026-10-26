@@ -8,15 +8,7 @@ import { getSavedUser } from "@/lib/api";
 import { useBootstrap } from "@/lib/useBootstrap";
 import { usePortfolioSummary } from "@/lib/usePortfolioSummary";
 import { useRole } from "@/lib/useRole";
-
-const STATUS_CFG: Record<string, { label: string; color: string; bg: string }> = {
-  active:    { label: "Active",    color: "#22C55E", bg: "#F0FDF4" },
-  inactive:  { label: "Inactive",  color: "#9EAFC2", bg: "#F1F5F9" },
-  completed: { label: "Complete",  color: "#E8731A", bg: "#FFF7ED" },
-  on_hold:   { label: "On Hold",   color: "#F59E0B", bg: "#FFFBEB" },
-};
-
-function statusCfg(s: string) { return STATUS_CFG[s] ?? STATUS_CFG.inactive; }
+import { siteStatusCfg } from "@/lib/siteStatus";
 
 function formatDate() {
   return new Date().toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
@@ -254,7 +246,7 @@ export default function DashboardPage() {
                         const siteDiaries = data!.diaries.filter((d) => d.siteId === site.id);
                         const approved = siteDiaries.filter((d) => d.status === "approved").length;
                         const rate = siteDiaries.length > 0 ? Math.round((approved / siteDiaries.length) * 100) : 0;
-                        const cfg = statusCfg(site.status);
+                        const cfg = siteStatusCfg(site.status);
                         return (
                           <tr key={site.id}>
                             <td>
