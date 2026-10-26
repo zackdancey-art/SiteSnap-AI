@@ -229,8 +229,14 @@ In order. Each step is a thing to do, not a checklist to look up.
 15. **Hold a site and check both surfaces again** — **"On Hold"** on both, not
     "ON-HOLD".
 
-16. **Tell me the Render instance count** (AUDIT L5). I did not guess it in code
-    or in any document, per your instruction.
+16. ~~**Tell me the Render instance count**~~ — **done: one instance.** Manual
+    scaling 1, autoscaling off and behind a plan the service is not on. AUDIT
+    L102's eviction half is now closed unconditionally rather than left
+    conditional, the shared invalidation queued for Phase 7 is not needed, and
+    the one residual is recorded: a zero-downtime deploy runs the draining and
+    the new instance together for about a minute, so the cross-instance window
+    exists during a deploy only. If the service ever moves to a plan with
+    autoscaling, that is the condition that reopens it.
 
 17. **Workstream 7's native work: run the `eas build` yourself.** That branch
     ends at "ready for `eas build`" by instruction. I made no native config
@@ -308,11 +314,35 @@ In order. Each step is a thing to do, not a checklist to look up.
   production database. Anything I say about the deployed system would be
   inference, so this document says nothing about it.
 
-- **The Render instance count** (L5) — yours to tell me.
+- ~~**The Render instance count** (L5)~~ — **answered: one.** Closed out in
+  AUDIT L102 and in `docs/PHASE-2-REVIEW.md`, which had carried the
+  "revocation is not instant across instances" caveat; that caveat now applies
+  to a deploy's instance overlap and to nothing else.
+
+- **`EXPO_TOKEN` is NOT set as a repository secret** (F11) — answered, and it
+  changes the reading of the submit workflow rather than closing a question.
+  The tag-triggered submit could never have fired: no token, no submission.
+  Disarming it was still right, and this is why — a workflow that cannot
+  authenticate fails at the point of submission, not at the point of being
+  triggered, so the arming was a live trigger on a job that would have failed
+  loudly on the first tag someone pushed. The branch that disarmed it does not
+  depend on the secret's absence and does not need rewriting.
+
+- **`main`'s ruleset, confirmed by the owner:** the check `validate` is
+  required, and branches must be up to date before merging. This is why the
+  pinned-count corrections are back-ported onto the individual feature branches
+  rather than left on the rehearsal branch — each of the eleven PRs is updated
+  onto the new `main` and re-runs CI before it can merge, so a correction that
+  lives only on a throwaway branch would make every one of those ten
+  update-and-wait cycles come back red.
+
+- **Phase 2 deployed live on 18 October at 12:21pm**, per the owner. Recorded
+  because the Phase 2 review's claims are about code, not about a deployment,
+  and this is the date they became true of the running system.
 
 - **Still awaiting you, unchanged:** L61–L64; L80; React 19 for
-  `apps/supervisor-web` (L72 / ADR-0004); whether `EXPO_TOKEN` is a GitHub
-  secret (F11); whether to remove the three `/entry-templates` routes (F2);
+  `apps/supervisor-web` (L72 / ADR-0004);
+  whether to remove the three `/entry-templates` routes (F2);
   whether consent records survive account deletion; whether server-side consent
   enforcement turns on once both clients ship; whether `all-db` turns on in
   `ci.sh`; whether the triage check turns on in `ci.sh`; whether

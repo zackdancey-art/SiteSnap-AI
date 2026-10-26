@@ -179,8 +179,14 @@ the test would pass by asserting nothing.
 
 Caveat, stated rather than glossed: revocation is **not instant across instances**. One instance
 increments the column and clears only its own cache, so another instance can honour the previous
-generation for up to `SESSION_IDENTITY_TTL_MS` (60 seconds). The owner has said he will report the
-Render instance count; I have not guessed it in the code or in this document.
+generation for up to `SESSION_IDENTITY_TTL_MS` (60 seconds).
+
+**Resolved after this review was written.** The owner reports the Render service runs **one
+instance** — manual scaling 1, autoscaling off and gated behind a plan the service is not on. The
+caveat above therefore does not apply in steady state: there is no second instance to honour the
+previous generation. It applies only during a zero-downtime deploy, when the draining instance and
+the new one overlap for about a minute. See AUDIT L102 for the closed-out version and for the one
+condition that would reopen it.
 
 ---
 
@@ -381,8 +387,10 @@ cost it quietly.
    have never executed. CI's `postgres:16` service is where they run for the first time, and that is
    a statement about CI, not about my machine.
 2. **The 503 `session_unavailable` path** — code-read only, for the reason given above.
-3. **The Render instance count**, which sets how long the 60-second cache window actually means
-   across instances. You said you would tell me; I have not guessed it in the code or the docs.
+3. ~~**The Render instance count**~~ — **answered: one instance** (manual scaling 1, autoscaling
+   off). This was the item that made the cross-instance window conditional, and it is now closed
+   rather than deferred: no second instance in steady state, so no window except during a deploy's
+   one-minute overlap. AUDIT L102 carries it.
 4. **Whether `AUTH_TOKEN_SECRET`'s value changed in the Render dashboard around the Phase 1
    deploy** — still open from an earlier phase, and it bears on this one, because every stored token
    is unacceptable if it did.
@@ -459,7 +467,8 @@ carries the full table: twelve `auth_users` write sites in all, of which ten tou
 and eight evict. The two that do not are `createUser` — safe only because `loadSessionIdentity`
 refuses to cache a negative, so there is no stale "no such account" entry to evict — and migration
 `016`, safe only because migrations run in-process before `app.listen`, which leaves a rolling
-deploy as the one window I cannot close without knowing the instance count. The blind spots the grep could not see
+deploy as the one window that is not closed — and, now that the instance count is known to be one,
+the **only** one, lasting as long as a deploy's instance overlap rather than continuously. The blind spots the grep could not see
 (dynamic table names, updating CTEs, upserts, triggers, scripts, test raw writes, console edits, the
 in-memory persistence file) are each checked and stated by name.
 

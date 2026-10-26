@@ -3318,8 +3318,29 @@ is a plain INSERT. *Triggers:* none on `auth_users` (the only triggers are on
 amplified out of sight. *Migrations:* `016` writes `company_id` four times and does not evict; it
 runs in-process at `server.ts:205`, before `initAuthSchema()`, `createApp()` and `app.listen`, so
 within a single process the cache is necessarily empty — **the blind spot is a rolling deploy**,
-where a second instance is still serving with cached identities while the first migrates. The owner
-has not yet told me the Render instance count and I am not guessing it. *Tests:* nine files write
+where a second instance is still serving with cached identities while the first migrates.
+
+**ANSWERED, AND THIS CLOSES THE EVICTION HALF OF L102 UNCONDITIONALLY.** The owner reports the
+Render service runs **one instance**: manual scaling is set to 1, autoscaling is off, and autoscaling
+requires a Pro plan the service is not on. So there is no second instance to hold a stale identity,
+no cross-instance window, and the shared-invalidation mechanism that was queued for Phase 7 is **not
+needed** — not deferred, not conditional, not needed. The seven per-site evictions are the complete
+fix on this deployment, and the "revocation is not instant across instances" caveat written into
+`docs/PHASE-2-REVIEW.md` does not apply to it.
+
+**The one residual, which is narrow and real.** Render's zero-downtime deploy runs the draining
+instance and the new one together for roughly a minute. During that overlap there genuinely are two
+processes, so for that window the cross-instance gap exists: the draining instance can honour a
+generation the new one has already invalidated. It closes by itself when the old instance exits.
+Three things make it the smallest version of this problem — it occurs only during a deploy rather
+than continuously, its duration is set by the drain rather than by the 60-second TTL, and the
+migration case in the paragraph above is unaffected because migrations complete before
+`app.listen`. It is recorded rather than fixed: a shared invalidation channel built for a one-minute
+deploy overlap is more moving parts than the window justifies, and if the service ever moves to a
+plan with autoscaling this becomes a live gap again and the Phase 7 item comes back. **That
+condition — instance count > 1 — is the thing to re-check, not the eviction code.**
+
+*Tests:* nine files write
 `auth_users` raw (`incident-roundtrip`, `rls-h1b`, `invite-roundtrip`, `store-roundtrip`,
 `signature-roundtrip`, `rls-integration`); `invite-roundtrip.test.ts:241`
 (`UPDATE auth_users SET company_id = ''`) bypasses eviction deliberately and is the pattern to watch
