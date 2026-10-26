@@ -129,6 +129,16 @@ node ./scripts/assert-single-react-types.mjs
 step "Structural: the site/diary status vocabularies agree across all packages"
 node ./scripts/assert-site-status-vocabulary.mjs
 
+# AUDIT L63. The exported diary/inspection PDF is the compliance evidence, and
+# its templates carried their own undocumented 14-colour palette — five frozen
+# copies of a design token, nine colours governed by nothing. The export values
+# stay frozen on purpose (restyling the app must not restyle a signed document);
+# this is what makes a token moving away from its twin loud instead of silent.
+# The hex pattern is quote-independent: L63's own first measurement was wrong
+# because it required the quote, and the export CSS writes `color:#6f8095`.
+step "Structural: the export palette has not drifted, and no raw hex has returned"
+node ./scripts/assert-export-palette.mjs
+
 # The Privacy Policy and the Terms each exist in three copies: the canonical
 # markdown in docs/legal/, a data module the mobile app renders, and a page on
 # the marketing site. AUDIT A6 is what happens without this check — the copies
