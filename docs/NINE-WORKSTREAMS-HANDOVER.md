@@ -39,7 +39,8 @@ origin/main <branch>` for the base.
 | 9 | `feat/branding-and-dashboard-parity` | yes, 0 unpushed | 5 | API, portal, `eas update` |
 
 **A twelfth branch holds this document.** `docs/nine-workstreams-handover`,
-based on `origin/main`, one file, no code, no deploy. It is separate because the
+based on `origin/main` — this file plus `docs/pr-bodies/` (workstreams 5 to 9),
+no code, no deploy. It is separate because the
 instruction was one branch per workstream and this is not a workstream; keeping
 it off `feat/branding-and-dashboard-parity` keeps that PR to its own concerns.
 Merge it, or don't — nothing depends on it.
@@ -168,9 +169,14 @@ In order. Each step is a thing to do, not a checklist to look up.
    rather than floating them. Evidence in section 2. Do it before opening its PR
    or CI will go red on it.
 
-4. **Open the eleven PRs in the browser.** Each PR body is in the session
-   output; the compare URL is at the top of each. `gh` is not installed and I
-   did not install it.
+4. **Open the eleven PRs in the browser.** `gh` is not installed and I did not
+   install it. The bodies for **workstreams 5 to 9 are in `docs/pr-bodies/` on
+   this branch**, each with its compare URL at the top — they were written to a
+   session-scoped temporary directory that does not survive the session, so they
+   are committed here instead. That is a decision you did not ask for; the
+   commit message explains it and deleting the directory is one commit.
+   **Workstreams 0 to 4's bodies are only in the earlier session output** — I
+   did not keep copies of those.
 
 5. **Merge in the group order in section 2,** letting CI go green on each PR
    before the next. **Green CI is the only evidence that any DB-gated test in
