@@ -64,6 +64,11 @@ if (!process.env.TEST_DATABASE_URL) {
   const COMPANY = `codes-co-${runId}`;
   const EMAIL_A = `codes-a-${runId}@example.test`;
   const EMAIL_B = `codes-b-${runId}@example.test`;
+  // A third account for the login test. Both tests above END by changing the
+  // password of the account they used, so a login test sharing one of them
+  // would depend on file order for whether CURRENT_PASSWORD is still current.
+  const EMAIL_C = `codes-c-${runId}@example.test`;
+  const UNKNOWN_EMAIL = `codes-nobody-${runId}@example.test`;
   const CURRENT_PASSWORD = `Current_${runId}_1A`;
 
   let server: http.Server;
@@ -124,6 +129,18 @@ if (!process.env.TEST_DATABASE_URL) {
     return { status: res.status, body };
   };
 
+  const login = async (email: string, password: string): Promise<Answer> => {
+    const res = await fetch(`${baseUrl}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const text = await res.text();
+    let body: Answer["body"] = {};
+    try { body = JSON.parse(text) as Answer["body"]; } catch { body = { error: text }; }
+    return { status: res.status, body };
+  };
+
   before(async () => {
     pool = getPgPool();
     await applyMigrations(pool);
@@ -134,6 +151,7 @@ if (!process.env.TEST_DATABASE_URL) {
     // first one spent.
     await createUser(EMAIL_A, hash, `+6140000${runId.slice(-4).replace(/\D/g, "0")}1`, "Codes A", "admin", COMPANY, "owner");
     await createUser(EMAIL_B, hash, `+6140000${runId.slice(-4).replace(/\D/g, "0")}2`, "Codes B", "admin", COMPANY, "owner");
+    await createUser(EMAIL_C, hash, `+6140000${runId.slice(-4).replace(/\D/g, "0")}3`, "Codes C", "admin", COMPANY, "owner");
     await resetRateLimitStoreForTests();
 
     const app = createApp();
@@ -148,6 +166,7 @@ if (!process.env.TEST_DATABASE_URL) {
     await new Promise<void>((resolve) => server?.close(() => resolve()));
     await deleteUserAccount(EMAIL_A).catch(() => {});
     await deleteUserAccount(EMAIL_B).catch(() => {});
+    await deleteUserAccount(EMAIL_C).catch(() => {});
     await pool?.end().catch(() => {});
   });
 
@@ -230,5 +249,42 @@ if (!process.env.TEST_DATABASE_URL) {
     const ok = await changePassword(live, CURRENT_PASSWORD, `Next_${runId}_4B`);
     assert.equal(ok.status, 200, `change-password refused a valid token: ${JSON.stringify(ok.body)}`);
     assert.equal(ok.body.ok, true);
+  });
+
+  test("an unknown account and a wrong password are deliberately indistinguishable too", async () => {
+    /**
+     * AUDIT L18, the third member of this file's family and the one that was
+     * open longest. An unknown email answered 404 "Account not found. Please
+     * sign up first." while a wrong password answered 401, so POST /auth/login
+     * would tell any unauthenticated caller whether a given address has an
+     * account here. For a product whose users are named supervisors at
+     * identifiable companies, that answer is the information worth having.
+     *
+     * Against Postgres rather than in memory for the reason in this file's
+     * header: the branch being asserted is `findUserByEmail` returning nothing,
+     * and authStore chooses its store by DATABASE_URL. An in-memory run
+     * exercises a different lookup from the deployed one. The equivalence is
+     * asserted on the whole body, not the status, because a distinguishing
+     * message leaks the same bit.
+     */
+    await resetRateLimitStoreForTests();
+
+    const wrongPassword = await login(EMAIL_C, `definitely-not-${runId}`);
+    const noSuchAccount = await login(UNKNOWN_EMAIL, `definitely-not-${runId}`);
+
+    assert.equal(wrongPassword.status, 401, `a wrong password did not answer 401: ${JSON.stringify(wrongPassword.body)}`);
+    assert.equal(noSuchAccount.status, 401, `an unknown account did not answer 401: ${JSON.stringify(noSuchAccount.body)}`);
+    assert.equal(wrongPassword.body.code, "invalid_credentials");
+    assert.deepEqual(
+      noSuchAccount.body, wrongPassword.body,
+      "the two failures are distinguishable by their bodies, which is the same oracle in a different field"
+    );
+
+    // Positive control on the same route. Both assertions above hold just as
+    // well for a login that refuses everybody, and this account's password has
+    // not been changed by anything above -- which is why it is its own account.
+    const good = await login(EMAIL_C, CURRENT_PASSWORD);
+    assert.equal(good.status, 200, `login refused a correct password: ${JSON.stringify(good.body)}`);
+    assert.ok(good.body.token, "a successful login returned no token");
   });
 }
