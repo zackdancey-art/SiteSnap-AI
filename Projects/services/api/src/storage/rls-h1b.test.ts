@@ -21,32 +21,17 @@ process.env.AUTH_TOKEN_SECRET = "rls-h1b-test-secret";
 
 import assert from "node:assert/strict";
 import { test, before, after } from "node:test";
-import fs from "node:fs/promises";
-import path from "node:path";
 import { Client } from "pg";
 import type { Pool } from "pg";
 import { getPgPool } from "./postgres";
 import { withTenant } from "./tenant";
 import { acceptSiteInvite, isAcceptInviteSuccess } from "./projectsStore";
 import { soloCompanyIdForEmail } from "../utils/authToken";
+import { applyMigrations } from "./testMigrations";
 
 if (!process.env.TEST_DATABASE_URL) {
   test("RLS H1b (skipped: set TEST_DATABASE_URL)", { skip: true }, () => {});
 } else {
-  const MIGRATIONS_DIR = path.join(process.cwd(), "src", "storage", "migrations");
-  const applyMigrations = async (pool: Pool): Promise<void> => {
-    await pool.query(`CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
-    const applied = new Set((await pool.query<{ version: string }>(`SELECT version FROM schema_migrations`)).rows.map((r) => r.version));
-    for (const file of (await fs.readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith(".sql")).sort()) {
-      const version = file.replace(/\.sql$/, "");
-      if (applied.has(version)) continue;
-      const sql = await fs.readFile(path.join(MIGRATIONS_DIR, file), "utf-8");
-      const client = await pool.connect();
-      try { await client.query("BEGIN"); await client.query(sql); await client.query(`INSERT INTO schema_migrations (version) VALUES ($1)`, [version]); await client.query("COMMIT"); }
-      catch (err) { await client.query("ROLLBACK"); throw new Error(`Migration ${version} failed: ${err instanceof Error ? err.message : String(err)}`); }
-      finally { client.release(); }
-    }
-  };
 
   const runId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const A = `h1b-co-a-${runId}`;
