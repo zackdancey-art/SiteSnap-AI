@@ -17,7 +17,7 @@ The repo root is a thin wrapper; the real monorepo lives under `Projects/`.
 | `Projects/docs` | `api-contracts.md`, `production-readiness.md`, `SiteSnap-Release-Runbook.md` |
 | `Projects/scripts` | `build.js` helper |
 | `Projects/services/api/src/storage/migrations` | 18 ordered `.sql` migrations (001→018), applied by a version-tracking runner at API boot |
-| `.github/workflows` (root) | `ci.yml` (lint+typecheck+test), `deploy-api.yml` (tests then container build — registry push commented out), `build-mobile.yml` |
+| `.github/workflows` (root) | `ci.yml` (one step: `./scripts/ci.sh`, the single definition of the gate) and `build-mobile.yml`. `deploy-api.yml` was deleted — it deployed nothing (every deploy step commented out, and aimed at Cloud Run, which is not the host) while re-running a vacuous copy of the gate. The API deploys from `main` via Render's own build of the root `Dockerfile`; see HALF-BUILT F3. |
 
 There is **no CLAUDE.md** in the repo. Root `README.md` is one line (`# SiteSnap-AI`).
 
