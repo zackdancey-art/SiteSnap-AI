@@ -305,8 +305,17 @@ export default function SettingsPage() {
   const handleSignOut = async () => { await logout(); router.replace("/"); };
 
   const handleSignOutAll = async () => {
-    if (!confirm("This will rotate your session token. Existing tokens expire within 7 days. Continue?")) return;
-    try { await revokeAllSessions(); alert("Session token rotated. Other sessions will expire at their natural TTL."); }
+    // AUDIT F4. Both of these strings described the pre-Phase-2 world and were
+    // wrong by the time anybody read them: "existing tokens expire within 7
+    // days" and "other sessions will expire at their natural TTL" told the user
+    // this control does not do the thing they came here to do. /auth/revoke-all
+    // increments `token_generation` on the row, and `requireAuth` reads that
+    // row on every request, so every other session is refused on its NEXT
+    // request -- not in seven days. Telling a user a security control is
+    // ineffective when it works is the same class of harm as the reverse: they
+    // reach for something else, or for nothing.
+    if (!confirm("Sign out every other device now? Other sessions stop working immediately. This one stays signed in.")) return;
+    try { await revokeAllSessions(); alert("Every other device has been signed out. This one is still signed in."); }
     catch (err: unknown) { alert(err instanceof Error ? err.message : "Failed to revoke sessions."); }
   };
 
