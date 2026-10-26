@@ -18,31 +18,62 @@ triage is the same shape: "everything is triaged" is perfectly true of an empty
 list. So the population is counted before it is bucketed, and the buckets are
 summed against that count.
 
-`docs/AUDIT.md` carries **121 `###` findings**. Their status is written as a
-bold `**Disposition:**` / `**Status:**` label, so the label is what was read —
-not my memory of which were closed:
+**This section is a correction, and the thing it corrects is the reason the
+document exists.** Its first version derived the population from each finding's
+bold `**Disposition:**` / `**Status:**` label and treated *no label* as *outside
+the population*, with five no-label findings added back by hand. That assumption
+is false, and it hid **eighteen open findings** — including `H2`, a data-loss
+path on the offline diary save, and the entire `M1`–`M6` class from the Stage 0
+AI audit, not one of which carries a label at all.
 
-| group | count | how |
-|---|---|---|
-| every status label on the finding is a closing one | 32 | `FIXED` / `CLOSED` / `RESOLVED` / `DECIDED and implemented` / `Superseded` / `Withdrawn` / `Not a defect` |
-| at least one status label is **not** a closing one | **48** | `OPEN`, `Open`, `Half closed`, `Partially fixed`, `PARTIALLY RESOLVED`, `held`, `Open and accepted`, … |
-| no status label at all | 41 | the Phase 1 findings (C1, H1–H3, M1–M7, L1–L6), the reserved L29, and the Phase 2/3 block L79–L104, which encode severity in the heading and status in prose |
-| | **121** | |
+It also hid three findings that *do* carry a label, which is the worse half:
+`L45`, `L50` and `L51` each open with the word **Fixed** and each has an open
+second clause in the same sentence — "Tap-target sizing is open as a separate,
+visible change", "The Display section and the API URL field are open", "What
+cannot be checked from here". A reader skimming for a verdict reads the first
+clause. That is `L25`, this document's own finding about dispositions that
+reassure, happening inside the document that records it.
 
-From the 48, **five are closed by a later label on the same finding** and leave
-the population: L25 and L35 (method notes, no code), L26 (`Code fixed`; its
-residue is L24, counted once there), L66 (`Partially fixed` superseded by
-`Closed` on `feat/crew-permissions`), L103 (both server halves closed, both
-client halves taken in workstreams 1 and 7). → **43**.
+So the derivation is no longer prose. It is
+[`Projects/scripts/assert-triage-covers-open-findings.py`](../Projects/scripts/assert-triage-covers-open-findings.py),
+which parses `docs/AUDIT.md`, reads `docs/HALF-BUILT-MECHANISMS.md` from the ref
+that carries it, measures workstream coverage from the commit messages on the
+nine workstream branches, diffs the result against the IDs rowed in **this
+file**, and exits non-zero while any open, uncovered finding has no row. Three
+things it does that the prose version did not:
 
-Five findings from the no-label group have an open half stated in prose and are
-added by hand, which is the one judgement call in the derivation: **C1** (the
-provenance half, which `CLAUDE.md` §7 also states is open), **L80**, **L82**,
-**L83**, **L104**. → **48**.
+1. **Any** open signal anywhere in a finding makes it open, even beside a closing
+   one. That is the `L45`/`L50`/`L51` shape above.
+2. It prints the findings whose status it **cannot** determine, rather than
+   assuming them closed. That list was 25 entries; each was read once, and the
+   fifteen that were open are now rows.
+3. Findings it excludes are excluded **by name with the measurement that settles
+   it**, in the script's `ADJUDICATED` table — "closed on a branch that is merged
+   into main", "the literal the finding names is gone from the file". Twenty
+   entries, each re-checked on every run, and the script reports any that name a
+   finding which no longer exists.
 
-`docs/HALF-BUILT-MECHANISMS.md` carries **F1–F12**, and this window found
-**F13**. F1 and AUDIT L60 are the same mechanism — location tracking that
-cannot be switched on — so they are **one row**, not two. → **48 + 13 − 1 = 60**.
+The ID pattern also had to widen to `[CHLMFX]`: the original `[CHLF]` silently
+skipped **M1–M7** entirely, reporting 114 findings where there are 121. A
+population regex that drops a whole severity class is the same defect as a
+hand-written count, and it is why the number above is now printed by a command.
+
+What the script measures, on this branch tip:
+
+```
+audit findings:      121
+half-built findings: 12
+by status:           CLOSED=39  OPEN=48  UNKNOWN=46
+
+open:                48
+of those, covered by workstreams 0-7: 18
+population (open, uncovered):         28
+```
+
+**The population is 78 rows carrying 80 distinct IDs** — the 60 this document
+first claimed, plus the eighteen it missed. Two rows name two IDs because two
+IDs are one mechanism. Every row carries exactly one bucket, and the bucket
+totals are re-counted from this file's own tables in §6.
 
 **A finding with two separable halves gets one row, in the bucket of its
 *unfinished* half**, with the finished half stated on that row. Otherwise the
@@ -57,7 +88,7 @@ bucket totals are re-counted from this file's own tables at the bottom. If that
 check does not sum to 60, this document is wrong and should be read as such.
 
 A note on the third bucket's name. The brief asked for fixed-here, queued, or
-not-worth-doing-with-a-reason. Thirteen rows are queued **behind a decision that
+not-worth-doing-with-a-reason. Fifteen rows are queued **behind a decision that
 is not mine to make** — the data-touching ones, the ones that spend money or
 turn on a device, the one holding a live credential. They are queued, not a
 fourth bucket; the table marks them `QUEUED-OWNER` so they can be read off in
@@ -133,12 +164,12 @@ a nonexistent signature id would have broken.
 
 ---
 
-## 2. Queued — 37
+## 2. Queued — 53
 
 Ordered by what is holding each one, not by severity. `QUEUED-OWNER` means the
 next step is a decision I was told not to make or cannot make from here.
 
-### Blocked on a decision that is not mine — 13
+### Blocked on a decision that is not mine — 15
 
 | ID | what it is | bucket | what is actually needed |
 |---|---|---|---|
@@ -155,8 +186,10 @@ next step is a decision I was told not to make or cannot make from here.
 | `L80` | `projectsStore.canManageSite:1191` admits a crew or viewer who personally created a site | QUEUED-OWNER | Two definitions of "may manage this site". Narrowing it changes who can act on sites created before `POST /projects/sites` became manager+, which is a live-data permission change. |
 | `L13` (staging half) | `eas.json` staging targets `api-staging.getsitesnapai.com`, deliberately not attached | QUEUED-OWNER | There is no staging environment; attaching the host would point it at nothing. Blocked on infrastructure that does not exist. |
 | `F2` | a complete, tenant-isolated, test-covered template subsystem no client can reach, carrying an Australian WHS compliance default | QUEUED-OWNER | Three `/entry-templates` routes. Either wire a client or delete them; deleting a WHS default is a product call. This is Block B's rule applied to code that already exists: tests and no caller is not built. |
+| `L5` | in-memory rate limiting and revocation on a single instance; `ioredis` support already exists behind `REDIS_URL` | QUEUED-OWNER | The finding's own disposition is "No action now" and it is still right — but only while the instance count is 1, and **the instance count is the owner's to state**. The standing instruction is that I do not guess it in the code or the docs. The day it becomes 2, every rate limit and every revocation becomes per-instance and a revoked token keeps working on the other one. This is the queue entry for that fact, not for a code change. |
+| `L45` (verification half) | the portal sends no photographs to the diary generator — fixed 4 October 2026; what the fix cannot show is that the output is visibly better | QUEUED-OWNER | Needs a live generation against a real site with photographs, compared with a diary generated before the commit. That is a billable OpenAI call against production data, and `test:openai` is opt-in and deliberately out of CI for exactly that reason. The owner runs it or decides it does not need running. The code half is closed. |
 
-### Blocked on work with a named precondition — 10
+### Blocked on work with a named precondition — 14
 
 | ID | what it is | precondition |
 |---|---|---|
@@ -170,8 +203,12 @@ next step is a decision I was told not to make or cannot make from here.
 | `L49` (remaining half) | portal hydration mismatches — React #418/#423/#425 | Half closed. Sixteen hydration call sites remain. Mechanical, large, and unverifiable without a browser, which this environment does not have. |
 | `L17` | "channel unconfigured in production" is structurally unreachable in tests | Needs an isolated `NODE_ENV=production` harness: that flag also switches `isProd` across `routes/auth.ts` and binds `getPgPool()` to `DATABASE_URL` rather than `TEST_DATABASE_URL`. A harness, not a flag flip. |
 | `L12` | two schema sources of truth | **Narrowed, not closed, this window.** `979a0f5` added `storage/sqlSchemaAudit.ts` + 292 lines of test, which checks every SQL column reference in the stores against the schema the migrations declare — so a store-vs-schema drift now fails CI instead of 500ing in production. The consolidation itself (one additive migration for `project_diaries.{sections_json, safety_checklist_json}`, then delete the inline `CREATE`/`ADD COLUMN` from five stores and remove the schema-init calls from boot) is still open and is migration work. |
+| `L4` (nonce half) | the portal had no CSP at all — fixed; what ships now is `script-src 'self' 'unsafe-inline' 'unsafe-eval'` | `next.config.mjs:53`. `unsafe-inline` in `script-src` is most of what a CSP is for, so the header is a frame-ancestors and referrer control today rather than an XSS control. The fix is the nonce migration, which needs a browser to verify and pairs with the queued `L48` (`img-src` omits the API origin). Both are blocked on the same missing thing. |
+| `L85` | the portal's diary Approve button swallows its own failure — `catch (e) { console.error(e); }` | Phase 1b made the common case unreachable by not rendering the button for crew or viewer, which is avoidance rather than a fix: an expired session, a diary deleted by someone else and a 500 all still land in the silent branch. The finding states its own precondition — the fix is L73's shape, and converting one button inside a permissions change would leave the reports page half converted. Sequenced with L73's remaining call sites, alongside `L43` and `L42`. |
+| `L103` (client halves) | the accept route now mints a replacement credential and sets the cookie, and **neither client declares it** | Server side is closed and merged: `setSessionCookie` appears twice in `main`'s `routes/projects.ts`. The portal's `AcceptedInvite` type (`lib/api.ts:189-195`) still has **no `token` field**, so a replacement in the body is discarded by the type as well as the code, and mobile still self-corrects via `refreshToken()` — a second endpoint, not the one the route offers. Mobile's half ships only on an `eas update`, and the portal's is verifiable only in a browser. Both are the blocked thing, not the work. |
+| `M2` | structured output uses `json_object`, not a schema; grounding lives as prose in the prompt | `routes/ai.ts:552`, unchanged. `json_schema` with `strict: true` would delete the parse-failure fallback class outright and make the normalization layer a real grounding boundary. The finding names its own precondition — it "pairs naturally with the C1 prompt-versioning work" — and C1's provenance half is the one item in this document explicitly held for its own workstream. Doing the schema first would mean touching the same response shape twice. |
 
-### Portal and mobile work with no blocker but no caller yet — 14
+### Portal and mobile work with no blocker but no caller yet — 24
 
 | ID | what it is | why queued rather than done |
 |---|---|---|
@@ -189,10 +226,20 @@ next step is a decision I was told not to make or cannot make from here.
 | `L63` | exported diary and inspection HTML carries its own undocumented 14-colour palette | Branding work. This is workstream 9's population. |
 | `L64` | `CLAUDE.md`'s procedure for enumerating RLS-forced tables reports 11 of 15 | The documented `grep` under-reports because some tables are forced by a later migration than the one that creates them. `CLAUDE.md` already tells the reader to prefer the live `pg_class` query. Correcting the procedure is a `CLAUDE.md` edit and wants the owner's eye since it is the file every agent reads first. |
 | `L71` | the file-backed dev store does not persist companies | Dev-only. Real friction, no production surface. |
+| `H2` | **an offline diary save is rolled back and lost — data loss, not a UX gap** | Measured, not inferred: `apps/mobile/lib/offline-queue.ts:3` declares `QueuedOpType` as `"addEntry" | "updateEntry" | "deleteEntry" | "addSite" | "deleteSite"` — **no diary op of any kind**. So `addDiary` and `updateDiary` have no `isNetworkError` branch to take and roll the record out of state and cache on any failure. Generation succeeds on a weak connection, the save fails seconds later, and the specific generated document is gone; regenerating at temperature 0.3 produces a *different* report than the one the user may already have read, exported or approved. Against the product's own rule that captured data is never lost, a signed-off report is captured data. **This is the most serious thing in this document that is not already someone's decision**, and it was invisible for the whole run because its section carries no status label. Not fixed here: it is the offline queue's ordering problem (`L38`) in a second place, and a mutation queue wants its own window and its own red-on-revert, not a corner of a debt branch. |
+| `H3` (remaining half) | zero tests on both clients, and a suite that failed on live Twilio quota | Two of three halves are closed and measured: `notificationService.ts` carries a `NODE_ENV === "test"` guard (H3a), and mobile now runs **114 tests across 15 files**. What is left is `apps/supervisor-web`, which has **no test script and no test file on `main`** — `feat/photo-viewer` adds the first four, so this row closes when that branch merges — and the finding's higher-value half, extracting the queue-drain and rollback logic out of `data-context.tsx` into pure functions. That extraction is the same work as `H2` and should land with it. |
+| `L1` (shim half) | dead code and a misleading dependency | Three of the four deletions shipped in `d9235e8` (`aiService.ts`'s `AIServiceSync`, mobile's `ApiClient`, the superseded `utils/logger.ts`), `requireRole` is gone from `middleware/auth.ts`, and the `@tanstack/react-query` half was already corrected in the finding itself as **not** dead. What remains is two no-op shims at `apps/supervisor-web/lib/api.ts:70,73` — `saveToken` is `/* no-op — cookie is set by API */` and `clearToken` forwards to `clearLocalSession` — plus the legacy role mapping in `utils/authToken.ts`. The finding asked for a removal date rather than a removal; naming the two lines is that date. Minutes of work, behind anything with a user on the other end. |
+| `L3` | the API contract doc documents a surface that no longer exists | The original complaint (≈15 of ≈55 endpoints, legacy roles) was fixed by regenerating it — and regeneration is a point-in-time act with nothing holding it. `Projects/docs/api-contracts.md:3` says **"Generated from commit: `cc63dc2`"**, and `git rev-list --count cc63dc2..origin/main -- Projects/services/api/src/routes/` returns **53**. It documents 77 endpoints against 67 distinct route path literals. It is also stale by this branch: it still records `/auth/login` answering `404: user not found`, which `4b45c3c` deliberately removed as a user-enumeration oracle. The fix is not another regeneration — it is a generation step with a drift check, the shape `assert-ci-single-definition.sh` already uses. Until then a wrong contract doc is worse than none, which is the finding's own wording. |
+| `L50` (remaining half) | the portal's Live Map settings were all three dead — fixed for the Live Map, and the **Display section and the API URL field are open as the same finding** | The finding says so in its own disposition: same page, same mechanism, different section. Controls that are written to `localStorage`, re-displayed on load and read by nothing. Portal work, no blocker; it sits behind the dashboard-parity work because it is the same page. |
+| `L51` (remaining half) | below 640px the portal had no navigation at all — nine layout defects fixed, **tap-target sizing open and a rendered check still owed** | Both remainders are in the finding's own disposition. Tap-target sizing is deliberately separate because it is the one change that resizes a control, which the layout brief excluded. The rendered check at 375px and 768px is the harder half: verification there was code-and-build, and this environment has no browser, so nobody has yet *looked* at the thing that was repaired. That is the device/browser lane (`L61`), which is why this cannot simply be picked up. |
+| `L86` | the diary gate allowlists `draft`, so crew can move an **approved** diary back to draft | **The owner's decision has been made and this is the unbuilt half**: revert-to-draft is open to the author and manager+. The finding left it ungated deliberately and asked; the answer came; nothing was built. The gate is still `requireManagerToAttestDiaryStatus` on both `POST /projects/diaries` and `PATCH /projects/diaries/:id` (`routes/projects.ts:322,344`), and it permits `status: "draft"` for anybody. The change the finding names is one asymmetry, not a redesign — allow `draft` on POST only, refuse any `status` on PATCH — but as written that also removes the author's own route back, so the decided version needs the author check the decision names. It wants a DB-gated test with both controls and a red-on-revert, because it stands between a user and a refusal. |
+| `M1` | prompt injection via field notes and captions reaches a formal client-facing record | Unchanged, and measurably so: the only match for "never invent" or "untrusted" in `routes/ai.ts` is line 406, a **code comment about the fallback** — which is precisely what the finding said when it was written. The system prompt still demands detail and never forbids invention, and entry notes are embedded verbatim. The fix is one paragraph of prompt text, so it is small; it is here rather than fixed-here because a prompt change with no eval harness (`M6`) cannot be shown to have helped rather than drifted the output, and the two should land together. |
+| `M3` | no streaming and no progress; worst case is a 90-second blind spinner | `routes/ai.ts:380` still sends `detail: "auto"`. The finding's own pragmatic fix is two cheap parts — `detail: "low"` for images, which cuts vision tokens roughly fourfold and is usually sufficient for PPE and plant recognition, and staged client-side progress text keyed off request phases. Neither is blocked. It is behind `H2`/`M4` because a user who retries a blind spinner double-spends the rate budget, and duplicate submission is `M4`'s defect, not this one. |
+| `M4` | queued offline entries can duplicate on ambiguous failure — no idempotency key | Measured absent on both sides: zero matches for `idempotency` in `apps/mobile/lib/data-context.tsx` or `services/api/src/routes/projects.ts`. If a drained POST succeeds and the response is lost — which mobile networks do — the op stays queued and re-POSTs, and the server mints a fresh `uuidv7` each time, so the formal record gains a duplicate entry. Same family as `H2` and `L38`: it is the offline queue's correctness, and all three want one window. The client-generated id or an `Idempotency-Key` header is small; the upsert on the server is the part that needs the DB-gated test. |
 
 ---
 
-## 3. Not worth doing, with the reason — 14
+## 3. Not worth doing, with the reason — 16
 
 | ID | what it is | why not |
 |---|---|---|
@@ -210,6 +257,8 @@ next step is a decision I was told not to make or cannot make from here.
 | `L60`/`F1` | location tracking is unreachable dead code, while the app ships three location purpose strings, and the portal told managers to switch it on in a mobile row that does not exist | Two halves, one row. The **copy half is fixed**: workstream 7 removed the native L60 surface, and `b1e9daa` here rewrote `app/locations/page.tsx` to say sharing is unavailable rather than sending a manager to look for a switch that was never built — on a privacy feature, that reading is an accusation against the worker. The **feature half** is what puts this row in this bucket. Building it is a privacy feature requiring consent UI, a native permission flow, a device to test on, and a product decision about tracking workers. The purpose strings without the feature were the defect; that is closed. Building it is a product, not a debt item. |
 | `L100` (residual) | one counter cannot mean both "this token is revoked" and "this token's claims are stale" | The behavioural half was **decided and implemented** on `feat/sessions-and-tokens`: `token_generation` on the row, read by `requireAuth` on every request. The residual is that the same counter is incremented by a revoke-all *and* by a role change, so a demoted crew member is signed out mid-shift with capture still queued offline. That is not a defect any more — it is the owner's decision, taken deliberately: **sign-out stays account-wide**, recorded as ADR-0005 on workstream 0. Separating the two meanings needs a second column and a migration, which the decision declined. The finding's own words for what is left are "a comment, not behaviour", and the ADR is a better home for it than a comment. |
 | `H5` | `supervisor-web` `next build` was broken on `main` | Marked `held (user decision)` with the fix located in the eslint config. The portal has been deployed repeatedly since. **I did not verify this** — `Projects/scripts/ci.sh` runs lint, typecheck and tests but not `next build`, and running a production build of the portal was outside this branch's scope. Recorded as almost certainly stale, needing one `pnpm -C Projects --filter sitesnap-supervisor-web run build` to confirm, which is the honest state rather than a claim. |
+| `M5` (cost half) | token and cost blindness on the one paid API | **The measurement half is closed and the finding's "Where" clause is now false**: `routes/ai.ts:660-661` reads `response.usage.input_tokens` / `output_tokens` and `tokenUsage` is persisted and returned (`:600,721,796`). What is left is the finding's secondary ask — a rough per-request cost estimate from the configured model's prices. That is a hardcoded price table for a model set by the `OPENAI_MODEL` environment variable, so it would be wrong the first time the model changes and wrong silently, which is the `L25` class again. Tokens are the durable number and they are now recorded; the dollar figure belongs in the OpenAI dashboard, which already has it. Not worth building a price table the repo cannot keep true. |
+| `M6` | LLM output quality has no regression harness | Not built, and the finding's own specification is the reason it stays that way for now: it asks for an eval that "calls the real API when `OPENAI_API_KEY` is present", run manually before a prompt change, **explicitly not in CI**. That is `test:openai`, which already exists, is already opt-in, already makes real billable calls, and already covers the request-shape contract the mock cannot. The gap between what exists and what the finding asks for is the fixture set and the grounding assertions — real work, and work whose value is entirely in being run by hand before a prompt change by someone who can read the output. Building the harness without that habit produces a script nobody runs. It is recorded here with its reason rather than queued, because queueing it implies the next window could land it, and what it actually needs is `M1`'s prompt change to be in flight at the same time. |
 
 ---
 
@@ -323,39 +372,169 @@ the architecture document as absent.
 | bucket | rows |
 |---|---|
 | fixed here | 9 |
-| queued — blocked on an owner decision (`QUEUED-OWNER`) | 13 |
-| queued — blocked on work with a named precondition | 10 |
-| queued — no blocker, not yet reached | 14 |
-| not worth doing, with the reason | 14 |
-| **total** | **60** |
+| queued — blocked on an owner decision (`QUEUED-OWNER`) | 15 |
+| queued — blocked on work with a named precondition | 14 |
+| queued — no blocker, not yet reached | 24 |
+| not worth doing, with the reason | 16 |
+| **total** | **78** |
 
-Derived population: 121 findings − 32 all-labels-closed − 41 no-label
-+ 5 no-label-but-open-in-prose − 5 closed-by-a-later-label + 13 half-built
-− 1 (L60 and F1 are one mechanism) = **60**.
+Queued totals 53. 9 + 53 + 16 = 78 rows, carrying 80 distinct IDs, because two
+rows name two IDs each — `L60`/`F1` (location tracking) and `L91`/`F9` (the void
+gate) — per the one-row-per-mechanism convention above.
 
-Queued totals 37. 9 + 37 + 14 = 60, and every ID above appears on exactly one
-row. That was checked by a script that parses the tables in **this file** and
-diffs the IDs it finds against the population derived from `docs/AUDIT.md` and
-`docs/HALF-BUILT-MECHANISMS.md`, rather than by reading down the columns:
+The population is not re-derived here in prose, because deriving it in prose is
+the defect this section now records twice. It is printed by
+`Projects/scripts/assert-triage-covers-open-findings.py`, which parses the tables
+in **this** file and diffs them against `docs/AUDIT.md` and
+`docs/HALF-BUILT-MECHANISMS.md`:
 
 ```
-fixed-here           9   L18 L91/F9 L104 F13 F12 F3 F7 F4 L8
-queued-owner        13   L11 L24 L20 L21 L31 L32 L33 L40 L61 L72 L80 L13 F2
-queued-precond      10   L39 L37 L38 L34 L14 L16 L46 L49 L17 L12
-queued-unreached    14   L9 L7 L15 L19 L22 L27 L42 L43 L44 L48 L54 L63 L64 L71
-not-worth           14   L23 L55 L62 L82 L83 F5 F6 F8 F10 F11 C1 L60/F1 L100 H5
+audit findings:      121
+half-built findings: 12
+by status:           CLOSED=39  OPEN=48  UNKNOWN=46
 
-rows=60  distinct IDs=62  dupes=none
-stated buckets=['9', '13', '10', '14', '14'] sum=60  stated total=60
-MISSING: []   EXTRA: []
+open:                48
+of those, covered by workstreams 0-7: 18
+population (open, uncovered):         28
+bucket headings:     all match their row counts
+IDs in a table row:  80
+
+no status signal (46) -- printed in full by the script, elided here
+
+MISSING (open, uncovered, no row):
+  (none)
+
+adjudicated out of the population: 20 (each with its measurement, see ADJUDICATED above)
 
 VERDICT: PASS
 ```
 
-Sixty-two distinct IDs across sixty rows because two rows name two IDs each, per
-the convention above. The first run of that check did not pass, and both things
-it caught were real: **L100 had no row at all**, and **F1 appeared in two
-buckets** — the copy half under fixed-here and the feature half under not worth
-doing — which is exactly the double-count the one-row-per-mechanism convention
-exists to stop. The two errors happened to cancel in the total, which is the
-argument for checking the rows rather than the sum.
+### The two runs that did not pass, and why both are recorded rather than fixed quietly
+
+**First run — two errors that cancelled in the total.** `L100` had no row at
+all, and `F1` appeared in two buckets: the copy half under fixed-here and the
+feature half under not-worth-doing. One missing and one doubled summed to the
+same sixty, so the total was green over a wrong list. That is the argument for
+checking the rows rather than the sum.
+
+**Second run — eighteen missing rows behind a green check.** The first version of
+this document shipped with `MISSING: []  EXTRA: []  VERDICT: PASS` pasted into
+this section, and it was lying, because the *population* it diffed against was
+itself derived by hand. The check compared the rows to a list built from status
+labels, so a finding carrying no label was absent from both sides and could not
+be reported missing. Eighteen were: `H2` `H3` `L1` `L3` `L4` `L5` `L45` `L50`
+`L51` `L85` `L86` `L103` `M1` `M2` `M3` `M4` `M5` `M6`.
+
+It surfaced by accident, from the wrong direction. Workstream 9's population
+work found the portal dashboard counting its metric cards client-side from
+`/projects/bootstrap`, whose three list calls take `limit = 200` — so the cards
+are silently wrong past 200 records. Looking up the audit entry for that
+mechanism found **L98**, verdict "Not fixed", and then found that L98 had no row
+in this document. L98 turned out to be legitimately outside the population
+(workstream 4 pushed the range into the `WHERE` clause and `ADJUDICATED` now
+records that with the commit), but the question it forced — *how many other open
+findings have no row?* — had an answer, and the answer was eighteen.
+
+Both failures are the same failure at different depths. The first was a wrong
+list under a correct check. The second was a wrong check: a count derived in
+prose, pasted as output, and read as a measurement for the life of a branch.
+That is the owner's standing rule — **any pinned count is measured, never
+hand-written** — applied to the one number in this document that was not. The
+script is the fix; this section is the record. It is deliberately **not** wired
+into `Projects/scripts/ci.sh`, because doing so would fail the build the moment a
+new audit finding lands without a triage row, and that is a gate nobody asked
+for. The owner decides whether to turn it on.
+
+### Red-on-revert, both doors
+
+The check has two independent ways to catch a missing row, so both were reverted
+separately. The rule is the owner's: revert the line, run it, paste the failure,
+restore it, and confirm the rest stayed green.
+
+**Proof 1 — a finding with no status label.** `H2`'s row deleted. This is the
+one that mattered, because it is the exact shape of the eighteen: a finding the
+old derivation could not see.
+
+```
+=== PROOF 1: delete H2's row (a finding with NO status label) ===
+H2 row removed
+bucket headings:     1 heading disagrees with its row count
+  Portal and mobile work with no blocker but no caller yet: heading says 24, rows count 23
+IDs in a table row:  79
+
+no status signal (46) -- printed in full by the script, elided here
+  H2 is in this group and has no row
+
+MISSING (open, uncovered, no row):
+  (none)
+
+VERDICT: FAIL -- 1 finding(s) with no status signal and no row; a bucket heading disagrees with its row count
+exit=1
+```
+
+Note the `MISSING: (none)` in that output. **The first version of the script
+passed this revert.** `H2` carries no status label, so it never entered
+`population`, so the ID diff had nothing to report — only the bucket arithmetic
+caught it, and only because I had not also corrected the heading. That is the
+hole the eighteen hid in, reproduced on demand. The fix was to make
+`unknown_unrowed` a hard failure in its own right: a finding leaves this document
+by exactly three doors — it gets a row, a workstream covers it, or `ADJUDICATED`
+names it with the measurement that closes it. *"Its section has no status label"*
+is not a door. The output above is from the corrected script.
+
+**Proof 2 — a labelled, half-open finding, with the heading corrected so only
+the ID diff can catch it.** `L51`'s row deleted *and* the bucket heading
+decremented to 23, which leaves the arithmetic check green on purpose. That is
+the "others stayed green" half: the bucket check is demonstrably not what caught
+this one.
+
+```
+=== PROOF 2: delete L51's row (a labelled, half-open finding) and fix the heading so only the ID check can catch it ===
+L51 row removed and heading decremented to 23
+bucket headings:     all match their row counts
+IDs in a table row:  79
+
+MISSING (open, uncovered, no row):
+  L51
+    L51: Fixed for the nine layout defects above. Tap-target sizing is open as a separate,
+
+VERDICT: FAIL -- 1 open finding(s) unrowed
+exit=1
+```
+
+**Proof 3 — the real one, needing no revert at all.** Run the committed script
+against this document *as it was actually committed* at `05a68ee`:
+
+```
+$ git show 05a68ee:docs/DEBT-TRIAGE.md > docs/DEBT-TRIAGE.md
+$ python3 Projects/scripts/assert-triage-covers-open-findings.py
+
+IDs in a table row:  62
+
+NO SIGNAL AND NO ROW (15) -- each needs a row, a workstream, or an ADJUDICATED entry with its measurement:
+  H2 H3 L1 L103 L3 L4 L5 L85 L86 M1 M2 M3 M4 M5 M6
+
+MISSING (open, uncovered, no row):
+  L45 L50 L51
+    L45: Fixed, 4 October 2026. What cannot be checked from here: that the model's output is visibl
+    L50: Fixed for the Live Map. The three controls now govern the page they describe, the
+    L51: Fixed for the nine layout defects above. Tap-target sizing is open as a separate,
+
+VERDICT: FAIL -- 15 finding(s) with no status signal and no row; 3 open finding(s) unrowed
+exit=1
+```
+
+15 + 3 = **the eighteen**, split exactly along the two causes: fifteen that
+carry no status label at all, and three whose label opens with the word
+*"Fixed"* and carries an open clause in the same sentence. No line was reverted
+to produce this — it is the state that shipped, failing the check that should
+have been there. Proofs 1 and 2 above exist because a single-row revert isolates
+each door; this one is the evidence that both doors were open at once in a
+pushed commit.
+
+`L51` is also the finding whose label opens with the word **Fixed** and carries
+an open clause in the same sentence, so this proof exercises `classify`'s
+any-open-signal-wins rule at the same time as the ID diff.
+
+Both lines restored, the check back to `VERDICT: PASS` at exit 0, and the full
+output of that passing run is the block above in this section.
