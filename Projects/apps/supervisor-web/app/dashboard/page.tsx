@@ -6,6 +6,7 @@ import Topbar from "@/components/Topbar";
 import { SkeletonMetrics, SkeletonTable } from "@/components/Skeleton";
 import { getSavedUser } from "@/lib/api";
 import { useBootstrap } from "@/lib/useBootstrap";
+import { usePortfolioSummary } from "@/lib/usePortfolioSummary";
 import { useRole } from "@/lib/useRole";
 
 const STATUS_CFG: Record<string, { label: string; color: string; bg: string }> = {
@@ -58,15 +59,45 @@ export default function DashboardPage() {
   const error = bootstrap.status === "error" ? bootstrap.message : "";
   const [search, setSearch] = useState("");
 
+  /**
+   * The metric cards count in the DATABASE, not in this component. AUDIT L98.
+   *
+   * Every figure here used to be measured off the `useBootstrap()` arrays —
+   * `data.sites.filter(...).length`, `data.entries.length` and so on. Those
+   * arrays arrive capped at the API's default `limit = 200`, because
+   * `/projects/bootstrap` passes no limit to `listSites`/`listEntries`/
+   * `listDiaries`. So a company with five thousand entries read "200", and the
+   * derived figures were worse than the raw ones: an approval rate of
+   * `approved / diaries.length` is the rate across the most recent two hundred
+   * diaries, rendered as a percentage of all of them, with a progress bar and a
+   * red/amber/green colour behind it.
+   *
+   * `usePortfolioSummary` asks `GET /projects/summary`, which counts in SQL.
+   *
+   * When that request has not succeeded, these cards show an em dash rather
+   * than falling back to the bootstrap arrays. Falling back is the tempting
+   * option and it is the wrong one: it would restore exactly the silently-wrong
+   * number this change exists to remove, on the one path nobody tests. A
+   * missing number is visibly missing; a capped one is not.
+   */
+  const summary = usePortfolioSummary(canSeeSupervisorDashboard);
+  const totals = summary.status === "ok" ? summary.data : null;
+  const totalsError = summary.status === "error" ? summary.message : "";
+
   const metrics = useMemo(() => {
-    if (!data) return null;
-    const approved = data.diaries.filter((d) => d.status === "approved").length;
-    const pending  = data.diaries.length - approved;
-    const active   = data.sites.filter((s) => s.status === "active").length;
-    const completed = data.sites.filter((s) => s.status === "completed").length;
-    const approvalRate = data.diaries.length > 0 ? Math.round((approved / data.diaries.length) * 100) : 0;
-    return { approved, pending, active, completed, approvalRate };
-  }, [data]);
+    if (!totals) return null;
+    const approvalRate = totals.diaries > 0 ? Math.round((totals.approvedDiaries / totals.diaries) * 100) : 0;
+    return {
+      approved:   totals.approvedDiaries,
+      pending:    totals.draftDiaries,
+      active:     totals.activeSites,
+      completed:  totals.completedSites,
+      sites:      totals.sites,
+      entries:    totals.entries,
+      diaries:    totals.diaries,
+      approvalRate,
+    };
+  }, [totals]);
 
   const filteredSites = useMemo(() => {
     if (!data) return [];
@@ -136,7 +167,7 @@ export default function DashboardPage() {
             </div>
             {metrics && (
               <div style={{ background: "rgba(255,255,255,0.1)", borderRadius: 10, padding: "8px 14px", fontSize: 13, color: "rgba(255,255,255,0.8)", fontWeight: 500 }}>
-                🏗️ {metrics.active} active · {data?.sites.length ?? 0} total projects
+                🏗️ {metrics.active} active · {metrics.sites} total projects
               </div>
             )}
           </div>
@@ -145,17 +176,29 @@ export default function DashboardPage() {
           {loading && <><SkeletonMetrics count={4} /><SkeletonTable rows={4} /></>}
           {error   && <p style={{ color: "var(--error)" }}>{error}</p>}
 
-          {metrics && (
+          {/*
+            Gated on `data`, not on `metrics`. The site table below reads the
+            bootstrap payload, so gating the whole block on the totals request
+            would make a failed count take the table down with it — a second
+            screen lost to a number.
+          */}
+          {data && (
             <>
               <div className="metrics-grid">
-                <MetricCard label="Active Sites"      value={metrics.active}   accent="#22C55E" iconBg="#F0FDF4" icon="🏗️" sub={`${metrics.completed} completed`} />
-                <MetricCard label="Total Entries"     value={data!.entries.length} accent="var(--primary)" iconBg="#EFF6FF" icon="📄" />
-                <MetricCard label="Approved Diaries"  value={metrics.approved} accent="var(--accent)" iconBg="#FFF7ED" icon="✅" sub={`${metrics.approvalRate}% approval rate`} />
-                <MetricCard label="Pending Review"    value={metrics.pending}  accent="var(--warning)" iconBg="#FFFBEB" icon="⏳" />
+                <MetricCard label="Active Sites"      value={metrics?.active ?? "—"}   accent="#22C55E" iconBg="#F0FDF4" icon="🏗️" sub={metrics ? `${metrics.completed} completed` : undefined} />
+                <MetricCard label="Total Entries"     value={metrics?.entries ?? "—"} accent="var(--primary)" iconBg="#EFF6FF" icon="📄" />
+                <MetricCard label="Approved Diaries"  value={metrics?.approved ?? "—"} accent="var(--accent)" iconBg="#FFF7ED" icon="✅" sub={metrics ? `${metrics.approvalRate}% approval rate` : undefined} />
+                <MetricCard label="Pending Review"    value={metrics?.pending ?? "—"}  accent="var(--warning)" iconBg="#FFFBEB" icon="⏳" />
               </div>
 
+              {totalsError && (
+                <p style={{ fontSize: 13, color: "var(--text-secondary)", marginTop: 4 }}>
+                  Portfolio totals are unavailable — {totalsError}
+                </p>
+              )}
+
               {/* Approval health */}
-              {data!.diaries.length > 0 && (
+              {metrics && metrics.diaries > 0 && (
                 <div className="health-card">
                   <div className="health-row">
                     <span style={{ fontSize: 16 }}>📊</span>
@@ -166,7 +209,7 @@ export default function DashboardPage() {
                     value={metrics.approvalRate}
                     color={metrics.approvalRate >= 80 ? "#22C55E" : metrics.approvalRate >= 50 ? "#F59E0B" : "#EF4444"}
                   />
-                  <span className="health-sub">{metrics.approved} of {data!.diaries.length} diaries approved</span>
+                  <span className="health-sub">{metrics.approved} of {metrics.diaries} diaries approved</span>
                 </div>
               )}
 
@@ -175,7 +218,12 @@ export default function DashboardPage() {
                 <div className="card-header">
                   <span style={{ fontSize: 16 }}>🏢</span>
                   <span className="card-title">Site Portfolio</span>
-                  <span className="card-count">{data!.sites.length}</span>
+                  <span className="card-count">{metrics?.sites ?? data.sites.length}</span>
+                  {metrics && metrics.sites > data.sites.length && (
+                    <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+                      showing {data.sites.length}
+                    </span>
+                  )}
                   <input
                     type="search"
                     placeholder="Search sites…"

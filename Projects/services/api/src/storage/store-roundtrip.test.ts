@@ -194,6 +194,101 @@ if (!process.env.TEST_DATABASE_URL) {
     assert.equal(row!.status, "active");
   });
 
+  /**
+   * ───────────────────────────────────────────────────────────────────────────
+   * getPortfolioCounts — AUDIT L98. The one thing the in-memory suite cannot
+   * prove, because the defect is the SQL `LIMIT`.
+   *
+   * `/projects/summary` and the portal dashboard both reported totals by
+   * loading a list and measuring it, through calls that pass no limit and so
+   * take `listSites`/`listEntries`/`listDiaries`' default `limit = 200`. The
+   * number came back plausible and wrong, and nothing reported it.
+   *
+   * WHY THIS LIVES HERE rather than in a new DB-gated suite: `applyMigrations`
+   * is currently copied into all eleven DB suites, and workstream 8 hoists
+   * those eleven into one shared helper. A twelfth copy would leave that hoist
+   * silently incomplete and its pinned count of eleven wrong, so this uses the
+   * migrated pool this file already stands up.
+   *
+   * WHY A FRESH COMPANY PER RUN: every other test in this file uses the fixed
+   * `rt-company` with `ON CONFLICT DO NOTHING`, so rows accumulate across runs
+   * against a persistent `TEST_DATABASE_URL`. An absolute count assertion on a
+   * shared company would pass once and then drift. These two companies are
+   * unique per run, so `201` and `3` are exact rather than lower bounds.
+   * ───────────────────────────────────────────────────────────────────────────
+   */
+  const ABOVE_THE_LIST_CAP = 201; // the default is 200; this must exceed it
+
+  const seedCompany = async (tag: string, entryCount: number) => {
+    const companyId = `pc-${tag}-${Date.now()}`;
+    const email = `${companyId}@test.local`;
+    const who: Actor = { email, role: "admin", companyId, companyRole: "owner" };
+    await pool.query(
+      `INSERT INTO auth_users (email, password_hash, full_name, phone, role, company_id, company_role)
+       VALUES ($1,'x','PC Owner',$2,'admin',$3,'owner')
+       ON CONFLICT (email) DO NOTHING`,
+      [email, "+65" + String(Date.now()).slice(-9), companyId]
+    );
+    const site = await S.createSite(who, {
+      name: `PC Site ${tag}`, address: "2 Count Rd", client: "PC Client",
+      startDate: "2026-01-01", status: "active",
+    } as Parameters<typeof S.createSite>[1]);
+    for (let i = 0; i < entryCount; i += 1) {
+      await S.createEntry(who, {
+        siteId: site.id, date: "2026-03-03", locationAddress: "Zone C", weather: "Fine",
+        crewCount: "2", notes: `count probe ${i}`, photos: [],
+      } as Parameters<typeof S.createEntry>[1]);
+    }
+    return { who, siteId: site.id, companyId };
+  };
+
+  test("getPortfolioCounts counts past the list's limit, and stays inside the company", async () => {
+    const a = await seedCompany("a", ABOVE_THE_LIST_CAP);
+    const b = await seedCompany("b", 3);
+
+    // The control that makes the assertion below mean something: the list
+    // really is capped, so a count that agrees with the list would be the bug.
+    // If someone "fixes" L98 by raising the limit instead of counting in SQL,
+    // this line fails and says so.
+    const listed = await S.listEntries(a.who);
+    assert.equal(listed.length, 200, "listEntries' default cap is no longer 200 — L98's premise changed");
+
+    const countsA = await S.getPortfolioCounts(a.who);
+    assert.equal(
+      countsA.entries, ABOVE_THE_LIST_CAP,
+      `portfolio count ${countsA.entries} — a count that stops at the list's limit is the L98 defect`
+    );
+
+    // Tenant isolation, both directions, same endpoint. A negative alone would
+    // pass equally well against a function that counts nothing at all.
+    const countsB = await S.getPortfolioCounts(b.who);
+    assert.equal(countsB.entries, 3, "B must count its OWN rows (positive control)");
+    assert.notEqual(countsB.entries, ABOVE_THE_LIST_CAP + 3, "B must not count A's rows");
+    assert.equal(countsA.entries, ABOVE_THE_LIST_CAP, "A must not count B's rows");
+
+    // One site each, created active, so the status breakdown is checkable
+    // against a known shape rather than against itself.
+    assert.equal(countsA.sites, 1);
+    assert.equal(countsA.activeSites, 1);
+    assert.equal(countsA.completedSites, 0);
+    assert.equal(countsA.onHoldSites, 0);
+  });
+
+  test("getPortfolioCounts' diary breakdown splits approved from draft", async () => {
+    const c = await seedCompany("c", 0);
+    for (const status of ["approved", "approved", "draft"] as const) {
+      await S.createDiary(c.who, {
+        siteId: c.siteId, status, summary: "s", reportPeriod: "daily", fullReport: "f",
+        safetyChecklist: [], sections: [],
+      } as Parameters<typeof S.createDiary>[1]);
+    }
+    const counts = await S.getPortfolioCounts(c.who);
+    assert.equal(counts.diaries, 3);
+    assert.equal(counts.approvedDiaries, 2);
+    assert.equal(counts.draftDiaries, 1, "draft is derived by subtraction — DiaryStatus is a closed two-value union");
+    assert.equal(counts.entries, 0, "a company with no entries counts zero, not the other companies' rows");
+  });
+
   test("auth_users.settings: personal settings round-trip + partial JSONB merge (migration 028)", async () => {
     const { getUserSettings, updateUserSettings } = await import("./authStore");
     assert.deepEqual(await getUserSettings(OWNER), {}, "no settings before any write");

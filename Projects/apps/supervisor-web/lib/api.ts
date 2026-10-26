@@ -45,6 +45,26 @@ export interface BootstrapData {
   diaries: Diary[];
 }
 
+/**
+ * Portfolio totals from `GET /api/projects/summary`, counted in SQL.
+ *
+ * These are NOT `bootstrap.sites.length` and friends. The bootstrap arrays come
+ * back capped at the API's default `limit = 200`, so measuring them reports two
+ * hundred for any company past two hundred records — AUDIT L98. The dashboard's
+ * metric cards read these instead.
+ */
+export interface PortfolioSummary {
+  sites: number;
+  activeSites: number;
+  completedSites: number;
+  onHoldSites: number;
+  entries: number;
+  diaries: number;
+  approvedDiaries: number;
+  draftDiaries: number;
+  actorRole: string;
+}
+
 // Auth token is stored in an httpOnly cookie set by the API — JavaScript cannot
 // read it, which eliminates XSS token theft.  User profile info (non-secret) is
 // kept in localStorage for display purposes only.
@@ -214,6 +234,10 @@ export async function login(email: string, password: string): Promise<{ token: s
 
 export async function fetchBootstrap(): Promise<BootstrapData> {
   return request<BootstrapData>("GET", "/api/projects/bootstrap");
+}
+
+export async function fetchPortfolioSummary(): Promise<PortfolioSummary> {
+  return request<PortfolioSummary>("GET", "/api/projects/summary");
 }
 
 export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {

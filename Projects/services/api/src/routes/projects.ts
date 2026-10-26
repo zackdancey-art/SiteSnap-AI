@@ -21,6 +21,7 @@ import {
   deleteSite,
   deleteSiteInvite,
   deleteTemplate,
+  getPortfolioCounts,
   getScopedBootstrap,
   getSupervisorReport,
   listDiaries,
@@ -181,23 +182,30 @@ projectsRouter.get("/projects/bootstrap", async (req, res) => {
   res.json(payload);
 });
 
+/**
+ * Portfolio totals. AUDIT L98.
+ *
+ * This route used to answer by loading three lists and measuring them, with no
+ * limit passed — so every figure it returned was silently capped at
+ * `listSites`/`listEntries`/`listDiaries`' default `limit = 200`. It now asks
+ * `getPortfolioCounts`, which counts in SQL; read that function's comment for
+ * why the cap is removed rather than raised, and for how the count borrows the
+ * lists' own visibility predicate instead of copying it.
+ *
+ * `activeSites`, `completedSites` and `onHoldSites` are new. The previously
+ * returned keys are unchanged in name and meaning, so the response is additive:
+ * nothing that read the old shape has to change to keep working.
+ *
+ * Called by the portal dashboard's metric cards —
+ * `apps/supervisor-web/app/dashboard/page.tsx`, via `fetchPortfolioSummary` in
+ * `apps/supervisor-web/lib/api.ts`. Before this workstream the route had no
+ * client caller at all, in either app, which is why nobody ever saw it report
+ * two hundred of five thousand entries.
+ */
 projectsRouter.get("/projects/summary", requireAtLeast("viewer"), async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
-  const [sites, entries, diaries] = await Promise.all([
-    listSites(actor),
-    listEntries(actor),
-    listDiaries(actor),
-  ]);
-
-  const approvedDiaries = diaries.filter((diary) => diary.status === "approved").length;
-  res.json({
-    sites: sites.length,
-    entries: entries.length,
-    diaries: diaries.length,
-    approvedDiaries,
-    draftDiaries: diaries.length - approvedDiaries,
-    actorRole: actor.role,
-  });
+  const counts = await getPortfolioCounts(actor);
+  res.json({ ...counts, actorRole: actor.role });
 });
 
 projectsRouter.get("/projects/sites", async (req, res) => {
