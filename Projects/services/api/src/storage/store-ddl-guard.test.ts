@@ -173,6 +173,22 @@ test("migrations run before the two legacy init functions, which is the only rea
   );
 });
 
+// WHY THE SCAN BELOW STRIPS COMMENTS, and it is a merge finding rather than a
+// preference. This guard reported a failure on the twelve-branch union that
+// neither parent branch could produce: the soft-delete workstream deleted
+// `initDeliveriesSchema` and left a comment naming it twice where it used to
+// be, explaining why the table is a migration's job. Scanning raw source, the
+// documentation of the fix failed the test for the fix.
+//
+// Stripping comments first is the narrow correction. What it gives up is a
+// commented-out reintroduction, which is not what this test is for: a
+// commented-out CREATE TABLE executes nothing, and the DDL scan above -- which
+// has always stripped comments, for this same reason -- is what guards the
+// statement itself. What it keeps is the whole point of the test: a live call,
+// a live definition, or a live reference to any of the three is still a
+// failure, and the positive control below still proves the walk ran.
+//
+// Worth carrying to every other guard in this repo that greps source text.
 test("the three uncalled init*Schema functions are gone, and the two live ones are still called", () => {
   // The deleted three were uncalled AND stale — each one's CREATE TABLE omitted
   // the company_id that migration 017 added and that every live query in the
@@ -181,7 +197,10 @@ test("the three uncalled init*Schema functions are gone, and the two live ones a
   const deleted = ["initTemplateSchema", "initPushSchema", "initDeliveriesSchema"];
   const found: string[] = [];
   for (const full of sourceFiles(storage)) {
-    const code = fs.readFileSync(full, "utf8");
+    // stripComments, not the raw source. A comment that NAMES one of the three
+    // is documentation of the deletion, not a reintroduction of it -- and the
+    // raw scan could not tell the two apart. See the note under this test.
+    const code = stripComments(fs.readFileSync(full, "utf8"));
     for (const name of deleted) {
       if (code.includes(name)) found.push(`${path.basename(full)}: ${name}`);
     }
