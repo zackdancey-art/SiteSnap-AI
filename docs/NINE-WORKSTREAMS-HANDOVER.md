@@ -589,6 +589,9 @@ correction — 11 on the union — is unchanged; the claim about main is not.
 
 ## 7. The merge-conflict result
 
+**The counts in 7a were re-derived on 28 October 2026 and six of the twelve were
+wrong. Read 7a-note before relying on a row.**
+
 The rehearsal: a local throwaway branch `rehearsal/merge-all` off
 `origin/main` = `ee7e093`, twelve branches merged into it in the Group A → B → C
 order, **never pushed, nothing merged to main**. Gates on the finished tree:
@@ -602,22 +605,118 @@ skip), mobile 26 files / 207 tests / 0 skip, portal 4 files / 36 tests,
 |---|---|---|---|
 | 1 | WS0 `fix/workstream-0-safety` | 0 | first merge off main |
 | 2 | WS1 `feat/clients-sites-entries` | 0 | no overlap with WS0 |
-| 3 | WS2a `feat/timesheets-approval` | 5 | Four additive-shape: WS1 and WS2a each added a different predicate, export, import or test at the same place — both sides kept. The fifth was **not** additive: both branches independently replaced the same hand-written predicate array in `permissions.test.ts` with a derived one, so a union would have declared `predicates` twice. Kept WS1's (floor + `includes` control), dropped WS2a's (`length > 0` only). Plus the mobile pin collision, 16/123 against 15/118. |
-| 4 | WS2b `feat/whs-checklists` | 2 | `.eslintrc.js`: both branches added a different DB test file to the same no-bare-pool allowlist, each with its own justification comment — both kept. Mobile pins, 123 against 119. **`EXPECTED_TEST_FILES` did not conflict, and that is the noteworthy part**: both sides read 16, for different sets of files. |
-| 5 | WS3 `feat/storage-ceiling` | 1 | the mobile pins again |
-| 6 | WS4 `feat/report-periods` | 3 | `tsconfig.test.json`: both branches appended a module+test pair to the end of the `files` array. Both kept — **and the comma after the previous last entry had to be put back by hand.** A JSON array's last element has no trailing comma, so two branches appending always collide and a naive union is invalid JSON, which `tsc` reports as a parse error rather than as a missing test. Plus two pins. |
-| 7 | WS5 `feat/photo-viewer` | 3 | `lib/api.ts`: WS1 expanded `Site` (clientId + the filing note), WS5 expanded `EntryPhoto` (eleven fields the API already sends); the types are adjacent so one hunk carried both. Resolution: our `Site`, their `EntryPhoto`. `sites/[id]/page.tsx` import block, now carrying four workstreams — `Fragment` (WS1) and `useCallback` (WS5) both needed from react. Plus the mobile pin. |
-| 8 | WS6 `feat/bin-retention` | 11 files / 21 hunks | Mostly additive: two allowlist entries, two `Stack.Screen` rows, two provider methods, two interfaces sharing a doc opener, four row/mapper columns, two in-memory filters on one chain. **`listEntries` needed its two rewrites combined** — WS4's `range` parameter and WS6's `onLiveSite()` — which git had split across one conflict and one auto-merge. `deliveriesStore.ts`: both sides deleted `initDeliveriesSchema`, only WS6 left a note saying why; kept the note. Three semantic ones in the same merge, below. |
-| 9 | WS7 `feat/consent-and-native` | 4 | all additive: eslintrc allowlist, `ci.sh` step block, `tsconfig` `files[]` comma, mobile pins |
-| 10 | WS9 `feat/branding-and-dashboard-parity` | 3 + | `mobile/app/(tabs)/index.tsx`: adjacent imports, WS1's site-grouping and WS9's siteStatus, both kept — no `scfg` equivalent here, the phone had no local status table to delete. `mobile/tsconfig.test.json`: the `files` array again, WS1/WS2b/WS4/WS7's eight entries and WS9's four — union with the trailing-comma fix, 57 entries, all unique, **verified by parse**. Mobile pin, 16/123 vs 17/122. Three semantic ones in `supervisor-web/app/sites/page.tsx`, below. |
-| 11 | WS8 `feat/debt-and-cost-out` | 6 | **F3, rename/delete + modify/delete, WS0 × WS8** — resolved as instructed: keep WS0's renamed workflow, drop WS8's deletion. `permissions.ts`: textual union, WS1/WS2a's three predicates plus WS8's `canVoidSignature`, sharing a `/**` opener and a `return isManagerOrAbove(companyRole);}` tail; module now exports 11 `can*` predicates. `permissions.test.ts` hunk 1: WS1's clients test and WS8's *"voiding a signature is manager+, and signing one is not"* test, both kept. `sessions-and-tokens-db.test.ts` and `uploads-media-isolation.test.ts`: adjacent import lines, both kept. Mobile pin, 16/123 vs 15/114. One semantic one, below. |
-| 12 | `docs/nine-workstreams-handover` | 0 | docs only, order-independent |
+| 3 | WS2a `feat/timesheets-approval` | 6 **[c]** | Four additive-shape: WS1 and WS2a each added a different predicate, export, import or test at the same place — both sides kept. The fifth was **not** additive: both branches independently replaced the same hand-written predicate array in `permissions.test.ts` with a derived one, so a union would have declared `predicates` twice. Kept WS1's (floor + `includes` control), dropped WS2a's (`length > 0` only). Plus the mobile pin collision, 16/123 against 15/118. |
+| 4 | WS2b `feat/whs-checklists` | 3 **[c]** | `.eslintrc.js`: both branches added a different DB test file to the same no-bare-pool allowlist, each with its own justification comment — both kept. Mobile pins, 123 against 119. **`EXPECTED_TEST_FILES` did not conflict, and that is the noteworthy part**: both sides read 16, for different sets of files. |
+| 5 | WS3 `feat/storage-ceiling` | 1 **[v]** | the mobile pins again |
+| 6 | WS4 `feat/report-periods` | 3 **[v]** | `tsconfig.test.json`: both branches appended a module+test pair to the end of the `files` array. Both kept — **and the comma after the previous last entry had to be put back by hand.** A JSON array's last element has no trailing comma, so two branches appending always collide and a naive union is invalid JSON, which `tsc` reports as a parse error rather than as a missing test. Plus two pins. |
+| 7 | WS5 `feat/photo-viewer` | 3 **[v]** | `lib/api.ts`: WS1 expanded `Site` (clientId + the filing note), WS5 expanded `EntryPhoto` (eleven fields the API already sends); the types are adjacent so one hunk carried both. Resolution: our `Site`, their `EntryPhoto`. `sites/[id]/page.tsx` import block, now carrying four workstreams — `Fragment` (WS1) and `useCallback` (WS5) both needed from react. Plus the mobile pin. |
+| 8 | WS6 `feat/bin-retention` | 12 **[c]** | Mostly additive: two allowlist entries, two `Stack.Screen` rows, two provider methods, two interfaces sharing a doc opener, four row/mapper columns, two in-memory filters on one chain. **`listEntries` needed its two rewrites combined** — WS4's `range` parameter and WS6's `onLiveSite()` — which git had split across one conflict and one auto-merge. `deliveriesStore.ts`: both sides deleted `initDeliveriesSchema`, only WS6 left a note saying why; kept the note. Three semantic ones in the same merge, below. |
+| 9 | WS7 `feat/consent-and-native` | 5 **[c]** | all additive: eslintrc allowlist, `ci.sh` step block, `tsconfig` `files[]` comma, mobile pins |
+| 10 | WS9 `feat/branding-and-dashboard-parity` | 4 **[c]** | `mobile/app/(tabs)/index.tsx`: adjacent imports, WS1's site-grouping and WS9's siteStatus, both kept — no `scfg` equivalent here, the phone had no local status table to delete. `mobile/tsconfig.test.json`: the `files` array again, WS1/WS2b/WS4/WS7's eight entries and WS9's four — union with the trailing-comma fix, 57 entries, all unique, **verified by parse**. Mobile pin, 16/123 vs 17/122. Three semantic ones in `supervisor-web/app/sites/page.tsx`, below. |
+| 11 | WS8 `feat/debt-and-cost-out` | 7 **[c]** | **F3, rename/delete + modify/delete, WS0 × WS8** — resolved as instructed: keep WS0's renamed workflow, drop WS8's deletion. `permissions.ts`: textual union, WS1/WS2a's three predicates plus WS8's `canVoidSignature`, sharing a `/**` opener and a `return isManagerOrAbove(companyRole);}` tail; module now exports 11 `can*` predicates. `permissions.test.ts` hunk 1: WS1's clients test and WS8's *"voiding a signature is manager+, and signing one is not"* test, both kept. `sessions-and-tokens-db.test.ts` and `uploads-media-isolation.test.ts`: adjacent import lines, both kept. Mobile pin, 16/123 vs 15/114. One semantic one, below. |
+| 12 | `docs/nine-workstreams-handover` | 0 **[?]** | docs only, order-independent |
+
+**[c]** corrected on 28 October 2026 · **[v]** re-derived and verified unchanged ·
+**[?]** not derivable yet. The count is of conflicting **files**, against the base
+that row's branch will actually merge into. Every row's working is in 7a-note below;
+the prose in each cell is as written at the rehearsal and has not been edited.
 
 **The repeat offenders, in order of how often they collided:** the two mobile
 pins in `apps/mobile/scripts/run-tests.sh` (**nine of the twelve merges**),
 `tsconfig.test.json`'s `files` array (three), the `.eslintrc.js` allowlist
 (three), and `permissions.test.ts`'s predicate array (three, in three different
 shapes).
+
+### 7a-note. The counts above were wrong, and how they were re-derived — 28 October 2026
+
+**Why this note exists.** The merge sequence started on 27 October and the first
+two PRs to carry conflicts, 3 and 4, both arrived with a different number of
+conflicting files than 7a predicted. Once is a slip; twice is a reason to stop
+trusting the column, so every remaining row was re-derived from the repository
+rather than re-read from this table. **Six of the twelve rows were wrong.** The
+*resolutions* in those rows have held up — both merges applied the recorded
+resolution unchanged — so what drifted is the arithmetic, not the judgement.
+
+**Method, so it can be repeated.** `git merge-tree --write-tree --name-only
+<base> <branch tip>` prints the conflicting paths without touching the working
+tree or creating a commit. Run twice per row: once against today's `origin/main`
+(what GitHub's Update branch button is looking at right now) and once against
+the base the branch will actually see at its turn.
+
+**What makes the second number knowable in advance.** Each merge so far has
+landed the rehearsal's own resolution, so `main` reproduces the rehearsal trunk
+exactly. Measured, not assumed:
+
+- after PR 3, `git diff 638731d origin/main` is **empty** — the whole tree, not
+  just the conflicting files;
+- the merge pushed for PR 4, `47f50d4`, has a tree **identical** to the
+  rehearsal's `85e366f` (`git diff 47f50d4 85e366f` empty).
+
+So "`main` after PR *N*" = the rehearsal trunk after merge *N*, and the trunk
+commits on `rehearsal/merge-all-2` stand in for a future `main` — **for as long
+as that equality keeps being true, which is re-checked at every merge.** The
+other half of the stand-in: every remaining branch tip is byte-identical to the
+second parent of its rehearsal merge (`git rev-parse origin/<branch>` against
+`<merge>^2`, all seven **SAME**), so no branch has moved since the rehearsal.
+
+| PR | branch | 7a said | vs `main` today | vs the base it will see | why it differs |
+|---|---|---|---|---|---|
+| 3 | `feat/timesheets-approval` | 5 | — merged | **6** | **bookkeeping.** The row described the mobile pin collision in a trailing sentence, outside the count. |
+| 4 | `feat/whs-checklists` | 2 | 3 | **3** | **the back-port.** `10f5a57` moved this branch from `EXPECTED_TEST_FILES=16` to 17; 16 is what the trunk read, so before the back-port the line was identical on both sides and did not conflict. The row's reasoning was true when written. |
+| 5 | `feat/storage-ceiling` | 1 | 1 | **1** | nothing — **verified unchanged.** |
+| 6 | `feat/report-periods` | 3 | 2 | **3** | nothing — **verified unchanged.** The third file (`tsconfig.test.json`) is invisible against today's `main`: it needs PR 5's entries in the `files` array to collide with. |
+| 7 | `feat/photo-viewer` | 3 | 3 | **3** | nothing — **verified unchanged.** |
+| 8 | `feat/bin-retention` | 11 files / 21 hunks | 11 | **12** | **the back-port.** `f254fe9` raised `EXPECTED_ROUTES` and `EXPECTED_SCREEN_HEADER`, so `screen-header-audit.test.ts` now collides where it did not before. The old 11 is exactly the pre-back-port set, `deliveriesStore.ts` included. **Note the trap in the count:** against today's `main` it is also 11, but a *different* 11 — `screen-header-audit.test.ts` in, `deliveriesStore.ts` out. A count alone would have hidden the substitution. |
+| 9 | `feat/consent-and-native` | 4 | 4 | **5** | **bookkeeping.** The row named four — eslintrc, `ci.sh`, `tsconfig`, "mobile pins" — and left out `services/api/scripts/run-tests.sh`, which conflicts pre-back-port too. |
+| 10 | `feat/branding-and-dashboard-parity` | 3 + | 3 | **4** | **bookkeeping, via the notation.** `sites/page.tsx` is both a textual conflict and the home of three semantic ones; it was counted in 7b only, and the bare `+` carried that. |
+| 11 | `feat/debt-and-cost-out` | 6 | 6 | **7** | **bookkeeping.** `assert-workflow-runners-pinned.sh` was recorded as semantic conflict 15 and not in the textual count — understandably, since the `EXPECTED_PINNED` line inside it auto-merged; but the file also has a real conflict hunk on `EXPECTED_WORKFLOWS`. Both things are true of one file. |
+| 12 | `docs/nine-workstreams-handover` | 0 | 0 | **not derivable — see below** | the branch tip keeps moving. |
+
+**So: the back-port caused two of the six, and bookkeeping the other four.** No
+row changed because a branch moved; nothing drifted underneath this work. The
+two back-port rows are the back-port doing its job — putting the
+position-measured pin on the branch is what creates the collision, and a
+collision on a pinned count is the mechanism that forces it to be re-measured at
+the merge rather than inherited.
+
+**The consequence for how the remaining PRs get updated.** GitHub's Update
+branch button cannot resolve a textual conflict; it refuses. Every remaining PR
+except 12 has at least one — the mobile pins alone guarantee it — so **PRs 5, 6,
+7 and 9 will refuse too, not only the 8, 10 and 11 already earmarked for a local
+merge.** Seven of the eight remaining come locally; PR 12 is the only one the
+button can take.
+
+**Which rows are NOT derivable yet, and what they will be measured against.**
+The second column is exact today. The third is a prediction, and these are the
+terms it rests on:
+
+1. **PR 5 is firm.** Its base is `main` after PR 4, and the tree that lands
+   there is already pushed and already checked identical to `85e366f`.
+2. **PRs 6 through 11 are conditional.** Each is measured against the rehearsal
+   trunk *after* the merges in between, so the number holds only if every PR
+   ahead of it lands with the rehearsal's resolution. The check is one command
+   per merge — `git diff <trunk at N-1> origin/main` must be empty before the
+   merge, and it is run and reported every time. If it is ever non-empty, every
+   row below that point is re-derived before anything is resolved.
+3. **PR 12 cannot be derived at all yet, and not because of the code.** The docs
+   branch is where the AUDIT entries from this sequence are being filed, so its
+   tip moves between now and its turn — L108 and this note are both on it
+   already. It will be measured against `main` after PR 11, with whatever tip
+   the branch has then. The one thing checked in advance: no code branch touches
+   the files the docs branch touches. PR 11 is the only remaining branch with
+   any `docs/` change at all (`ARCHITECTURE.md`, `COST-OUT-STORE-DIVERGENCE.md`,
+   `DEBT-TRIAGE.md`), and the docs branch touches none of those three.
+
+**Where a count stops being enough, and I stop.** A conflict on a file in the
+predicted set is resolved as recorded. **A conflict on a file NOT in that set is
+a stop**, reported rather than resolved on judgement, because the recorded
+resolution cannot cover a collision the rehearsal never saw. Three files in the
+predicted sets deserve the same caution for the opposite reason — they are
+invisible against today's `main` and only appear once the merges ahead land, so
+the first time I see them will be at the merge itself:
+`tsconfig.test.json` (PRs 6, 9 and 10), `deliveriesStore.ts` (PR 8) and
+`uploads-media-isolation.test.ts` (PR 11). Each has a recorded resolution in 7a
+or 7b; none has been seen against a real base outside the rehearsal.
 
 ### 7b. Semantic conflicts — git merged cleanly and the result was wrong
 
