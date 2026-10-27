@@ -45,14 +45,24 @@ export type SiteRecord = {
    * storage/clientsStore.ts.
    */
   clientId?: string | null;
-  // NO `deletedAt`. A site is HARD deleted in both stores — `deleteSite` does
-  // `memory.sites.delete(...)` and `DELETE FROM project_sites`, and
-  // `project_sites` has no `deleted_at` column in any migration. The field used
-  // to be declared here and was never written by anything, which is how a
+  // NO `deletedAt` ON THIS BRANCH, and the distinction matters. A site is HARD
+  // deleted in both stores as of this commit — `deleteSite` does
+  // `memory.sites.delete(...)` and `DELETE FROM project_sites` — and the field
+  // used to be declared here while nothing ever wrote it, which is how a
   // `deleted_at IS NULL` predicate came to sit in `updateSiteProgress` against
-  // a column that does not exist. Soft-delete for sites is Phase 6, with the
-  // bin and the 90-day purge; it arrives with a migration, a mapper and a list
-  // filter, the way the other four record types have it. See AUDIT L99.
+  // a column that did not exist. See AUDIT L99.
+  //
+  // What this comment does NOT say, deliberately: that no migration adds the
+  // column. An earlier draft asserted "`project_sites` has no `deleted_at`
+  // column in any migration", which was true of this branch and false of the
+  // tree this branch merges into — the soft-delete workstream's migration 034
+  // adds it, and that branch merges after this one. A sentence that is true on
+  // a branch and false on main is the shape of defect this file's own header
+  // warns about, so the claim is scoped to the branch or not made at all.
+  // Soft-delete for sites arrives with that migration, its mapper and its list
+  // filter; when it does, `deletedAt` is declared here and every predicate
+  // naming the column comes from storage/softDelete.ts rather than being
+  // written out.
 };
 
 export type EntryRecord = {
