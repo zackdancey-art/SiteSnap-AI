@@ -37,7 +37,14 @@ fi
 # This repo has been bitten four times by exactly that shape (AUDIT L36,
 # docs/VACUITY-AUDIT.md M7), so count the population before trusting a clean
 # result, and state what the count was expected to be.
-EXPECTED_WORKFLOWS=3
+# 4, MEASURED on THIS branch: this branch renames deploy-api.yml to
+# api-post-merge-checks.yml AND adds submit-mobile.yml, so the directory
+# holds four files while the line said 3. Red on this branch today, before
+# any merge. EXPECTED_PINNED stays 4: build-mobile.yml dropped a job into
+# submit-mobile.yml, so four files of one job replace three files holding
+# four jobs. Every count and every position:
+# docs/NINE-WORKSTREAMS-HANDOVER.md.
+EXPECTED_WORKFLOWS=4
 FOUND="$(find "$WORKFLOW_DIR" -maxdepth 1 -name '*.yml' -o -maxdepth 1 -name '*.yaml' | sort)"
 COUNT="$(printf '%s\n' "$FOUND" | sed '/^$/d' | wc -l | tr -d ' ')"
 
