@@ -3651,3 +3651,122 @@ rows for the client writes, one 403 and one 409 for timecard approval, one crew-
 `/bin` and `/restore` — each with its positive control on the same endpoint in the same test per
 the standing rule, the three pins raised to the measured lengths in the same commit, and the
 whole thing in the DB-gated suite because every one of them is a permission against Postgres.
+
+---
+
+### L108 — `pnpm --filter` exits 0 when it matches nothing, so one working-directory change turns a build step into a silent no-op — LOW (tooling hazard, not a defect in this repo today; recorded because the failure mode is invisible by construction)
+
+**What this is.** Not a finding against this repository's current state. A property of the tool
+the build is written in, filed because the day it bites, nothing in the output will say so. Every
+`pnpm --filter … run <script>` step in this repo is one `working-directory` edit away from
+becoming a step that runs no script, prints one line of prose, and exits **0** — which `set -e`
+treats as success, which a CI step treats as a pass, and which a green check mark on a pull
+request reports as a build that ran.
+
+**The measurements.** pnpm **10.30.3**, 27 October 2026, from
+`/Users/zackdancey/Dev/SiteSnap/Projects`:
+
+```
+$ pnpm --filter ./does-not-exist run typecheck
+No projects matched the filters in "/Users/zackdancey/Dev/SiteSnap/Projects"
+exit=0
+
+$ pnpm --filter does-not-exist run typecheck          # a package NAME, not a path
+No projects matched the filters in "/Users/zackdancey/Dev/SiteSnap/Projects"
+exit=0
+```
+
+So the zero-exit is not a quirk of path filters. A **misspelled package name** behaves
+identically — which matters here, because `ci.sh` reaches the two most expensive and least
+locally-reproducible suites in the repo by name:
+
+```
+Projects/scripts/ci.sh:342:  pnpm --filter services-api run test:redis
+Projects/scripts/ci.sh:347:  pnpm --filter services-api run test:db
+```
+
+Rename that package, or typo it in an edit, and `ci.sh` prints its `═══ Tests (database — RLS +
+store round-trip) ═══` banner, runs nothing, and exits 0 — the precise outcome the whole
+vacuity-guard apparatus in `run-tests.sh` and `assert-ci-single-definition.sh` exists to make
+impossible, arriving one layer above where those guards look. `run-tests.sh` cannot refuse to
+pass vacuously if it is never invoked.
+
+**Why a working-directory change is the trigger.** A relative filter resolves against
+`process.cwd()`, **not** against the workspace root, and not against whatever `-C` names. Both
+sides of that, measured:
+
+```
+$ cd Projects && pnpm --filter ./services/api list --depth -1
+services-api@0.1.0 /Users/zackdancey/Dev/SiteSnap/Projects/services/api (PRIVATE)
+exit=0                                    # matched
+
+$ pnpm -C Projects --filter ./services/api list --depth -1
+No projects matched the filters "/Users/zackdancey/Dev/SiteSnap/services/api" in "/Users/zackdancey/Dev/SiteSnap/Projects"
+exit=0                                    # matched NOTHING — and still exit 0
+```
+
+The second message is the whole entry in one line: pnpm read the workspace at
+`…/SiteSnap/Projects` and looked in it for a package at `…/SiteSnap/services/api`, a path
+assembled from the *shell's* directory. The filter and the workspace disagreed about where
+"here" is, pnpm said so in prose, and then reported success.
+
+**Call sites, both trees.** Every one of these is a relative-path or bare-name filter whose
+correctness is a function of the directory it runs in:
+
+| | docs branch (`docs/nine-workstreams-handover`) | merged tree (`rehearsal/merge-all-2`) |
+|---|---|---|
+| workflow | `.github/workflows/deploy-api.yml:51,54,57` | `.github/workflows/api-post-merge-checks.yml:73,76,79` |
+| scripts | `Projects/package.json:15,16` (`dev:api`, `dev:mobile`) | `Projects/package.json:15,16` |
+| CI program | `Projects/scripts/ci.sh:323` (`./shared`), `:342`, `:347` (`services-api`) | `Projects/scripts/ci.sh:491`, `:510`, `:515` |
+
+**Why they are all correct today, and what is holding them up.** Two different mechanisms, both
+one line long:
+
+- The workflow sets `defaults: run: working-directory: Projects` (`deploy-api.yml:18-20`), so
+  every `run:` step starts in the workspace and the three relative filters resolve.
+- `ci.sh` sets its own directory on line 23, `cd "$(dirname "$0")/.."`, which from
+  `Projects/scripts` lands in `Projects`. `package.json`'s scripts inherit the workspace
+  directory from pnpm.
+
+Delete, move or re-indent either line and six steps become no-ops at once, with no diff anywhere
+near the filters themselves. That is the hazard: the guard is not adjacent to the thing it
+guards, and the symptom of its removal is a faster green build.
+
+**The mitigation exists and is one flag.** `pnpm run --help` documents
+`--fail-if-no-match`: *"If no projects are matched by the command, exit with exit code 1
+(fail)."* Measured, same shell, same version:
+
+```
+$ pnpm --filter ./does-not-exist --fail-if-no-match run typecheck >/dev/null 2>&1; echo $?
+1
+$ pnpm --filter ./does-not-exist run typecheck >/dev/null 2>&1; echo $?
+0
+```
+
+Adding it to all eight call sites is additive, mechanical, and changes no behaviour on a matching
+filter. It is **not** done in this entry: the eight sites are spread across two workflow files,
+`package.json` and `ci.sh` on twelve unmerged branches, and touching `ci.sh` and a workflow on
+every branch during a merge sequence buys a tooling improvement at the price of twelve new
+conflicts. It goes in after the merge, as one commit.
+
+**Measurement caveat, because it cost two wrong readings.** In this shell (zsh), `$?` after a
+pipeline is the **last** command's status and `${PIPESTATUS[0]}` is not reliable — piping pnpm
+into `tail` reported `exit=0` for the `--fail-if-no-match` run, which is `tail`'s status, not
+pnpm's. Every exit code above was read from an unpiped command. Any future attempt to re-measure
+this must do the same or it will conclude the flag does not work.
+
+**Relationship to the withdrawn semantic conflict 12A.** The merge rehearsal's twelfth semantic
+conflict was filed as a defect — that the three `deploy-api.yml` filters were silently matching
+nothing — and it is **withdrawn**: `working-directory: Projects` and those filters arrived in the
+**same commit**, `986becd` (25 June 2026, line 17 of that file), so there has never been a
+revision of `main` on which they were broken. Zero days unverified.
+`docs/NINE-WORKSTREAMS-HANDOVER.md` §7b item 12 carries the withdrawal and both transcripts. What
+survived the withdrawal is only this: the claim was wrong about the repo and right about the
+tool, and `pnpm` will not tell you which of the two you are looking at, because it reports both
+with exit 0.
+
+**One more place this is already half-recorded.** `CLAUDE.md` §5 warns that *"under `-C Projects`,
+path filters like `--filter ./services/api` match nothing"* and tells you to filter by package
+name. That is the same observation, written as a convenience note. What it does not say — and
+what makes it a hazard rather than a style preference — is that the no-match **passes**. A reader
+who follows §5 is safe; a reader who ignores it does not get an error.
