@@ -70,17 +70,90 @@ function migrationSql(): string[] {
  * of statements this module declines to resolve. A new entry means a statement
  * left the audit, and that has to be a visible event rather than a quiet one.
  */
-const EXPECTED_DML_STATEMENTS = 122;
-const EXPECTED_RESOLVED_REFS = 603;
-const EXPECTED_TABLES = 23;
-const EXPECTED_COLUMNS = 255;
+// MEASURED ON THE UNION. 159 / 618 / 25 / 281, against the 122 / 603 / 23 / 255
+// this branch wrote against its own tree.
+//
+// All four are floors (`>=`), so the union did not turn any of them red -- and
+// that is the whole reason they needed re-measuring. No branch but this one
+// touched these lines, and no CI run anywhere reported a problem, while the
+// slack grew to 37 statements, 15 references, 2 tables and 26 columns. A floor
+// with that much slack no longer guards what it was written to guard: the
+// assertion above it is `violations == []`, and these numbers exist so that a
+// zero-violation run over a collapsed corpus cannot read as a pass. 26 columns
+// of slack is 26 columns that could stop being parsed -- stop being checked
+// against every query that names them -- with this test still green.
+//
+// Measured by forcing each floor to report its actual:
+//     examined 159 DML statements        (was >= 122)
+//     resolved 618 column references     (was >= 603)
+//     parsed 25 tables                   (was >= 23)
+//     parsed 281 columns                 (was >= 255)
+//
+// The +2 tables are exactly `clients` (032) and `user_consents` (035); the
+// other two migrations in the batch only ALTER.
+//
+// There is no back-port to spread across the other branches: this whole FILE
+// is new on feat/debt-and-cost-out and exists on neither main nor any of the
+// other ten branches. All five pins are this branch's alone, so there is no
+// line for another branch to move and no merge conflict possible on them.
+//
+// What that does mean is that these five are POSITION-DEPENDENT in one
+// direction. This branch is ELEVENTH AND LAST in the merge order, so the tree
+// it will be updated onto is the full union and 159 / 618 / 25 / 281 is what
+// that tree measures. Against THIS branch alone the corpus is still
+// 122 / 603 / 23 / 255, so until this PR is updated onto the merged main its
+// own CI reads four floors short and EXPECTED_UNRESOLVED 24 short. That red is
+// the intended signal, not a mistake -- the same bargain every equality pin in
+// this batch makes -- and the ruleset's update-and-wait cycle is what clears
+// it. Do not lower these to make the pre-update run green.
+//
+// EXPECTED_UNRESOLVED below is an equality and only reaches 26 on the full
+// union: three of its six contributing files (clientsStore.ts,
+// backfill-clients.ts, purge-deleted-rows.ts) arrive on OTHER branches. It is
+// correct here only because this branch merges last.
+const EXPECTED_DML_STATEMENTS = 159;
+const EXPECTED_RESOLVED_REFS = 618;
+const EXPECTED_TABLES = 25;
+const EXPECTED_COLUMNS = 281;
 const EXPECTED_UNRESOLVED: Record<string, number> = {
-  // SELECT EXISTS(SELECT 1 FROM site_members ...) in projectsStore.
-  subquery: 1,
-  // SELECT ... FROM ${TABLES[kind]} in projectsStore: the table is chosen at
-  // run time from a lookup keyed by record kind. recordScope.ts governs that
-  // mapping, and no static read of this statement can know the table.
-  "interpolated-table": 1,
+  // SELECT EXISTS(SELECT 1 FROM site_members ...) in projectsStore, and one in
+  // storage/softDelete.ts -- onLiveSite() is an EXISTS against project_sites.
+  subquery: 2,
+  // Two in crewStore: a statement assembled entirely from a predicate list,
+  // with no FROM in the literal the scanner sees.
+  "no-table": 2,
+  // MEASURED ON THE UNION OF ALL ELEVEN WORKSTREAMS, and the rise is the point
+  // rather than an accident. It was 1 when this pin was written -- the
+  // `${TABLES[kind]}` lookup in projectsStore, keyed by record kind, which no
+  // static read can resolve. On the union it is 26:
+  //
+  //     7  storage/clientsStore.ts          (new file)
+  //     8  storage/crewStore.ts
+  //     4  scripts/backfill-clients.ts      (new file)
+  //     3  storage/authStore.ts
+  //     2  storage/projectsStore.ts
+  //     2  scripts/purge-deleted-rows.ts    (new file)
+  //
+  // This is 25 statements of audit coverage that main had and the union does
+  // not, and NO BRANCH CAUSED IT ALONE. It is the arithmetic of two rules
+  // pulling opposite ways:
+  //
+  //   - "no hand-written literals in SQL predicates" -- derive the table and
+  //     column name from a shared constant -- which is why these statements
+  //     read `FROM ${CLIENTS_TABLE}` and `AND ${liveOnly(TIMECARDS_TABLE)}`;
+  //   - this auditor, which can only check a statement whose table name is
+  //     legible in the source text.
+  //
+  // Obeying the first rule makes a statement invisible to the second. Pinning
+  // the measurement keeps that visible instead of silent, which is all this
+  // equality was ever for, and the number is honest. The fix is to teach
+  // extractSqlLiterals to substitute single-assignment string constants
+  // declared in the same file -- `const CLIENTS_TABLE = "clients"` is statically
+  // knowable -- which would return most of these 26 to the audit. That is a new
+  // feature in the auditor, not a merge resolution, so it is filed rather than
+  // done here. Until it is, these 26 statements are checked by typecheck and
+  // the eslint column ban and by nothing else.
+  "interpolated-table": 26,
 };
 
 let cachedSchema: DeclaredSchema | null = null;
