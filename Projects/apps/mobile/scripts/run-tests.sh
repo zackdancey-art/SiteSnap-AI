@@ -30,8 +30,17 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
-EXPECTED_TEST_FILES=17
-EXPECTED_TESTS=137
+# 19, MEASURED on the tree this branch merges into -- main plus the PRs
+# ahead of it in the merge order -- not on this branch alone. The number is
+# POSITION-DEPENDENT: 15 on main, +1 clients (PR 2), +1 whs (PR 4), +2 here
+# = 19. Every count and every position: docs/NINE-WORKSTREAMS-HANDOVER.md.
+EXPECTED_TEST_FILES=19
+# 158, MEASURED on the tree this branch merges into -- main plus the PRs
+# ahead of it in the merge order -- not on this branch alone. The number is
+# POSITION-DEPENDENT: 113 on main, +10 clients, +5 timesheets, +6 whs, +24
+# here = 158. Every count and every position:
+# docs/NINE-WORKSTREAMS-HANDOVER.md.
+EXPECTED_TESTS=158
 
 FILE_LIST=$(find dist-test -name '*.test.js' | sort)
 
