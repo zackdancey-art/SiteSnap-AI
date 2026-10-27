@@ -2,10 +2,51 @@ export interface Site {
   id: string;
   name: string;
   address: string;
+  /**
+   * The client's name as free text, and it STAYS free text.
+   *
+   * Every site created before clients existed has one of these and no
+   * `clientId`, and nothing backfills them — so this is the only label the
+   * grouped site list can rely on, and it is what the site card has always
+   * rendered. When a site is filed, the API overwrites this with the client's
+   * canonical name; when it is unfiled, the label is deliberately KEPT, so
+   * unfiling never silently erases what somebody typed.
+   */
   client: string;
+  /**
+   * Which client the site is filed under, or null for unfiled.
+   *
+   * Optional because the field arrived in migration 032 and a cached site from
+   * an older build has no such key — `undefined` and `null` both mean unfiled,
+   * which is why every read here goes through a `?? null`. It is NOT an access
+   * boundary: filing changes how sites are grouped in a list and nothing about
+   * who may read one. See services/api/src/storage/clientsStore.ts.
+   */
+  clientId?: string | null;
   startDate: string;
   status: "active" | "completed" | "on-hold";
   createdAt: string;
+}
+
+/**
+ * A client, as GET /clients returns it.
+ *
+ * `siteCount` is computed by that route from one GROUP BY, not stored — so it
+ * is present on the list and on a create (as 0) and is the number the delete
+ * confirmation quotes, because "this will unfile 4 sites" is the only thing
+ * about deleting a client that a person needs to be warned about. Deleting a
+ * client deletes no sites.
+ */
+export interface Client {
+  id: string;
+  name: string;
+  contactName: string;
+  contactEmail: string;
+  contactPhone: string;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+  siteCount: number;
 }
 
 export interface AnnotationStroke {

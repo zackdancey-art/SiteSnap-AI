@@ -2,7 +2,23 @@ import type { DiaryGeneration } from "./provenance";
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 export type User = { email: string; name: string; role: string; companyId?: string; companyRole?: string };
-export type Site = { id: string; name: string; client: string; address: string; status: string; startDate?: string };
+/**
+ * `client` is free text and `clientId` is the filing; both are real and they
+ * are not the same thing. Nothing backfills `client` on a pre-032 row, filing
+ * overwrites it with the canonical client name, and unfiling keeps it — so a
+ * site can carry a label whose client no longer exists, or a stale label for a
+ * client since renamed. The clients list is the current truth; the label is
+ * what the site itself remembers. `undefined` and `null` both mean unfiled.
+ */
+export type Site = {
+  id: string;
+  name: string;
+  client: string;
+  clientId?: string | null;
+  address: string;
+  status: string;
+  startDate?: string;
+};
 export type EntryPhoto = { uri: string; caption?: string };
 /**
  * A diary entry as `/api/projects/bootstrap` already sends it.
@@ -126,7 +142,23 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       window.location.href = "/";
       throw new Error("Unauthorized");
     }
-    throw new Error(parsed.error || text || `Request failed (${res.status})`);
+    /**
+     * The STATUS and the code ride out on the error, not just the prose.
+     *
+     * This was a bare `new Error(message)`, which left a caller that needs to
+     * tell one refusal from another with nothing to branch on but the wording —
+     * and app/invite.tsx did exactly that, matching on tokens no response body
+     * ever contained, so it picked its message by accident. The clients page
+     * needs the 409 specifically (a duplicate client name), and asking for it
+     * by status is the only way that stays correct when the wording changes.
+     */
+    const err = new Error(parsed.error || text || `Request failed (${res.status})`) as Error & {
+      status?: number;
+      code?: string;
+    };
+    err.status = res.status;
+    if (parsed.code) err.code = parsed.code;
+    throw err;
   }
   return res.json() as Promise<T>;
 }
@@ -462,4 +494,92 @@ export async function updateMemberRole(email: string, companyRole: string): Prom
 
 export async function removeCompanyMember(email: string): Promise<void> {
   await request<unknown>("DELETE", `/api/company/members/${encodeURIComponent(email)}`);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+//  CLIENTS. FILING, NOT AN ACCESS BOUNDARY.
+// ───────────────────────────────────────────────────────────────────────────
+//
+// A client groups sites for filing and reporting. It is deliberately NOT a
+// permission scope: recordScope.ts on the API has no `client` record kind, and
+// nothing anywhere decides who may read a site by looking at its client. Two
+// levels only — clients hold sites, sites hold everything else.
+//
+// GET is behind identity rather than rank, because the grouped sites list takes
+// its headings from it. The three writes are requireAtLeast("manager").
+
+export type Client = {
+  id: string;
+  name: string;
+  contactName: string;
+  contactEmail: string;
+  contactPhone: string;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+  /** Sites currently filed under this client. Server-computed; never sent. */
+  siteCount: number;
+};
+
+/** The five writable fields. Spelled out rather than derived from `Client`, so
+ *  `siteCount` cannot be written from the browser even by accident. */
+export type ClientInput = {
+  name: string;
+  contactName: string;
+  contactEmail: string;
+  contactPhone: string;
+  notes: string;
+};
+
+export async function listClients(): Promise<Client[]> {
+  const data = await request<{ clients: Client[] }>("GET", "/api/clients");
+  return data.clients;
+}
+
+export async function createClient(input: ClientInput): Promise<Client> {
+  const data = await request<{ client: Client }>("POST", "/api/clients", input);
+  return data.client;
+}
+
+/**
+ * PATCH does NOT return siteCount — the route answers `{ client }` with the
+ * record only. The caller carries the previous count over; an `undefined`
+ * there is what would make the delete confirmation misstate how many sites
+ * are about to be unfiled.
+ */
+export async function updateClient(
+  id: string,
+  patch: Partial<ClientInput>
+): Promise<Omit<Client, "siteCount">> {
+  const data = await request<{ client: Omit<Client, "siteCount"> }>(
+    "PATCH",
+    `/api/clients/${id}`,
+    patch
+  );
+  return data.client;
+}
+
+/**
+ * Deleting a client UNFILES its sites and deletes none of them. Returns how
+ * many were unfiled, which is the server's count rather than the caller's
+ * prediction — they disagree whenever another session filed a site in between.
+ */
+export async function deleteClient(id: string): Promise<number> {
+  const data = await request<{ ok: boolean; unfiledSites: number }>(
+    "DELETE",
+    `/api/clients/${id}`
+  );
+  return data.unfiledSites;
+}
+
+/** File a site under a client, or pass null to unfile it. Returns the site as
+ *  the server now has it, because filing rewrites its `client` label. */
+export async function fileSiteUnderClient(
+  siteId: string,
+  clientId: string | null
+): Promise<Site> {
+  const data = await request<{ site: Site }>("PATCH", `/api/projects/sites/${siteId}`, {
+    clientId,
+  });
+  return data.site;
 }

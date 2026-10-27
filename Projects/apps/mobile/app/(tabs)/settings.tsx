@@ -53,7 +53,7 @@ export default function SettingsScreen() {
 function SettingsContent() {
   const insets = useTabScreenInsets();
   const { user, logout } = useAuth();
-  const { pendingCount, failedOps } = useData();
+  const { pendingCount, failedOps, clients } = useData();
   const [profile, setProfile] = useState(DEFAULT_PROFILE);
   const [deletingAccount, setDeletingAccount] = useState(false);
 
@@ -169,6 +169,25 @@ function SettingsContent() {
               label="Account"
               description="Your profile and how you sign in."
               onPress={() => router.push("/settings/account")}
+            />
+            <SettingsDivider />
+            {/* Clients. The entry point for app/clients.tsx, and the only one
+                besides the picker's "Manage clients" footer.
+
+                NOT gated: GET /clients is behind identity rather than rank
+                because the grouped site list takes its headings from it, so
+                crew reach a read-only version of the same screen. The add,
+                edit and delete controls there are what `canManageClients`
+                draws. */}
+            <SettingsRow
+              icon="briefcase-outline"
+              label="Clients"
+              description={
+                clients.length === 0
+                  ? "Group your sites under the client they belong to."
+                  : `${clients.length} ${clients.length === 1 ? "client" : "clients"}.`
+              }
+              onPress={() => router.push("/clients")}
             />
             <SettingsDivider />
             <SettingsRow

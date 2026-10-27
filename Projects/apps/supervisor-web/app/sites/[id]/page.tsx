@@ -8,12 +8,13 @@ import { SkeletonTable } from "@/components/Skeleton";
 import {
   fetchBootstrap, getSavedUser, isAuthenticated,
   fetchTimecards, fetchIncidents, fetchInspections, fetchDeliveries,
-  approveDiary, signUploadPaths,
+  approveDiary, signUploadPaths, listClients, fileSiteUnderClient,
 } from "@/lib/api";
 import type {
-  BootstrapData, Diary, Entry, User,
+  BootstrapData, Client, Diary, Entry, User,
   Timecard, Incident, Inspection, Delivery,
 } from "@/lib/api";
+import { useRole } from "@/lib/useRole";
 
 type Tab = "overview" | "entries" | "timesheets" | "incidents" | "inspections" | "dockets" | "photos" | "reports";
 
@@ -409,6 +410,83 @@ function EntriesTab({
   );
 }
 
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  THE CLIENT ROW OF THE SITE INFORMATION TABLE
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * Read-only for everyone, and a select for a manager. It is one component
+ * rather than two branches at the call site so that the thing a crew member
+ * sees and the thing a manager sees cannot drift into saying different words
+ * about the same site.
+ *
+ * WHAT IT PREFERS AND WHY
+ *
+ * The canonical client name from `clients` first, then the site's own stored
+ * `client` label. They agree immediately after any filing — the API rewrites
+ * the label — and disagree after a client is renamed, until something files
+ * this site again. The canonical name is the one shown on the clients screen,
+ * so it is the one shown here.
+ *
+ * A site filed under a client NOT in the list keeps its label and is not shown
+ * as unfiled, matching lib/site-grouping.ts. The select is given an extra
+ * option for that id in that case, because a `<select>` whose value matches no
+ * option renders blank — the control would claim the site is unfiled, and the
+ * first change would make that true.
+ */
+function ClientFilingCell({
+  site, clients, canFile, filing, error, onFile,
+}: {
+  site: { id: string; client: string; clientId?: string | null };
+  clients: Client[];
+  canFile: boolean;
+  filing: boolean;
+  error: string | null;
+  onFile: (clientId: string | null) => void;
+}) {
+  const filedUnder = site.clientId ?? null;
+  const canonical = filedUnder ? clients.find((c) => c.id === filedUnder)?.name : undefined;
+  const label = canonical || site.client || (filedUnder ? "Filed — name unavailable" : "");
+
+  // No list means no choices, so no control. Stated as its own branch rather
+  // than folded into `canFile` because the two are different reasons and a
+  // manager seeing a read-only row should be able to tell which it was.
+  if (!canFile || clients.length === 0) {
+    return <span>{label || "— Unfiled —"}</span>;
+  }
+
+  const unknownFiled = filedUnder !== null && canonical === undefined;
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+      <select
+        value={filedUnder ?? ""}
+        disabled={filing}
+        onChange={(e) => onFile(e.target.value === "" ? null : e.target.value)}
+        aria-label="Client this site is filed under"
+        style={{ height: 34, fontSize: 13, maxWidth: 260 }}
+      >
+        <option value="">— Unfiled —</option>
+        {unknownFiled && (
+          <option value={filedUnder}>{site.client || filedUnder}</option>
+        )}
+        {clients.map((c) => (
+          <option key={c.id} value={c.id}>{c.name}</option>
+        ))}
+      </select>
+      {filing && <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>Saving…</span>}
+      {error && (
+        <span style={{ fontSize: 12, color: "var(--error, #ef4444)" }}>{error}</span>
+      )}
+      {!filing && !error && (
+        <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
+          Filing only. Nothing about a client decides who may open this site.
+        </span>
+      )}
+    </div>
+  );
+}
+
 export default function SiteDetailPage() {
   const router = useRouter();
   const { id: siteId } = useParams<{ id: string }>();
@@ -459,6 +537,63 @@ export default function SiteDetailPage() {
   const site    = bootstrap?.sites.find((s) => s.id === siteId);
   const entries = bootstrap?.entries.filter((e) => e.siteId === siteId) ?? [];
   const diaries = bootstrap?.diaries.filter((d) => d.siteId === siteId) ?? [];
+
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════
+   *  FILING THIS SITE UNDER A CLIENT
+   * ═══════════════════════════════════════════════════════════════════════════
+   *
+   * PATCH /api/projects/sites/:id with { clientId }, which is
+   * requireAtLeast("manager") on the API. `canFileSiteUnderClient` hides the
+   * control for everyone else, and that is presentation only — the gate is the
+   * route, proved red-on-revert in services/api/src/routes/clients-db.test.ts.
+   * A crew member who reaches the endpoint by hand gets a 403 whatever this
+   * page draws.
+   *
+   * The client list is fetched here rather than taken from the bootstrap,
+   * which does not carry clients. A failed fetch leaves `clients` empty and the
+   * control unrendered: with no list there is nothing to choose from, and a
+   * select with one option that silently unfiles the site is worse than no
+   * select. The label below still shows what the site is filed under, because
+   * that comes from the site itself.
+   */
+  const { canFileSiteUnderClient } = useRole();
+  const [clients, setClients] = useState<Client[]>([]);
+  const [filing, setFiling] = useState(false);
+  const [filingError, setFilingError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    listClients()
+      .then((list) => { if (live) setClients(list); })
+      .catch(() => { /* see above: no list, no control. The site's own label stands. */ });
+    return () => { live = false; };
+  }, []);
+
+  const handleFile = async (clientId: string | null) => {
+    if (!site) return;
+    setFiling(true);
+    setFilingError(null);
+    try {
+      const updated = await fileSiteUnderClient(site.id, clientId);
+      // The SERVER's site, not a local merge. Filing rewrites the `client`
+      // label as well as `client_id`, so patching only the field we sent would
+      // leave the label disagreeing with the filing until the next full load.
+      setBootstrap((prev) => prev ? {
+        ...prev,
+        sites: prev.sites.map((x) => x.id === updated.id ? updated : x),
+      } : prev);
+      // The counts on the clients screen are now stale by one in two places.
+      // Re-read rather than adjust them here: another manager may have filed
+      // something in between, and a count this page computed would be a guess.
+      listClients().then(setClients).catch(() => {});
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Could not change the client.";
+      setFilingError(msg);
+    } finally {
+      setFiling(false);
+    }
+  };
 
   useEffect(() => {
     if (!isAuthenticated()) { router.replace("/"); return; }
@@ -630,7 +765,13 @@ export default function SiteDetailPage() {
           <div className="topbar-title">{site?.name ?? "Site Detail"}</div>
           {site && (
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              {site.client && <span style={{ fontSize: 12, color: "var(--text-secondary)", background: "var(--surface-secondary)", padding: "4px 10px", borderRadius: 8 }}>🏢 {site.client}</span>}
+              {(() => {
+                // Canonical name first, same precedence as ClientFilingCell.
+                // Written inline because this chip is the only other place the
+                // client is named and a second helper for one string is worse.
+                const chip = (site.clientId ? clients.find((c) => c.id === site.clientId)?.name : undefined) || site.client;
+                return chip ? <span style={{ fontSize: 12, color: "var(--text-secondary)", background: "var(--surface-secondary)", padding: "4px 10px", borderRadius: 8 }}>🏢 {chip}</span> : null;
+              })()}
               {site.address && <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>📍 {site.address}</span>}
             </div>
           )}
@@ -710,14 +851,26 @@ export default function SiteDetailPage() {
                 <div className="card-body">
                   <table className="data-table">
                     <tbody>
-                      {[
+                      {([
                         ["Site Name", site.name],
-                        ["Client", site.client || "—"],
+                        // The one row that is not a string. Typed as ReactNode
+                        // for the whole array rather than special-cased out of
+                        // the loop, so the next row that needs a control does
+                        // not have to be lifted out either.
+                        ["Client", <ClientFilingCell
+                          key="client"
+                          site={site}
+                          clients={clients}
+                          canFile={canFileSiteUnderClient}
+                          filing={filing}
+                          error={filingError}
+                          onFile={handleFile}
+                        />],
                         ["Address", site.address || "—"],
                         ["Start Date", localDate(site.startDate)],
                         ["Status", site.status],
                         ["Total Hours Logged", `${(totalHours.regular + totalHours.overtime).toFixed(1)}h (${totalHours.regular.toFixed(1)}h reg + ${totalHours.overtime.toFixed(1)}h OT)`],
-                      ].map(([label, value]) => (
+                      ] as [string, React.ReactNode][]).map(([label, value]) => (
                         <tr key={label}>
                           <td style={{ fontWeight: 600, width: 200, color: "var(--text-secondary)", borderBottom: "1px solid var(--border)" }}>{label}</td>
                           <td style={{ borderBottom: "1px solid var(--border)" }}>{value}</td>
