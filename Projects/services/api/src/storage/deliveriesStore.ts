@@ -1,5 +1,4 @@
 import { v4 as uuidv4 } from "uuid";
-import { getPgPool } from "./postgres";
 import { Actor } from "./actor";
 import { canEditRow, canReadRow, editOwnershipSql, readVisibilitySql } from "./recordScope";
 import { withTenant } from "./tenant";
@@ -46,25 +45,6 @@ function mapRow(row: {
     createdAt: row.created_at.toISOString(),
     deletedAt: row.deleted_at ? row.deleted_at.toISOString() : null,
   };
-}
-
-export async function initDeliveriesSchema(): Promise<void> {
-  if (!useDatabase()) return;
-  await getPgPool().query(`
-    CREATE TABLE IF NOT EXISTS material_deliveries (
-      id           TEXT PRIMARY KEY,
-      owner_email  TEXT NOT NULL REFERENCES auth_users(email) ON DELETE CASCADE,
-      site_id      TEXT NOT NULL REFERENCES project_sites(id) ON DELETE CASCADE,
-      date         TEXT NOT NULL,
-      supplier     TEXT NOT NULL DEFAULT '',
-      items_json   JSONB NOT NULL DEFAULT '[]'::jsonb,
-      quantity     TEXT NOT NULL DEFAULT '',
-      notes        TEXT NOT NULL DEFAULT '',
-      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      deleted_at   TIMESTAMPTZ
-    )
-  `);
 }
 
 export async function listDeliveries(actor: Actor, siteId?: string): Promise<DeliveryRecord[]> {

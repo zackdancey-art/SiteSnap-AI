@@ -258,6 +258,19 @@ module.exports = {
       //                   for a site that was sitting there intact. This rule is
       //                   what caught that. Exact filename again.
         "services/api/src/routes/clients-db.test.ts",
+      //   routes/inspection-template-id-db.test.ts
+      //                   migrations and the drain as above, plus one read no
+      //                   store can give it: whether inspections.template_id
+      //                   still HAS its foreign key into inspection_templates,
+      //                   read out of information_schema. That constraint is
+      //                   the entire premise of the file - without it the guard
+      //                   under test refuses ids Postgres would have accepted,
+      //                   and three green tests would be defending nothing. It
+      //                   is a catalogue query, so there is no tenanted row and
+      //                   no company context for withTenant to set; every
+      //                   tenanted read and write in the file goes through the
+      //                   HTTP API or through inspectionStore.
+        "services/api/src/routes/inspection-template-id-db.test.ts",
       ],
       rules: {
         "no-restricted-imports": [

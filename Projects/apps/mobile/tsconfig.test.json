@@ -65,6 +65,8 @@
     "lib/site-grouping.ts",
     "lib/site-grouping.test.ts",
     "lib/session-routing-audit.ts",
-    "lib/session-routing-audit.test.ts"
+    "lib/session-routing-audit.test.ts",
+    "lib/whs-checklists.ts",
+    "lib/whs-checklists.test.ts"
   ]
 }

@@ -1,5 +1,4 @@
 import { v4 as uuidv4 } from "uuid";
-import { getPgPool } from "./postgres";
 import { Actor } from "./actor";
 import { withTenant } from "./tenant";
 
@@ -17,21 +16,6 @@ function useDatabase() {
 }
 
 const memoryTokens = new Map<string, PushTokenRecord>();
-
-export async function initPushSchema() {
-  if (!useDatabase()) return;
-  await getPgPool().query(`
-    CREATE TABLE IF NOT EXISTS push_tokens (
-      id          TEXT PRIMARY KEY,
-      owner_email TEXT NOT NULL REFERENCES auth_users(email) ON DELETE CASCADE,
-      token       TEXT NOT NULL,
-      platform    TEXT NOT NULL DEFAULT 'expo',
-      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE(owner_email, token)
-    )
-  `);
-}
 
 export async function upsertPushToken(actor: Actor, token: string, platform = "expo"): Promise<PushTokenRecord> {
   if (!useDatabase()) {
