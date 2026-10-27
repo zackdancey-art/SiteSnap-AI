@@ -309,6 +309,82 @@ assert_legal_copy_census() {
   echo "  $label: $count copies, exactly the ones enumerated."
 }
 
+# ── The site-grouping rule exists twice, so prove the two copies agree
+#
+# apps/mobile/lib/site-grouping.ts and apps/supervisor-web/lib/site-grouping.ts
+# carry the same function. They are not one module because @sitesnap/shared
+# resolves `main`, `types` and every `exports` entry to a `.d.ts` file — it
+# carries types and no runtime JavaScript — and making it emit JS is an
+# install-resolution change belonging to docs/DECISIONS.md.
+#
+# The region between the markers is byte-identical by construction (the portal
+# copy was generated from the mobile one). This diffs it, so editing one side
+# alone fails the build naming both paths, instead of the phone and the portal
+# quietly disagreeing about whether a site is filed.
+#
+# WHAT THIS DOES NOT PROVE: that either copy is correct. The eight tests in
+# apps/mobile/lib/site-grouping.test.ts prove that, and they run against the
+# mobile copy only. This step is what carries their result across to the
+# portal, which has no test harness. It also does not notice a THIRD copy
+# appearing somewhere else — unlike the legal census, there is no marker phrase
+# to grep for, and a function body is not prose.
+
+SITE_GROUPING_COPIES="apps/mobile/lib/site-grouping.ts
+apps/supervisor-web/lib/site-grouping.ts"
+
+assert_site_grouping_copies() {
+  tmp="$(mktemp -d)"
+  i=0
+  prev=""
+  prev_path=""
+  # Deliberately a `for` over word-splitting rather than `while read`: a
+  # `while` fed by a pipe runs in a subshell under sh, so its `exit 1` would
+  # end the subshell and let this function return 0 — a check that reports a
+  # pass after failing is worse than no check. The paths are repo-relative with
+  # no spaces, which is what makes the splitting safe.
+  for path in $(printf '%s\n' "$SITE_GROUPING_COPIES" | sed '/^$/d'); do
+    if [ ! -f "$path" ]; then
+      echo "ci.sh: $path is enumerated as a site-grouping copy but does not exist." >&2
+      echo "  Either it was renamed, or this list is stale. Fix both together." >&2
+      rm -rf "$tmp"; exit 1
+    fi
+    i=$((i + 1))
+    sed -n '/^\/\/ SHARED-LOGIC-BEGIN$/,/^\/\/ SHARED-LOGIC-END$/p' "$path" > "$tmp/r$i"
+    # A marker that has been renamed or deleted extracts nothing, and an empty
+    # file diffs clean against another empty file — exactly the vacuous pass
+    # this script exists to refuse. So require the region to be present AND to
+    # contain the function it is meant to be guarding.
+    if ! grep -q "export function groupSitesByClient" "$tmp/r$i"; then
+      echo "ci.sh: $path has no SHARED-LOGIC region containing groupSitesByClient." >&2
+      echo "  The markers are '// SHARED-LOGIC-BEGIN' and '// SHARED-LOGIC-END'," >&2
+      echo "  each alone on its line. Refusing to compare two empty extracts." >&2
+      rm -rf "$tmp"; exit 1
+    fi
+    if [ -n "$prev" ] && ! diff -u "$prev" "$tmp/r$i" > "$tmp/d$i"; then
+      echo "ci.sh: the site-grouping rule has drifted between its two copies." >&2
+      echo "  $prev_path" >&2
+      echo "  $path" >&2
+      echo "  The marked region must be byte-identical in both. Apply the" >&2
+      echo "  change to both files in the same commit." >&2
+      sed -n '3,60p' "$tmp/d$i" >&2
+      rm -rf "$tmp"; exit 1
+    fi
+    prev="$tmp/r$i"; prev_path="$path"
+  done
+  # The count is measured from what was actually compared, not written down. A
+  # list trimmed to one entry would otherwise sail through: one file, no diff.
+  if [ "$i" -lt 2 ]; then
+    echo "ci.sh: only $i site-grouping copy was examined, so nothing was compared." >&2
+    echo "  SITE_GROUPING_COPIES must list at least two paths." >&2
+    rm -rf "$tmp"; exit 1
+  fi
+  rm -rf "$tmp"
+  echo "  site-grouping: $i copies, marked regions byte-identical."
+}
+
+step "Structural: the site-grouping rule has not drifted between its two copies"
+assert_site_grouping_copies
+
 step "Structural: the legal documents have not drifted from their source"
 assert_legal_copies privacy-policy privacy
 assert_legal_copies terms-of-service terms

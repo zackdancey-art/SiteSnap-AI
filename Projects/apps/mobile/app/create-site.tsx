@@ -15,23 +15,46 @@ import { Ionicons } from "@expo/vector-icons";
 import { router } from "expo-router";
 import DateTimePicker, { DateTimePickerEvent } from "@react-native-community/datetimepicker";
 import { useData } from "@/lib/data-context";
+import { useAuth } from "@/lib/auth-context";
+import { canFileSiteUnderClient } from "@/lib/permissions";
+import { ClientPicker } from "@/components/ClientPicker";
 import Colors from "@/constants/colors";
 import { AddressSuggestion, fetchAddressSuggestions } from "@/lib/geo";
 import { useUnsavedChangesGuard } from "@/lib/useUnsavedChangesGuard";
 
 export default function CreateSiteScreen() {
-  const { addSite } = useData();
+  const { addSite, clients } = useData();
+  const { user } = useAuth();
+  const canFile = canFileSiteUnderClient(user?.companyRole);
   const [name, setName] = useState("");
   const [address, setAddress] = useState("");
   const [addressSuggestions, setAddressSuggestions] = useState<AddressSuggestion[]>([]);
   const [addressLoading, setAddressLoading] = useState(false);
   const [client, setClient] = useState("");
+  /**
+   * The CLIENT ID is separate from the client LABEL above, and both are sent.
+   *
+   * `client` is the free-text label the API still requires (SiteSchema keeps
+   * `client: z.string().min(1)`), and it is what pre-032 sites have and all
+   * that the search box on the sites tab reads. `clientId` is the filing.
+   *
+   * Picking a client here overwrites the label with that client's name, which
+   * is what PATCH /projects/sites/:id does server-side when a site is filed
+   * later — so a site filed at creation and a site filed afterwards end up
+   * identical rather than diverging on where it was done.
+   *
+   * Choosing "No client" clears the id and LEAVES the label, for the same
+   * reason unfiling leaves it: the typed name is the only record of who the
+   * job is for once the filing is gone.
+   */
+  const [clientId, setClientId] = useState<string | null>(null);
+  const [showClientPicker, setShowClientPicker] = useState(false);
   const [startDate, setStartDate] = useState(new Date().toISOString().split("T")[0]);
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [dateDraft, setDateDraft] = useState(new Date(`${new Date().toISOString().split("T")[0]}T00:00:00`));
   const [errors, setErrors] = useState<Record<string, string>>({});
 
-  const isDirty = Boolean(name.trim() || address.trim() || client.trim());
+  const isDirty = Boolean(name.trim() || address.trim() || client.trim() || clientId);
   const markSaved = useUnsavedChangesGuard(isDirty);
 
   useEffect(() => {
@@ -86,6 +109,11 @@ export default function CreateSiteScreen() {
         client: client.trim(),
         startDate,
         status: "active",
+        // Omitted rather than sent as null when nothing is picked. An absent
+        // key and a null both mean unfiled to SiteSchema (`.nullish()`), and
+        // the payload is also what the offline queue stores and replays, so
+        // the smaller one is the one worth persisting.
+        ...(clientId ? { clientId } : {}),
       });
       markSaved();
       router.back();
@@ -93,6 +121,27 @@ export default function CreateSiteScreen() {
       const message = error instanceof Error ? error.message : "Failed to create site.";
       Alert.alert("Create Site Failed", message);
     }
+  };
+
+  /**
+   * Picking a client REWRITES the label; clearing it does not.
+   *
+   * Asymmetric on purpose, and the asymmetry is the server's: filing sets
+   * project_sites.client to the canonical client name, and unfiling leaves
+   * whatever was there. Doing anything else here would mean a site created
+   * with a client picked carried a different label from the same site filed a
+   * minute later from its detail screen.
+   */
+  const handleClientSelect = (nextId: string | null) => {
+    setClientId(nextId);
+    if (nextId) {
+      const picked = clients.find((c) => c.id === nextId);
+      if (picked) {
+        setClient(picked.name);
+        setErrors((e) => ({ ...e, client: "" }));
+      }
+    }
+    setShowClientPicker(false);
   };
 
   const handleDateChange = (_event: DateTimePickerEvent, selectedDate?: Date) => {
@@ -199,6 +248,37 @@ export default function CreateSiteScreen() {
           {!!errors.client && <Text style={styles.errorText}>{errors.client}</Text>}
         </View>
 
+        {/* FILING. Drawn only for a manager or owner, and only when there is at
+            least one client to file under — an empty picker on a screen a crew
+            member should not have reached in the first place is two problems
+            stacked, and the + button on the sites tab is not yet gated.
+
+            The row is not an input: it opens ClientPicker, the same component
+            app/site/[id].tsx opens, so filing looks identical in both places. */}
+        {canFile && clients.length > 0 && (
+          <View style={styles.formGroup}>
+            <Text style={styles.label}>File under client</Text>
+            <Pressable
+              style={styles.dateRow}
+              onPress={() => setShowClientPicker(true)}
+              testID="create-site-client-filing"
+            >
+              <View style={styles.dateIconWrap}>
+                <Ionicons name="briefcase-outline" size={18} color={Colors.accent} />
+              </View>
+              <View style={styles.dateTextWrap}>
+                <Text style={styles.dateValue}>
+                  {clients.find((c) => c.id === clientId)?.name ?? "Unfiled"}
+                </Text>
+                <Text style={styles.dateHint}>
+                  {clientId ? "Tap to change" : "Optional — groups this site in the sites list"}
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color={Colors.textTertiary} />
+            </Pressable>
+          </View>
+        )}
+
         <View style={styles.formGroup}>
           <Text style={styles.label}>Start Date</Text>
           <Pressable style={styles.dateRow} onPress={openDatePicker}>
@@ -257,6 +337,21 @@ export default function CreateSiteScreen() {
           <Text style={styles.createButtonText}>Create Site</Text>
         </Pressable>
       </ScrollView>
+
+      {/* Outside the ScrollView: a Modal nested in a scrolling parent inherits
+          its scroll offset on Android and opens part-way up the screen. */}
+      <ClientPicker
+        visible={showClientPicker}
+        clients={clients}
+        selectedClientId={clientId}
+        onSelect={handleClientSelect}
+        onClose={() => setShowClientPicker(false)}
+        canManage={canFile}
+        onManage={() => {
+          setShowClientPicker(false);
+          router.push("/clients");
+        }}
+      />
     </KeyboardAvoidingView>
   );
 }

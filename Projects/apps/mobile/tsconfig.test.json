@@ -62,6 +62,8 @@
     "lib/invite-refusal.test.ts",
     "lib/permissions.ts",
     "lib/permissions.test.ts",
+    "lib/site-grouping.ts",
+    "lib/site-grouping.test.ts",
     "lib/session-routing-audit.ts",
     "lib/session-routing-audit.test.ts",
     "lib/whs-checklists.ts",

@@ -1,0 +1,79 @@
+name: API Post-Merge Checks (does not deploy)
+
+# THIS WORKFLOW DOES NOT DEPLOY ANYTHING. It typechecks and tests the API after
+# a merge to main. Read a green tick here as "the API's tests passed on main",
+# never as "the API is live with this commit".
+#
+# HALF-BUILT-MECHANISMS F3: it was called "Deploy API" and had been since it
+# was written. The deploy steps were present but commented out, carrying
+# REGION/PROJECT/REPO placeholders for a Google Cloud Run target this product
+# does not use — so the live steps were an install, a build, a typecheck and a
+# test, i.e. a second run of CI. A green tick next to a merge read as a
+# deployment receipt and was being read that way; a red one stopped nothing,
+# because the API is deployed by Render's own hook from main and this workflow
+# has no part in it, in either direction.
+#
+# The commented Cloud Run block has been removed rather than left in place: it
+# was the half that made the name defensible, and the name is what did the
+# damage. It is in git history if this product ever moves off Render — see the
+# commit that renamed this file.
+#
+# IF THIS SHOULD EVER GATE THE REAL DEPLOY, the shape is: turn off Render's
+# auto-deploy, add the deploy-hook call as a final step here, and rename the
+# file back. That is a hosting decision, so it is not taken here.
+
+on:
+  push:
+    branches: ["main", "master"]
+    paths:
+      - "Projects/services/api/**"
+      - "Projects/shared/**"
+      - "Dockerfile"
+      - ".dockerignore"
+
+jobs:
+  checks:
+    # Pinned for the reason given in ci.yml: `ubuntu-latest` starts moving to
+    # Ubuntu 26.04 on 19 October 2026 and would change this runner's OS with no
+    # commit to point at. Raise both together, deliberately.
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: Projects
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Get pnpm store path
+        id: pnpm-cache
+        run: echo "store=$(pnpm store path)" >> $GITHUB_OUTPUT
+
+      - name: Cache pnpm store
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.pnpm-cache.outputs.store }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('Projects/pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build shared types
+        run: pnpm --filter ./shared run build:types
+
+      - name: Typecheck
+        run: pnpm --filter ./services/api run typecheck
+
+      - name: Tests
+        run: pnpm --filter ./services/api run test
