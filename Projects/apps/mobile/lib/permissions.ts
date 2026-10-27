@@ -9,10 +9,12 @@
  * templates, location — crew gets, read and write, across every site in the
  * company.
  *
- * Plus one refusal that is narrower than a feature: crew may edit a diary and
- * may not APPROVE one. See canApproveDiary, and read the note there before
- * reaching for it — the hazard in this one is implementing it as "crew cannot
- * use diaries", which is a worse bug than the one it fixes.
+ * Plus two refusals that are narrower than a feature, both of them the same
+ * shape: crew may edit a diary and may not APPROVE one (canApproveDiary), and
+ * crew may enter, correct and delete their own timecards and may not APPROVE
+ * one (canApproveTimesheet). Read the notes on those two before reaching for
+ * either — the hazard in both is implementing them as "crew cannot use diaries"
+ * or "crew cannot use timesheets", which is a worse bug than the one it fixes.
  *
  * WHY A MODULE RATHER THAN THE EXPRESSION IT REPLACES
  * `user?.companyRole === "owner" || user?.companyRole === "manager"` was written
@@ -28,6 +30,14 @@
  * test program cannot compile a module that reaches a navigator or AsyncStorage.
  * Keeping the decision here and the rendering in the screens is what makes it
  * testable at all. See lib/permissions.test.ts.
+ *
+ * TWO KINDS OF DECISION LIVE HERE, AND THEY ARE NOT THE SAME KIND
+ * Everything above is keyed on a company ROLE. Below FORBIDDEN_MESSAGE there
+ * is a second kind, keyed on a ROW'S STATE: an approved timecard is closed to
+ * everybody, including the manager who approved it, and no rank opens it. They
+ * sit in one module because one screen has to tell them apart to say anything
+ * true to the person it refuses, and because both are decisions rather than
+ * rendering — which is what makes them testable here and nowhere else.
  *
  * THIS IS NOT THE ENFORCEMENT. Hiding a control is not a permission: every one
  * of these is refused independently by the API, because a hidden button is still
@@ -149,6 +159,30 @@ export function canFileSiteUnderClient(companyRole: unknown): boolean {
 }
 
 /**
+ * APPROVING a timesheet. Manager+, and the same shape as canApproveDiary for
+ * the same reason: a timecard a crew member approved themselves is a payroll
+ * claim with no second pair of eyes on it, and the row carries `approved_by`
+ * into a seven-year record.
+ *
+ * What this is NOT, again: it is not permission to USE timesheets. Crew enter,
+ * correct and delete their own timecards in full — that is the daily work this
+ * screen exists for — and the only thing this predicate hides is the
+ * approve/send-back control on somebody's card.
+ *
+ * Two refusals on this screen are deliberately different things, and conflating
+ * them is the mistake to avoid:
+ *   - no rank  → 403, this predicate, requireAtLeast("manager") at the API;
+ *   - approved → 409, isTimecardLocked below, and NO rank opens it. A manager
+ *     cannot edit an approved card either; they reopen it first.
+ * A manager approving their own timecard is allowed on purpose: refusing it
+ * would leave a working manager unable to record hours at all, and
+ * `approved_by` is what makes that auditable rather than invisible.
+ */
+export function canApproveTimesheet(companyRole: unknown): boolean {
+  return isManagerOrAbove(companyRole);
+}
+
+/**
  * Company settings: branding, NZBN, contact details, anything
  * organisation-level. Exception 3, and the only one that is owner-only rather
  * than manager+, because that is what the API already enforces
@@ -192,14 +226,121 @@ export function isForbidden(err: unknown): boolean {
   return (err as { status?: unknown }).status === 403;
 }
 
+// ── What a 409 on a timecard means on the client ────────────────────────
+
+/**
+ * The code services/api/src/routes/crew.ts sends with its 409 (see
+ * sendWriteResult there). It is 409 and not 403 because the ROW's state is what
+ * refuses, not the caller's rank — so the remedy is to reopen the card, not to
+ * find somebody more senior, and the sentence a client shows has to say that.
+ */
+export const TIMECARD_LOCKED_CODE = "timecard_approved";
+
+/**
+ * Client-authored, like FORBIDDEN_MESSAGE, and for the same reason: the API's
+ * own sentence is good, but a screen that renders server copy verbatim shows
+ * whatever a future deploy decides to say there. This one has to stay true of
+ * both of the editable statuses — a rejected card is still editable — so it
+ * names approval, which is the only state that locks.
+ */
+export const TIMECARD_LOCKED_MESSAGE =
+  "This timecard has been approved, so it can no longer be changed. Ask a manager to reopen it.";
+
+/**
+ * Whether a caught value is the approved-timecard refusal.
+ *
+ * Keyed on the status AND the code, unlike isForbidden, which is keyed on the
+ * status alone. The asymmetry is not an inconsistency: a 403 from this API
+ * means exactly one thing from exactly two middlewares, whereas 409 is the
+ * ordinary conflict status and describeFailure is shared by every screen. So
+ * matching a bare 409 here would relabel some other screen's future conflict
+ * as an approved timecard. The code is a contract the server actually has.
+ *
+ * An absent code therefore reads as NOT locked and keeps the feature's own
+ * wording — which is the honest answer for a client newer than the API,
+ * because that API has no approval lock to have hit.
+ */
+export function isTimecardLocked(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { status?: unknown; code?: unknown };
+  return e.status === 409 && e.code === TIMECARD_LOCKED_CODE;
+}
+
+// ── What state a timecard is in ──────────────────────────────────────────────
+
+/**
+ * The approval states a timecard can be in, mirrored from the API's
+ * TIMECARD_APPROVAL_STATUSES (services/api/src/storage/crewStore.ts).
+ *
+ * THIS IS A DELIBERATE COPY, NOT AN OVERSIGHT. apps/mobile has no dependency
+ * on @sitesnap/shared — read its package.json — and that package emits .d.ts
+ * only, so there is no runtime list for a client to import even if the
+ * dependency existed, and adding one is out of scope (CLAUDE.md §8). The copy
+ * is the only option available; normaliseApprovalStatus is what makes it safe
+ * for the copy to fall out of date.
+ *
+ * It lives in this module rather than in app/crew/[siteId].tsx for the reason
+ * the header gives: that screen imports react-native and the node test program
+ * cannot compile it, so a constant placed there is a constant nothing checks.
+ */
+export const TIMECARD_APPROVAL_STATUSES = ["pending", "approved", "rejected"] as const;
+export type TimecardApprovalStatus = (typeof TIMECARD_APPROVAL_STATUSES)[number];
+
+/**
+ * The states whose card its author may still change. `approved` is absent and
+ * that absence is the whole feature: an approved timecard is payroll, and a
+ * payroll row anybody can still edit was never approved in any useful sense. A
+ * manager wanting to correct one reopens it first, which records that they did.
+ *
+ * Mirrors TIMECARD_EDITABLE_STATUSES in the store, where it is enforced under
+ * a row lock. This copy decides which controls a screen draws.
+ */
+export const TIMECARD_EDITABLE_STATUSES: readonly TimecardApprovalStatus[] = Object.freeze([
+  "pending",
+  "rejected",
+]);
+
+export function isTimecardEditable(status: TimecardApprovalStatus): boolean {
+  return TIMECARD_EDITABLE_STATUSES.includes(status);
+}
+
+/**
+ * Anything unrecognised reads as "pending", and the DIRECTION of that default
+ * is chosen rather than convenient.
+ *
+ * Optimism costs one clear refusal: the edit control appears, the person
+ * presses it, and the API answers 409, which isTimecardLocked turns into "ask
+ * a manager to reopen it". Pessimism — reading an unknown status as locked —
+ * would grey out edit and delete on every card the moment the API learns a
+ * fourth status, with no error raised anywhere and no way for the person to
+ * tell "this card is locked" from "this app is out of date". That breaks daily
+ * work silently, which is the worse of the two failures.
+ *
+ * This is the opposite default from isRole() at the top of the file, and
+ * deliberately so: there, being wrong shows somebody a control they may not
+ * use, so unknown means least access. Here, being wrong hides a control from
+ * the person whose own record it is, and the server refuses anyway.
+ *
+ * A missing field is the same case as an unknown one: an API older than this
+ * build sends no approvalStatus at all, and nothing on that API is locked.
+ */
+export function normaliseApprovalStatus(value: unknown): TimecardApprovalStatus {
+  return TIMECARD_APPROVAL_STATUSES.includes(value as TimecardApprovalStatus)
+    ? (value as TimecardApprovalStatus)
+    : "pending";
+}
+
 /**
  * The message to show for a caught error, given what the feature would
- * otherwise have said. A 403 gets the truth; everything else keeps the
- * feature's own wording, which is correct for a feature failure.
+ * otherwise have said. A 403 gets the truth, an approved timecard gets the
+ * remedy, and everything else keeps the feature's own wording, which is correct
+ * for a feature failure.
  *
  * A session failure is NOT handled here: lib/authed-fetch.ts converts a 401 to
  * SessionExpiredError before a call site sees it, and the handler navigates.
  */
 export function describeFailure(err: unknown, featureMessage: string): string {
-  return isForbidden(err) ? FORBIDDEN_MESSAGE : featureMessage;
+  if (isForbidden(err)) return FORBIDDEN_MESSAGE;
+  if (isTimecardLocked(err)) return TIMECARD_LOCKED_MESSAGE;
+  return featureMessage;
 }

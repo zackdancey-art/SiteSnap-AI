@@ -303,10 +303,28 @@ export async function logout() {
   clearLocalSession();
 }
 
+/**
+ * A crew timecard, with the four approval columns the API has sent since
+ * migration 033.
+ *
+ * `approvalStatus` is typed as the string it arrives as and NOT as
+ * `TimecardApprovalStatus`. The server is free to learn a fourth state before
+ * this portal is redeployed, and typing the field as the union would let every
+ * reader assume a value the wire cannot promise. `normaliseApprovalStatus` in
+ * `lib/timecard-approval.ts` is the only thing that should read it.
+ *
+ * All four are optional because the list endpoint is also served by an older
+ * API during a deploy: a card with no approval fields is a pending card, which
+ * is what the normaliser answers for `undefined`.
+ */
 export type Timecard = {
   id: string; workerName: string; date: string; trade: string;
   startTime?: string; endTime?: string; breakMinutes?: number;
   hoursRegular: number; hoursOvertime: number; notes: string;
+  approvalStatus?: string | null;
+  approvedBy?: string | null;
+  approvedAt?: string | null;
+  approvalNote?: string | null;
 };
 export type Incident = {
   id: string; siteId: string; date: string; severity: string;
@@ -325,6 +343,45 @@ export type Delivery = {
 export async function fetchTimecards(siteId: string): Promise<Timecard[]> {
   const data = await request<{ timecards: Timecard[] }>("GET", `/api/crew/timecards?siteId=${siteId}`);
   return data.timecards;
+}
+
+/**
+ * Approve a timecard, send it back for correction, or reopen an approved one.
+ *
+ * THE NOTE IS SENT FROM HERE AND NOT FROM MOBILE, ON PURPOSE
+ *
+ * The API takes an optional `note` and the mobile screen never sends one — a
+ * confirmation dialog on a phone has nowhere to type a reason, and it tells the
+ * person so rather than pretending. The portal has a text field, so a send-back
+ * from here carries why. That is the asymmetry working as intended: the
+ * correction reason is the one thing a worker needs to act on, and it is written
+ * where somebody has a keyboard.
+ *
+ * An EMPTY note is omitted rather than sent as "". The store treats a supplied
+ * note as an overwrite and an absent one as "keep what is stored", so sending
+ * "" when the manager typed nothing would erase the reason a card was sent back
+ * at the moment it is approved — destroying the only record of the correction.
+ * That is `setTimecardApproval`'s documented behaviour in crewStore.ts, not an
+ * inference, and this is the call that depends on it.
+ *
+ * `status` is sent as a plain string: the union lives in
+ * `lib/timecard-approval.ts`, which is a UI module, and `lib/api.ts` does not
+ * import from the UI layer anywhere else. The route validates it with a Zod
+ * enum and 400s anything else, so a typo here fails loudly rather than writing
+ * a state nothing recognises.
+ */
+export async function setTimecardApproval(
+  timecardId: string,
+  status: string,
+  note?: string
+): Promise<Timecard> {
+  const trimmed = note?.trim();
+  const data = await request<{ timecard: Timecard }>(
+    "POST",
+    `/api/crew/timecards/${timecardId}/approval`,
+    trimmed ? { status, note: trimmed } : { status }
+  );
+  return data.timecard;
 }
 
 export async function fetchIncidents(siteId: string): Promise<Incident[]> {

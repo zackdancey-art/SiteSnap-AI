@@ -208,6 +208,28 @@ module.exports = {
       //                   API, which is the whole point of a permission table,
       //                   so there is no tenanted query for withTenant to wrap.
         "services/api/src/routes/crew-permissions-db.test.ts",
+      //   routes/crew-timecards-db.test.ts
+      //                   migrations and the drain as above, plus three reads
+      //                   the HTTP API deliberately cannot give it. Two of them
+      //                   are the same assertion from opposite sides: that a
+      //                   refused write did not land, read from the TABLE
+      //                   rather than from the route that just refused - a 403
+      //                   or 409 returned after the row had already changed
+      //                   would satisfy every status assertion in the file. The
+      //                   third is migration 033's CHECK constraint, which no
+      //                   route can exercise because the route's zod enum
+      //                   refuses an undeclared status first; proving the
+      //                   constraint EXISTS means writing one past the route,
+      //                   inside a transaction that is rolled back.
+      //                   Both of those queries set app.company_id with
+      //                   set_config in their own transaction, exactly as
+      //                   withTenant does, because crew_timecards is RLS-forced
+      //                   and a bare pool query would match nothing - which for
+      //                   the CHECK probe would be indistinguishable from a
+      //                   constraint that is not there. That is why the file
+      //                   asserts a VALID write matches one row before trying
+      //                   the invalid one. Exact filename.
+        "services/api/src/routes/crew-timecards-db.test.ts",
       //   routes/sessions-and-tokens-db.test.ts
       //                   migrations and the drain as above, plus two reads a
       //                   store deliberately cannot give it: that

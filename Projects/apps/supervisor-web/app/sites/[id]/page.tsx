@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo, useRef } from "react";
+import { Fragment, useEffect, useState, useMemo, useRef } from "react";
 import { useRouter, useParams } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import ProfileDropdown from "@/components/ProfileDropdown";
@@ -9,12 +9,22 @@ import {
   fetchBootstrap, getSavedUser, isAuthenticated,
   fetchTimecards, fetchIncidents, fetchInspections, fetchDeliveries,
   approveDiary, signUploadPaths, listClients, fileSiteUnderClient,
+  setTimecardApproval,
 } from "@/lib/api";
 import type {
   BootstrapData, Client, Diary, Entry, User,
   Timecard, Incident, Inspection, Delivery,
 } from "@/lib/api";
 import { useRole } from "@/lib/useRole";
+import { canApproveTimesheet } from "@/lib/useRole";
+import {
+  describeApprovalFailure,
+  isTimecardEditable,
+  normaliseApprovalStatus,
+  TIMECARD_APPROVAL_STATUSES,
+  TIMECARD_NOTE_MAX_LENGTH,
+  type TimecardApprovalStatus,
+} from "@/lib/timecard-approval";
 
 type Tab = "overview" | "entries" | "timesheets" | "incidents" | "inspections" | "dockets" | "photos" | "reports";
 
@@ -68,6 +78,54 @@ const SEVERITY_CFG: Record<string, { label: string; color: string; bg: string }>
   major:       { label: "Major",     color: "#EF4444", bg: "#FEF2F2" },
   critical:    { label: "Critical",  color: "#7C3AED", bg: "#F5F3FF" },
 };
+
+/**
+ * How each approval state is drawn, and the words used for it.
+ *
+ * Shaped like SEVERITY_CFG above and drawn from the same hex pairs already used
+ * on this page — the Open/Closed incident badges and the major-severity red — so
+ * this adds a vocabulary, not a palette.
+ *
+ * It lives here rather than in `lib/timecard-approval.ts` for the same reason
+ * SEVERITY_CFG lives here: the module next door holds the decisions, which are
+ * the parts that can be reasoned about and, when the portal gets a test harness,
+ * tested. Colours are rendering.
+ *
+ * "SENT BACK" RATHER THAN "REJECTED"
+ *
+ * The API's word is `rejected`, and the manager reading this screen is not the
+ * only person who will: these are somebody's hours, and "rejected" reads as a
+ * judgement of the worker rather than of a form that needs a correction. Mobile
+ * uses the same two words on the same state for the same reason.
+ *
+ * Typed `Record<TimecardApprovalStatus, …>` and not `Record<string, …>` — unlike
+ * SEVERITY_CFG, which needs a `?? SEVERITY_CFG.minor` fallback at every call
+ * site because its key is an unvalidated string. Every read of this table goes
+ * through `normaliseApprovalStatus` first, so the key is one of exactly three
+ * values and a missing entry is a compile error rather than a blank badge.
+ */
+const APPROVAL_CFG: Record<TimecardApprovalStatus, { label: string; color: string; bg: string }> = {
+  pending:  { label: "Pending",   color: "#CA8A04", bg: "#FEF9C3" },
+  approved: { label: "Approved",  color: "#22C55E", bg: "#F0FDF4" },
+  rejected: { label: "Sent back", color: "#EF4444", bg: "#FEF2F2" },
+};
+
+/**
+ * The timesheet table's columns, as a list rather than as markup.
+ *
+ * The send-back note opens in a row of its own underneath the card it belongs
+ * to, and that row needs a `colSpan` covering the whole table. Written as a
+ * literal it would read correctly against the wrong number for the life of the
+ * file — a column added later leaves the note box one cell short, which is a
+ * silent layout break nothing reports. Rendering the header from this list means
+ * the span is counted from the same place the columns come from.
+ *
+ * The Approval column is NOT in here: it is only drawn for a manager, so it is
+ * added to the count where that is known rather than conditionally removed.
+ */
+const TIMECARD_COLUMNS = [
+  "Date", "Worker", "Trade", "Start", "End", "Break", "Regular", "OT", "Notes", "Status",
+] as const;
 
 function formatTime(t?: string) {
   if (!t) return "—";
@@ -500,6 +558,24 @@ export default function SiteDetailPage() {
   const [tab, setTab]                   = useState<Tab>("overview");
   const [approving, setApproving]       = useState<string | null>(null);
   /**
+   * The timesheet approval controls' state.
+   *
+   * `approvingCard` is the id of the card with a request in flight, matching
+   * `approving` above for diaries: one at a time, so the button that was pressed
+   * is the one that goes quiet rather than all of them.
+   *
+   * `approvalError` is a single string and not a per-row map, unlike
+   * `photoErrors`. Photographs fail in bulk — forty tiles, forty independent
+   * signatures — but these writes happen one at a time because the manager
+   * presses one button, so there is never more than one failure to report and a
+   * map would be machinery for a case that cannot arise.
+   */
+  const [approvingCard, setApprovingCard] = useState<string | null>(null);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
+  // Which row has its send-back note box open, and what has been typed into it.
+  const [sendBackFor, setSendBackFor]     = useState<string | null>(null);
+  const [sendBackNote, setSendBackNote]   = useState("");
+  /**
    * Two things that exist only in the browser, and the React hydration errors
    * they were causing (AUDIT L49: #418, #423, #425 in the production console).
    *
@@ -755,6 +831,109 @@ export default function SiteDetailPage() {
     }
   };
 
+  /**
+   * Whether this viewer is offered the approval controls at all.
+   *
+   * `canApproveTimesheet(user?.companyRole)` and NOT `useRole()`, which is the
+   * hook every other page uses. `useRole()` calls `getSavedUser()` during
+   * render, and `getSavedUser()` reads `localStorage` — the exact shape that
+   * produced the hydration mismatches recorded on the `user`/`mounted` state
+   * above (AUDIT L49). This page deliberately resolves the saved user in an
+   * effect instead, so it has to read the role from that state.
+   *
+   * `mounted &&` for the same reason the dates use it: before the effect runs
+   * `user` is null, and an absent role is allowed through by design — so without
+   * the gate the server and the first client render would both draw the controls
+   * and a crew member would watch them disappear. Server and first render agree
+   * that nothing is drawn, then the browser fills in what only it can know.
+   */
+  const mayApproveTimesheets = mounted && canApproveTimesheet(user?.companyRole);
+
+  /**
+   * How many cards sit in each approval state.
+   *
+   * Keyed off `TIMECARD_APPROVAL_STATUSES` rather than counting `"approved"` and
+   * calling the rest a remainder, so a card in some state this build does not
+   * recognise is counted as the pending one `normaliseApprovalStatus` reports it
+   * as, and never silently inflates the approved figure. The approved count is
+   * the number a manager is actually looking for — it is how much of the week's
+   * payroll is signed off — so it must not be arrived at by subtraction.
+   */
+  const approvalCounts = useMemo(() => {
+    const counts = Object.fromEntries(
+      TIMECARD_APPROVAL_STATUSES.map((status) => [status, 0])
+    ) as Record<TimecardApprovalStatus, number>;
+    for (const tc of timecards) counts[normaliseApprovalStatus(tc.approvalStatus)] += 1;
+    return counts;
+  }, [timecards]);
+
+  /**
+   * Write an approval decision, and re-read the list when it is refused.
+   *
+   * THE RELOAD ON FAILURE IS THE POINT, NOT TIDINESS
+   *
+   * The one refusal this route gives that is not a bug is the 409 for a card
+   * somebody else approved between this page loading and the button being
+   * pressed. That means the row on screen is stale — it is drawn as pending with
+   * a Send back button, and the database holds an approved card. Reporting the
+   * refusal and leaving the stale row in place would leave the manager pressing
+   * a button that cannot work, against a row the portal is describing wrongly.
+   * Re-reading is what makes the message match what they are looking at.
+   *
+   * The nested catch keeps what is on screen if the re-read also fails: a failed
+   * reload is not a reason to blank the table, and `approvalError` is already
+   * set, so the manager is not told everything is fine.
+   */
+  const applyApproval = async (tc: Timecard, status: TimecardApprovalStatus, note?: string) => {
+    setApprovingCard(tc.id);
+    setApprovalError(null);
+    try {
+      const updated = await setTimecardApproval(tc.id, status, note);
+      setTimecards((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+      setSendBackFor(null);
+      setSendBackNote("");
+    } catch (e) {
+      setApprovalError(
+        describeApprovalFailure(e, `Could not update ${tc.workerName}'s timecard.`)
+      );
+      try {
+        setTimecards(await fetchTimecards(siteId));
+      } catch {
+        /* Keep the rows already shown; the error above is what gets read. */
+      }
+    } finally {
+      setApprovingCard(null);
+    }
+  };
+
+  /**
+   * The two decisions that get a confirmation, and the one that does not.
+   *
+   * Approving locks the card, and reopening erases who approved it and when —
+   * both are consequential and neither is undone by pressing the button again,
+   * so both are confirmed, which is this portal's existing convention for a
+   * change of that kind (`app/team/page.tsx`, `app/settings/page.tsx`).
+   *
+   * Sending a card back is NOT confirmed, because it has its own surface: the
+   * note box below the row, which the manager has to type into and submit. A
+   * confirmation on top of that would be a second dialog for one decision.
+   */
+  const confirmApproveTimecard = (tc: Timecard) => {
+    if (!confirm(
+      `Approve ${tc.workerName}'s hours for ${tc.date}? The card is locked once approved` +
+      ` — if it needs changing after that, reopen it first.`
+    )) return;
+    void applyApproval(tc, "approved");
+  };
+
+  const confirmReopenTimecard = (tc: Timecard) => {
+    if (!confirm(
+      `Reopen ${tc.workerName}'s timecard for ${tc.date}? This clears the record of who` +
+      ` approved it and when, and lets them edit the hours again.`
+    )) return;
+    void applyApproval(tc, "pending");
+  };
+
   return (
     <div className="app-shell">
       <Sidebar userName={user?.name ?? user?.email ?? "Manager"} />
@@ -914,27 +1093,192 @@ export default function SiteDetailPage() {
                   {totalHours.regular.toFixed(1)}h reg · <span style={{ color: "var(--accent)" }}>{totalHours.overtime.toFixed(1)}h OT</span> · <strong>{(totalHours.regular + totalHours.overtime).toFixed(1)}h total</strong>
                 </div>
               </div>
+              {approvalError && (
+                <div
+                  role="alert"
+                  style={{
+                    margin: "12px 16px 0", padding: "10px 14px", borderRadius: 6,
+                    background: "#FEF2F2", border: "1px solid #FECACA",
+                    color: "#991B1B", fontSize: 13, display: "flex", alignItems: "center", gap: 10,
+                  }}
+                >
+                  <span style={{ flex: 1 }}>{approvalError}</span>
+                  <button
+                    className="btn-ghost"
+                    style={{ fontSize: 12, padding: "4px 10px" }}
+                    onClick={() => setApprovalError(null)}
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
               {timecards.length === 0
                 ? <div className="empty-state"><p>No timecard records yet.</p></div>
                 : (
+                <>
+                  {/*
+                    The approval breakdown, which is the number a manager comes to
+                    this tab for: how much of these hours is signed off. Every
+                    state is listed even at zero, because "0 pending" and "the
+                    pending figure is missing" are different facts and a row that
+                    disappears when it empties makes them look the same.
+                  */}
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", padding: "10px 16px", borderBottom: "1px solid var(--border)" }}>
+                    {TIMECARD_APPROVAL_STATUSES.map((status) => (
+                      <span
+                        key={status}
+                        className="badge"
+                        style={{ background: APPROVAL_CFG[status].bg, color: APPROVAL_CFG[status].color }}
+                      >
+                        {approvalCounts[status]} {APPROVAL_CFG[status].label.toLowerCase()}
+                      </span>
+                    ))}
+                  </div>
                   <table className="data-table">
-                    <thead><tr><th>Date</th><th>Worker</th><th>Trade</th><th>Start</th><th>End</th><th>Break</th><th>Regular</th><th>OT</th><th>Notes</th></tr></thead>
+                    <thead>
+                      <tr>
+                        {TIMECARD_COLUMNS.map((label) => <th key={label}>{label}</th>)}
+                        {mayApproveTimesheets && <th>Approval</th>}
+                      </tr>
+                    </thead>
                     <tbody>
-                      {timecards.map((tc) => (
-                        <tr key={tc.id}>
-                          <td>{tc.date}</td>
-                          <td style={{ fontWeight: 600 }}>{tc.workerName}</td>
-                          <td style={{ color: "var(--text-secondary)" }}>{tc.trade || "—"}</td>
-                          <td>{formatTime(tc.startTime)}</td>
-                          <td>{formatTime(tc.endTime)}</td>
-                          <td>{tc.breakMinutes ? `${tc.breakMinutes}m` : "—"}</td>
-                          <td>{tc.hoursRegular.toFixed(2)}h</td>
-                          <td style={{ color: tc.hoursOvertime > 0 ? "var(--accent)" : "var(--text-tertiary)", fontWeight: tc.hoursOvertime > 0 ? 700 : 400 }}>{tc.hoursOvertime > 0 ? `${tc.hoursOvertime.toFixed(2)}h` : "—"}</td>
-                          <td style={{ color: "var(--text-secondary)", fontSize: 12 }}>{tc.notes || "—"}</td>
-                        </tr>
-                      ))}
+                      {timecards.map((tc) => {
+                        const status   = normaliseApprovalStatus(tc.approvalStatus);
+                        const cfg      = APPROVAL_CFG[status];
+                        // Not read for anything drawn here — the portal has no
+                        // timecard editor — but it is what decides whether the
+                        // card can still change at all, so the controls below
+                        // ask it rather than comparing against "approved".
+                        const open     = isTimecardEditable(status);
+                        const busy     = approvingCard === tc.id;
+                        const noteOpen = sendBackFor === tc.id;
+                        return (
+                          <Fragment key={tc.id}>
+                            <tr>
+                              <td>{tc.date}</td>
+                              <td style={{ fontWeight: 600 }}>{tc.workerName}</td>
+                              <td style={{ color: "var(--text-secondary)" }}>{tc.trade || "—"}</td>
+                              <td>{formatTime(tc.startTime)}</td>
+                              <td>{formatTime(tc.endTime)}</td>
+                              <td>{tc.breakMinutes ? `${tc.breakMinutes}m` : "—"}</td>
+                              <td>{tc.hoursRegular.toFixed(2)}h</td>
+                              <td style={{ color: tc.hoursOvertime > 0 ? "var(--accent)" : "var(--text-tertiary)", fontWeight: tc.hoursOvertime > 0 ? 700 : 400 }}>{tc.hoursOvertime > 0 ? `${tc.hoursOvertime.toFixed(2)}h` : "—"}</td>
+                              <td style={{ color: "var(--text-secondary)", fontSize: 12 }}>{tc.notes || "—"}</td>
+                              <td>
+                                <span className="badge" style={{ background: cfg.bg, color: cfg.color }}>{cfg.label}</span>
+                                {/*
+                                  Who decided, and why. `approvedBy` is written
+                                  from the session by the API and never from a
+                                  request body, which is what makes a manager
+                                  approving their own hours auditable rather than
+                                  invisible — so it is shown, not hidden.
+                                */}
+                                {tc.approvedBy && (
+                                  <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 4 }}>
+                                    {status === "rejected" ? "Sent back by " : "By "}{tc.approvedBy}
+                                    {tc.approvedAt && ` · ${localDate(tc.approvedAt)}`}
+                                  </div>
+                                )}
+                                {tc.approvalNote && (
+                                  <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2, maxWidth: 220, whiteSpace: "normal" }}>
+                                    “{tc.approvalNote}”
+                                  </div>
+                                )}
+                              </td>
+                              {mayApproveTimesheets && (
+                                <td>
+                                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                                    {/*
+                                      Three states, three offers. An approved card
+                                      gets Reopen only: approving it again is a
+                                      no-op and there is nothing to send back from
+                                      a card nobody can edit. A card already sent
+                                      back gets Approve only, because sending it
+                                      back twice says nothing new.
+                                    */}
+                                    {open ? (
+                                      <>
+                                        {status === "pending" && (
+                                          <button
+                                            className="btn-ghost"
+                                            style={{ fontSize: 12, padding: "5px 10px" }}
+                                            disabled={busy}
+                                            onClick={() => {
+                                              setApprovalError(null);
+                                              setSendBackNote(tc.approvalNote ?? "");
+                                              setSendBackFor(noteOpen ? null : tc.id);
+                                            }}
+                                          >
+                                            {noteOpen ? "Cancel" : "Send back"}
+                                          </button>
+                                        )}
+                                        <button
+                                          className="btn-accent"
+                                          style={{ fontSize: 12, padding: "5px 10px" }}
+                                          disabled={busy}
+                                          onClick={() => confirmApproveTimecard(tc)}
+                                        >
+                                          {busy ? "…" : "✓ Approve"}
+                                        </button>
+                                      </>
+                                    ) : (
+                                      <button
+                                        className="btn-ghost"
+                                        style={{ fontSize: 12, padding: "5px 10px" }}
+                                        disabled={busy}
+                                        onClick={() => confirmReopenTimecard(tc)}
+                                      >
+                                        {busy ? "…" : "Reopen"}
+                                      </button>
+                                    )}
+                                  </div>
+                                </td>
+                              )}
+                            </tr>
+                            {mayApproveTimesheets && noteOpen && (
+                              <tr>
+                                <td colSpan={TIMECARD_COLUMNS.length + 1} style={{ background: "var(--surface-2, #FAFAFA)" }}>
+                                  <div style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: "4px 0" }}>
+                                    <textarea
+                                      value={sendBackNote}
+                                      onChange={(e) => setSendBackNote(e.target.value)}
+                                      maxLength={TIMECARD_NOTE_MAX_LENGTH}
+                                      rows={2}
+                                      placeholder={`Why is ${tc.workerName}'s timecard going back? They will see this.`}
+                                      style={{ flex: 1, fontSize: 13, padding: "6px 8px", borderRadius: 6, border: "1px solid var(--border)", fontFamily: "inherit", resize: "vertical" }}
+                                    />
+                                    <button
+                                      className="btn-accent"
+                                      style={{ fontSize: 12, padding: "6px 12px" }}
+                                      disabled={busy || sendBackNote.trim().length === 0}
+                                      onClick={() => void applyApproval(tc, "rejected", sendBackNote)}
+                                    >
+                                      {busy ? "…" : "Send back"}
+                                    </button>
+                                  </div>
+                                  {/*
+                                    The note is required HERE and optional at the
+                                    API, which takes it as `z.string().optional()`.
+                                    That is not a disagreement: the route has to
+                                    stay callable by the mobile screen, which has
+                                    nowhere to type one. This surface has a
+                                    keyboard, and a card sent back with no reason
+                                    tells the worker only that somebody was
+                                    unhappy — so it is refused where the reason can
+                                    actually be written.
+                                  */}
+                                  <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+                                    A reason is required here. Sending the card back lets {tc.workerName} edit it again.
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        );
+                      })}
                     </tbody>
                   </table>
+                </>
                 )
               }
             </div>
