@@ -285,6 +285,19 @@ export async function resetPassword(token: string, newPassword: string): Promise
   await request<{ ok: boolean }>("POST", "/api/auth/reset-password", { token, newPassword });
 }
 
+/**
+ * What a sign-out now does, in one place so three call sites cannot disagree.
+ *
+ * HALF-BUILT-MECHANISMS F5: `/auth/logout` used to clear the cookie and revoke
+ * nothing. It now increments the account's token generation, which is the only
+ * revocation mechanism this product has and is per ACCOUNT rather than per
+ * session — so signing out here also signs out the phone. That is wider than
+ * anybody would assume from a button labelled "Sign Out", so it is said out
+ * loud before it happens rather than discovered on a site.
+ */
+export const SIGN_OUT_SCOPE_NOTICE =
+  "This signs you out on every device using this account. Continue?";
+
 export async function logout() {
   try { await request<{ ok: boolean }>("POST", "/api/auth/logout"); } catch { /* best-effort */ }
   clearLocalSession();

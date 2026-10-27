@@ -3,6 +3,20 @@ name: Build Mobile (EAS)
 # Triggers:
 #   - Manual dispatch (choose profile + platforms)
 #   - Push of a version tag (e.g. v1.2.3) → production build
+#
+# THIS WORKFLOW BUILDS. IT DOES NOT SUBMIT.
+#
+# HALF-BUILT-MECHANISMS F11: a `submit` job used to sit below the build, gated
+# on `startsWith(github.ref, 'refs/tags/v')`, running
+# `eas submit --platform all --non-interactive`. So `git push --tags` — a
+# casual, routine gesture, often used just to mark a commit — put a binary in
+# front of Apple and Google review with no human step anywhere in the path and
+# nothing to cancel. Submission is now a deliberate act: see
+# `submit-mobile.yml`, which runs only on `workflow_dispatch` and requires the
+# word SUBMIT to be typed.
+#
+# A tag still builds, which is the half worth keeping: an artefact to submit is
+# useful, and producing one costs nothing but EAS minutes.
 
 on:
   workflow_dispatch:
@@ -67,26 +81,3 @@ jobs:
           PROFILE="${{ github.event.inputs.profile || 'production' }}"
           PLATFORM="${{ github.event.inputs.platform || 'all' }}"
           eas build --profile "$PROFILE" --platform "$PLATFORM" --non-interactive
-
-  submit:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
-    # Pinned for the reason given in ci.yml: `ubuntu-latest` starts moving to
-    # Ubuntu 26.04 on 19 October 2026 and would change this runner's OS with no
-    # commit to point at. Raise both together, deliberately.
-    runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: Projects/apps/mobile
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Install EAS CLI
-        run: npm install -g eas-cli
-
-      - name: EAS Submit (iOS + Android)
-        env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: eas submit --profile production --platform all --non-interactive

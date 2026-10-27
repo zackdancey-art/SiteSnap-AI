@@ -943,8 +943,48 @@ router.post("/auth/revoke-all", requireAuth, async (req: Request, res: Response)
   return res.json({ token });
 });
 
-// Logout — clears the session cookie
-router.post("/auth/logout", (_req, res) => {
+/**
+ * POST /auth/logout — end the session, not just the cookie.
+ *
+ * HALF-BUILT-MECHANISMS F5: this route used to be four lines that cleared the
+ * cookie and returned. A bearer client (the mobile app) therefore signed out by
+ * deleting its own copy of a credential that stayed valid on the server for the
+ * rest of its TTL — up to seven days — and a cookie client signed out by
+ * discarding a cookie that any other copy of could still present. "Sign out"
+ * is the control a person uses when they no longer trust the device in their
+ * hand, and it did not revoke anything.
+ *
+ * `token_generation` was built in Phase 2 for exactly this and used only by
+ * revoke-all and change-password. Logout now increments it too.
+ *
+ * THE CONSEQUENCE, STATED: the generation is per ACCOUNT, not per session, so
+ * signing out on one device signs out every device on that account. That is a
+ * deliberate trade and it is the reversible one — a per-session denylist needs
+ * a table, a write on every request, and a decision about where it lives, and
+ * none of that can be undone cheaply. Reverting this is deleting the
+ * `revokeAllSessions` call below.
+ *
+ * It never fails. No `requireAuth`: a logout called with an already-dead token
+ * would 401 and leave the cookie in place, which is the opposite of what the
+ * caller asked for. Instead the credential is read if present, the generation
+ * is bumped if it verifies, and the cookie is cleared either way. Always 200.
+ *
+ * `verifyAuthTokenForRefresh`, not `verifyAuthToken`, and the difference is
+ * load-bearing. The refresh variant accepts a token inside the idle grace
+ * window, and that is exactly the set of tokens that are not currently usable
+ * but CAN be exchanged for a live one at `/auth/refresh`. Verifying strictly
+ * would mean a person whose access token expired an hour ago presses Sign Out,
+ * nothing is revoked, and the session is resurrected by the next refresh.
+ */
+router.post("/auth/logout", async (req, res) => {
+  const credential = readCredential(req);
+  const claims = credential ? verifyAuthTokenForRefresh(credential.token) : null;
+  if (claims) {
+    // Returns null for an account that no longer exists, which needs no
+    // revoking. Invalidates the cached identity itself, so the next request
+    // on any instance reads the new generation rather than a 60-second ghost.
+    await revokeAllSessions(claims.email);
+  }
   clearSessionCookie(res);
   return res.json({ ok: true });
 });
