@@ -87,18 +87,38 @@ esac
 #    Checks 1-4 all read `ci.yml` or `package.json`, and that is how the gate
 #    acquired a third definition without this script noticing: `deploy-api.yml`
 #    ran its own Typecheck and Tests steps on every push to `main` that touched
-#    the API. Worse than duplicated, they were vacuous -- both used
-#    `pnpm --filter ./services/api`, and a bare relative path is a NAME pattern
-#    to pnpm, not a path one, so it matched no projects and pnpm exited 0. Two
-#    green checks named "Typecheck" and "Tests" that ran nothing at all:
+#    the API, under a name that promised a deploy it did not perform -- every
+#    deploy step in it was commented out. A duplicate definition of the gate,
+#    wearing the name of something else.
+#
+#    CORRECTION, and it is recorded rather than quietly fixed because the wrong
+#    version of it was committed here first. An earlier draft of this comment
+#    said those two steps were WORSE than duplicated -- that they were vacuous,
+#    because `pnpm --filter ./services/api` resolves a bare relative path to
+#    nothing and exits 0, so the checks ran nothing at all. That is wrong, and
+#    the demonstration that appeared to prove it was the mistake:
 #
 #      $ pnpm -C Projects --filter ./services/api exec node -e 'console.log(1)'
 #      No projects matched the filters in ".../Projects"
 #      $ echo $?
 #      0
 #
-#    That workflow is deleted. This check is what stops the next one, because
-#    the lesson of checks 2 and 3 is that fixing the instance leaves the class.
+#    `--filter` with a path resolves against process.cwd(), and `-C` sets the
+#    DIRECTORY PNPM OPERATES ON without moving cwd -- so that invocation, run
+#    from the repo root, matches nothing. The workflow did not run it that way.
+#    It set `defaults: run: working-directory: Projects`, which puts cwd inside
+#    the workspace, and there the same filter resolves and the step does real
+#    work. Verified both ways. So the steps ran: they were duplicated, which is
+#    what this check is about, and not vacuous. Nothing was unverified.
+#
+#    The true hazard the failed demonstration found is worth keeping, because it
+#    is not this workflow's: `pnpm --filter <relative path>` EXITS 0 when it
+#    matches nothing. Any step of this kind is one `working-directory` edit away
+#    from passing while running nothing, and pnpm will not say so.
+#
+#    That workflow is deleted here. This check is what stops the next one,
+#    because the lesson of checks 2 and 3 is that fixing the instance leaves
+#    the class.
 #
 #    build-mobile.yml is exempt and named here rather than pattern-matched. It
 #    runs `pnpm run typecheck` before a release build, which is a duplicate
