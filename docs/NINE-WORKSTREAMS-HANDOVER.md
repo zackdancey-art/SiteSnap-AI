@@ -709,6 +709,45 @@ on different branches:
     decided:** whether that workflow's gate steps should consolidate into
     `ci.sh` rather than be exempted — the same question already open for
     `build-mobile.yml`'s pre-release typecheck.
+
+    **WITHDRAWN, 27 October 2026 — the first half of this item was wrong and the
+    workflow needed no change.** The claim was that
+    `pnpm --filter ./shared run build:types` and the two `./services/api` filters
+    match no package, so the workflow had been reporting green having run nothing.
+    It is false. A relative-path filter resolves against `process.cwd()`, and that
+    workflow sets `defaults: run: working-directory: Projects` — line 42 on the
+    merged tree, line 17 when it was written — so every step runs with cwd inside
+    the workspace and the filters resolve. Measured both ways, 27 October 2026:
+
+    ```
+    $ cd Projects && pnpm --filter ./shared exec node -e '…'
+    filter resolved: /Users/zackdancey/Dev/SiteSnap/Projects/shared
+
+    $ pnpm -C Projects --filter ./shared exec node -e '…'
+    No projects matched the filters in "/Users/zackdancey/Dev/SiteSnap/Projects"
+    ```
+
+    The second line is the one I generalised from, and `-C` is the mistake in it:
+    `-C` changes where pnpm looks for the workspace, not the process's cwd, so the
+    filter had nothing to resolve against. The workflow does not use `-C`.
+
+    **Introduced `986becd`, 25 June 2026** — the same commit added the three
+    filters (lines 48, 51, 54) *and* the `working-directory: Projects` default
+    (line 17), so they have resolved from the day they were written. **main has
+    never been unverified by this workflow: zero days.** The workflow was left
+    exactly as it is on workstream 0 — its three path filters still read
+    `./shared` and `./services/api`, verified with
+    `git show fix/workstream-0-safety:.github/workflows/api-post-merge-checks.yml`
+    — and the withdrawal is recorded where the wrong claim was actually written:
+    `b5dbbf5` on **workstream 8**, in the comment justifying `ci.sh` check 5.
+    Only the second half of this item was carried: `api-post-merge-checks.yml` in
+    `EXEMPT_GATE_WORKFLOWS`, which is still needed and is still on workstream 8.
+
+    What survives is the adjacent hazard, which is true and is not this: **`pnpm
+    --filter <relative path>` EXITS 0 when it matches nothing.** Any step of this
+    shape is one `working-directory` edit away from passing while running nothing,
+    and pnpm will not say so. Proposed as its own AUDIT entry if you want it
+    filed; it is a hazard in the tooling rather than a defect in this repository.
 13. **`sqlSchemaAudit.test.ts`, WS6 × WS8 — lint, and lint only.** The union
     reported 3 errors, all the soft-delete column ban. The file is new on WS8;
     the ban is new on WS6. One branch has the rule and not the file, the other
@@ -743,10 +782,14 @@ red (or, for 2, 4 and 11, go quietly wrong).
 | 12 | package-name filters + the exemption entry | **split**: the workflow on **WS0**, the exemption on **WS8** | each half belongs to the branch that owns the file |
 | 13 | the scoped lint exemption | **WS8** `feat/debt-and-cost-out` | WS8 owns the fixture file |
 
-I have not applied these. You asked for the pinned-count table and the
-merge-conflict result and nothing else until they landed, and the resolutions are
-a second pass of commits across five branches rather than a report. Say the word
-and they go on in the same one-commit-per-branch shape as the pins.
+**APPLIED, 27 October 2026, and the table above is superseded by §9.** You gave
+the word; the back-port went on in the same one-commit-per-branch shape as the
+pins, and the rehearsal was then re-run from scratch on the back-ported branches.
+That rehearsal is what sorted the thirteen into **5 carryable, 7 merge-time and 1
+withdrawn** — a different split from the mapping in this table, because seven of
+these resolutions cannot exist on a branch at all. §9 has the measured result,
+the per-item classification and the two further semantic conflicts the second
+rehearsal found.
 
 ---
 
@@ -867,8 +910,16 @@ one commit per branch, nothing left on the rehearsal branch. In full:
 | 11 | `feat/debt-and-cost-out` | `8925414` | TESTS 114 → **207, final** ; the four floors → 159 / 618 / 25 / 281; `EXPECTED_UNRESOLVED` → `{2, 2, 26}` |
 | — | `docs/nine-workstreams-handover` | `76ec8bb` | AUDIT L105, L106 |
 
-**Not folded into any PR, and it cannot be:** the `predicates.length >= 8` floor.
-§6e has the reasoning and the one-line commit it needs after the batch.
+**Not folded into any PR, and it cannot be:** the predicate floor in
+`apps/mobile/lib/permissions.test.ts`. §6e has the reasoning and the one-line
+commit it needs after the batch. **Corrected 27 October 2026:** the floor on
+workstream 8 is now `>= 7`, measured on that branch, not the `>= 8` this line
+said — and the post-merge value is **11**, measured on the merged tree
+(`grep -c '^export function can' lib/permissions.ts` = 11). A second floor joins
+it: `files.length >= 14` in `routes/async-route-errors.test.ts` against **15**
+route files on the union. Both are floors, so both merged clean and both stayed
+green while no longer saying what they were written to say; both are in the
+rehearsal's single pin commit (`f03552b`).
 
 ### Rehearsal item 3 — the four migrations together — was NOT run
 
@@ -887,7 +938,133 @@ applied in that order with an `appliedVersions()` skip — so **merge order cann
 change migration order**, and 032 before 033 before 034 before 035 is what any
 tree produces. 032 and 034 both `ALTER project_sites` and they add different
 columns, which remains a reason they should work rather than evidence that they
-do. **Run them against a seeded disposable database before the first merge.**
+do.
+
+**ANSWERED 27 October 2026 — CI already covers this, and no disposable database
+is needed before PR 1.** The DB-gated suites apply the migrations **themselves,
+from scratch, against an empty database**: `ci.yml` declares a `postgres:16`
+service (`POSTGRES_DB: sitesnap_test`) provisioned fresh per job, and the suites
+call `applyMigrations`, which reads
+`path.join(process.cwd(), "src", "storage", "migrations")`, filters to `.sql`,
+`.sort()`s, and runs each unapplied file in its own BEGIN/COMMIT against a
+`schema_migrations` ledger it creates first. Nothing is pre-seeded and no schema
+is restored, so every gated run applies **every** migration in filename order on
+a clean database. By **PR 9** (`feat/consent-and-native`, which carries 035) main
+holds 032, 033 and 034 as well, so that PR's CI is the first run that applies all
+four together — and it is automatic. Each earlier PR also proves its own
+migration against everything before it.
+
+**The one residual, stated plainly.** The database is empty, so this covers a
+migration that cannot apply to an empty schema and does **not** cover one that
+would fail against existing rows — a `NOT NULL` without a default on a populated
+table, a unique index over data that already violates it. All four were read for
+that shape and none has it: 032 and 035 create tables, 033 and 034 add nullable
+columns and indexes with `IF NOT EXISTS`. Production is the only populated
+database, and migrations run there at boot from `migrate.ts`.
+
+---
+
+## 9. The second rehearsal — run on the back-ported branches, 27 October 2026
+
+The thirteen resolutions in §7b are now on their owning branches, and the
+rehearsal was re-run **from scratch** on a new throwaway branch to prove the
+merged tree comes out green with the resolutions *carried* rather than applied by
+hand. Base `ee7e093` (`origin/main`), branch `rehearsal/merge-all-2`, all twelve
+merged `--no-ff` in Group A → B → C order, F3 resolved as ruled: **workstream 0's
+renamed workflow kept, workstream 8's deletion of it dropped.**
+
+### 9a. The result
+
+```
+typecheck                        exit 0
+lint --max-warnings=0            exit 0
+mobile suite                     26 files, # pass 207, # fail 0, # skipped 0
+API in-memory suite              # tests 322, # pass 295, # fail 0, # skipped 27
+portal suite                     4 files, # pass 36, # fail 0
+ci.sh --no-db --no-redis         exit 0, 16 structural + gate steps
+```
+
+The 27 API skips are the gated suites and are the pinned value exactly:
+`EXPECTED_DB_SUITES` 20 + `EXPECTED_REDIS_TESTS` 4 + `EXPECTED_LIVE_OPENAI_TESTS`
+3. The mobile pins matched **without being touched** — 26 files and 207 tests, the
+position-dependent values back-ported onto workstreams 10 and 11 — which is the
+part of the pin plan that could not be checked any other way.
+
+### 9b. The thirteen, sorted by where they can live
+
+**5 carryable, 7 merge-time, 1 withdrawn.** This differs from §7c's mapping, and
+the difference is the finding: §7c assumed every resolution could be back-ported
+to the branch that owns the file. Seven cannot, because the resolution does not
+typecheck, does not lint or does not exist on either parent alone.
+
+| # | where it lives now | commit | why |
+|---|---|---|---|
+| 3 | **carried**, workstream 1 | `69b40d1` | the false paragraph is workstream 1's own prose; it can retire it unilaterally |
+| 7 | **carried**, workstream 8 | `30a70da` | workstream 8 owns the hand-written array and can replace it with the derivation |
+| 9 | **carried**, workstream 8 | `30a70da` | `filter` in `SQL_WORDS` is a one-word addition to workstream 8's own auditor |
+| 11 | **carried**, workstream 2b | `4a01363` | `stripComments(source)` is a fix to workstream 2b's own guard |
+| 12B | **carried**, workstream 8 | `30a70da` | the `EXEMPT_GATE_WORKFLOWS` entry is inert until the merge, by basename |
+| 1, 2 | **merge-time**, at the workstream 6 merge | `4ab63b9` | both branches rewrote `deleteTimecard`; the union is neither side, and workstream 2a cannot write `liveOnly()` because `storage/softDelete.ts` does not exist there |
+| 4, 5, 6 | **merge-time**, at the workstream 9 merge | `2c6afa7` | the `siteStatusCfg` call typechecks on neither parent; the tally and the filter predicate each need one branch's vocabulary inside the other's feature |
+| 10 | **merge-time**, at the workstream 8 merge | `057c845` | the guard verifies an exempt file still contains DDL, so an exemption naming a file workstream 2b has not got would fail on workstream 2b |
+| 13 | **merge-time**, at the workstream 8 merge | in `e51761b` | the eslint override must re-list the dynamic-pool ban it switches off, and that ban is not in workstream 6's rule set in the same shape |
+| 12A | **withdrawn** | `b5dbbf5` | the premise was false — see §7b item 12 |
+| 8 | **already on workstream 0** | `5a99eb3` | pinned before this pass; `EXPECTED_PINNED` needed one post-merge line, below |
+
+### 9c. Two more semantic conflicts, found by this rehearsal
+
+Both are the same shape as §7b's "found by the guards the branches added": a guard
+on one branch, the thing it guards on another, green on both.
+
+14. **`store-ddl-guard.test.ts`, workstream 2b × workstream 8 — the API suite.**
+    `storage/testMigrations.ts` creates the `schema_migrations` ledger and
+    `storage/sqlSchemaAudit.ts` carries `/CREATE TABLE …/gi` and `/ALTER TABLE …/gi`
+    in its grammar. The union: `# pass 294 # fail 1`, offenders
+    `['storage/sqlSchemaAudit.ts (create table)', 'storage/testMigrations.ts (CREATE TABLE)']`.
+    **Resolution:** both in `DDL_EXEMPT` with their reasons (`057c845`); the suite
+    returns to `# pass 295 # fail 0`. This is §7b item 10 again — the same two
+    files, re-applied at the merge because they cannot be exempted on workstream 2b.
+15. **`EXPECTED_PINNED`, workstream 0 × workstream 8 — a pin that auto-merged
+    AGAIN, one line below the one §6d already names.** `EXPECTED_WORKFLOWS` was
+    back-ported to 4 on workstream 0 and conflicted at the merge, so it was
+    resolved by hand; `EXPECTED_PINNED` sat outside the conflict hunk and merged
+    cleanly from workstream 8 at **3**, because that branch had deleted
+    `deploy-api.yml`. F3 puts the file back, so the union has four pinned jobs:
+    `FAIL: matched 4 pinned 'runs-on:' lines, expected 3`, `ci.sh` exit 1.
+    **Resolution:** 4, measured (`057c845`). The lesson is the one §6d states and
+    this is its second instance: back-porting a pin fixes the line you edited and
+    leaves the line next to it to merge silently.
+
+### 9d. The pins the union still invalidated
+
+Three, and all three are **post-merge by construction** — no branch can hold the
+measured value:
+
+| pin | was | measured on the union | why no branch can write it |
+|---|---|---|---|
+| `EXPECTED_PINNED` | 3 | **4** | workstream 8 says 3 because it deleted the workflow F3 restores |
+| `predicates.length >=` | 8 | **11** | every branch that touched `lib/permissions.ts` measured fewer; 7 on workstream 8, 8 was the highest honest floor available |
+| `files.length >=` | 14 | **15** | `routes/clients.ts` is workstream 1's; the floor is in a file no branch's work touches |
+
+The second and third are **floors**, so both merged clean and both stayed green.
+That is what makes them worth naming: a floor does not go red when the population
+grows past it, it just stops saying what it was written to say — the
+`EXPECTED_WRITE_STEPS = 13` shape, reading green against a sequence of 14. One
+commit, `f03552b`, with the measurements in the message.
+
+### 9e. One thing to expect when you open PR 11
+
+**`feat/debt-and-cost-out`'s own CI will be red, and it is not a new defect.**
+`storage/sqlSchemaAudit.test.js` reads 8 pass / 3 fail on that branch
+(`examined 124 DML statements, expected at least 159`; `parsed 23 tables, expected
+at least 25`; and the declined-set test), because its four floors and
+`EXPECTED_UNRESOLVED` are **measured for the union** — that is the position-
+dependent pin rule applied to a test's own thresholds, and §8's table records the
+values. Proved pre-existing rather than caused by the back-port: the same 8/3 with
+that branch's earlier version of the file swapped in. On the union all three pass,
+which the rehearsal's `# fail 0` is. So update PR 11 onto main **before** reading
+its checks; main requires branches to be up to date anyway, and that update is
+what makes them green.
 
 ---
 
