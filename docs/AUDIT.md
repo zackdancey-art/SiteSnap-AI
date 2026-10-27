@@ -3470,3 +3470,106 @@ generation and sets no cookie; that is correct and is not part of this gap, beca
 route is unauthenticated, driven by the token in an emailed link, and its own reply tells the person
 to sign in — ending every session is the point of a reset.
 
+
+---
+
+### L105 — `createCompany` commits before `createUser` with no transaction around the pair, so a signup that fails the phone-uniqueness index leaves a company with no member — MEDIUM (write atomicity, signup path; QUEUED, first after the eleven-workstream merge lands and before any real signup)
+
+**How this was found.** Not by reading the signup path. A production read of `companies` on
+27 October 2026 returned **two** rows where one account exists: `company_2b7f006b…` (7 August,
+has a member) and `company_0f362068…` (1 October, no member, and zero
+rows in all fifteen tenant tables). The orphan row is the symptom; what follows is the defect.
+
+**The minting path, enumerated rather than assumed.** `createCompany` has exactly **one**
+non-test caller in the API — defined at `storage/authStore.ts:878`, called at
+`routes/auth.ts:439` — and that call site is reached only in the non-invite branch of
+`POST /auth/register/verify`, where `companyId = soloCompanyIdForEmail(email)`
+(`routes/auth.ts:436`). So every company id this product can mint is
+`'company_' || md5(lower(<the registering email>))`. The invite branch
+(`routes/auth.ts:430-434`) sets `companyId = ""` and deliberately creates no company, leaving
+`acceptSiteInvite` to stamp the invite's company transactionally. `createCompanyInvite`
+(`storage/projectsStore.ts:1284`) is a different function and creates no company.
+
+**The defect.** `createCompany` at `routes/auth.ts:439` and `createUser` at `routes/auth.ts:451`
+are two separate statements on a bare `getPgPool()` with **no enclosing transaction**, and
+nothing between them checks phone uniqueness. `auth_users_phone_idx`
+(`storage/migrations/001_initial_schema.sql:12`) is a unique partial index on
+`auth_users(phone) WHERE phone IS NOT NULL`, so a signup whose phone is already registered to
+another account raises 23505 inside `createUser`; the catch at `routes/auth.ts:489` returns a
+409 (*"Account already exists for this email or phone."*); and the `companies` row written
+twelve lines earlier **stays committed**. It stays forever: `companies.owner_email` carries no
+foreign key — `storage/migrations/014_companies_table.sql:9`, *"no FK constraint — soft
+relationship only"* — and `:3` of the same file states companies are never hard-deleted.
+`deletePendingRegistration` (`routes/auth.ts:452`) also never runs, so the pending row survives
+with it.
+
+**Scope, stated exactly.** `createCompany`'s `ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name`
+means a retry on the same email reuses the same id, so this leaves one orphan per email, not one
+per attempt. The orphan is inert: no member, no rows, and no route reads a company by
+`owner_email`. It is a junk tenant row and a 409 the person cannot act on, not a tenancy or
+disclosure defect — which is why this is MEDIUM and queued rather than taken now.
+
+**The innocent alternative, not excluded.** A second account could have registered on 1 October
+and later been deleted through `DELETE /auth/account` (`routes/auth.ts:684`), whose
+`deleteUserAccount` (`storage/authStore.ts:1088-1105`) removes that email's
+`auth_pending_registrations` and `auth_users` rows and, by the compliance rule above,
+deliberately **not** its `companies` row. That path leaves an identical-looking row and is
+working as designed. The two are distinguishable — the failed-signup path leaves the pending
+registration behind, the deletion path removes it, and production holds exactly one pending row
+— but **the owner has declined that check as not decision-relevant** (27 October 2026: *"Do not
+run the hash check on the 1 October company. The answer changes nothing."*). It is recorded here
+so a later session does not re-open it as new.
+
+**Not covered by any test.** There is no test for a phone collision on the second half of
+`register/verify`, in either store. The in-memory `createUser`
+(`storage/authStore.ts:501-506`) raises the same `uniqueViolationError("auth_users_phone")`, so
+the defect is reproducible in the in-memory suite as well as the DB-gated one — but per the
+standing rule the test belongs in the DB-gated suite, because the atomicity is the Postgres
+store's.
+
+**Not fixed in this entry, and nothing repaired.** No backfill, no deletion of the orphan row:
+this is a compliance-evidence product and the owner decides what happens to records. The fix is
+a transaction around the two writes, and it is first in the queue once the eleven-workstream
+merge has landed.
+
+---
+
+### L106 — `auth_pending_registrations` retains a password hash, a phone number and a name indefinitely, because expiry is enforced at use and deletion is only opportunistic — RETENTION QUESTION (owner's legal review; deliberately not filed as a code defect)
+
+**What the table is.** The pre-account staging row for a signup that has submitted email,
+password, name and phone but has not completed SMS verification. Created in
+`storage/migrations/001_initial_schema.sql:16-25`; extended by `029` with `email_verified_at`
+and `sms_sent_at` so the SMS is only sent after the email code is proven. It has no
+`company_id` and no RLS by design — it is pre-account, keyed and read by email alone
+(`029_pending_registration_staged_verification.sql:14-15`).
+
+**What one row contains.** `password_hash` — which is not only the hash: the register path
+stores a `::`-joined blob and splits it back out at `routes/auth.ts:418`, so the column also
+carries full name, legacy role and company name — plus `phone` (`NOT NULL`), `email_code`,
+`sms_code`, `expires_at`, `attempts`. A row is therefore a password hash, a mobile number and a
+person's name for someone who never completed a signup and has no account.
+
+**It expires, and expiry is not the same as deletion.** `expiresAt` is set to now +
+`ACCOUNT_VERIFICATION_TTL_MS` (`routes/auth.ts:60`, default **10 minutes**), and expiry is
+enforced where the row is used: `routes/auth.ts:386-389` in `register/verify` and `:269` in
+`register/verify-email` both delete the row and answer `restart: true`. Deletion of a row nobody
+returns to is `purgeExpiredAuthRecords` (`storage/authStore.ts:1061`, `DELETE FROM
+auth_pending_registrations WHERE expires_at < NOW()`), and there is **no scheduler**: it runs
+only when someone calls one of five endpoints — `register`/`register/initiate`
+(`routes/auth.ts:173`), `verify-email` (`:264`), `verify` (`:380`), `forgot-password` (`:997`),
+`reset-password` (`:1072`). Not on login. So an abandoned signup's row persists for as long as
+nobody else starts a signup or a password reset.
+
+**Measured in production.** The 27 October 2026 read returned **one** row in
+`auth_pending_registrations` — `auth_pending_registrations` has no RLS, so that count is real
+rather than a filtered view. It is inert for authentication: `verify` checks expiry before it
+looks at either code, so the row cannot be completed into an account.
+
+**Why this is not filed as a defect.** Nothing is behaving other than as written, and no fix is
+proposed. The question is whether retaining a password hash, a phone number and a name for an
+abandoned signup, with no upper bound on how long, is acceptable under the privacy obligations
+this product is being built to meet — and that is a legal-review question, not an engineering
+one. Owner's decision, 27 October 2026: *"flagged as a retention question for my legal review
+rather than a code fix."* If the answer is that it is not acceptable, the engineering shape is
+small and additive (a scheduled purge, or a purge on login), and it would then be filed
+properly.
