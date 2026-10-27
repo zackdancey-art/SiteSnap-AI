@@ -3573,3 +3573,81 @@ one. Owner's decision, 27 October 2026: *"flagged as a retention question for my
 rather than a code fix."* If the answer is that it is not acceptable, the engineering shape is
 small and additive (a scheduled purge, or a purge on login), and it would then be filed
 properly.
+
+---
+
+### L107 — The crew-permission table's six pins came through the eleven-workstream merge unchanged, and that is the defect: four new crew-facing surfaces have no row in it — MEDIUM (test integrity; the table that defines "crew can do their job" does not know about a quarter of the job) — QUEUED, behind L105
+
+**How this was found.** Not by a failure. By the opposite: during the merge rehearsal
+(`rehearsal/merge-all-2`, 27 October 2026) every pinned count in the repository was re-measured
+across the union of all twelve branches, and the six pins in
+`services/api/src/routes/crew-permissions-db.test.ts` were the only ones that needed no change
+at all:
+
+```
+EXPECTED_READS            = 15
+EXPECTED_WRITE_STEPS      = 14
+EXPECTED_REFUSALS         = 16
+EXPECTED_FIELD_PROBES     = 4
+EXPECTED_PARITY_KINDS     = 5
+EXPECTED_OWNERSHIP_PROBES = 20
+```
+
+A pin that does not move across a merge of eleven feature branches is either a surface that did
+not grow or a measurement that stopped following it. **This is the second.** The pins are
+correct — each one still equals the length of the list it counts — and they are correct because
+no branch added a row to any of those lists. The file's own comment says what that means:
+*"Changing a number here is changing what 'crew can do their job' means, so it has to happen in
+the same commit as the route that moved."* Four routes moved and no number changed with them.
+
+**The four uncovered surfaces, verified by reading the route definitions on the merged tree.**
+
+1. **`/clients` — workstream 1 (`feat/clients-sites-entries`, PR 2).**
+   `clientsRouter.use("/clients", ...FIELD_ACCESS)` at `routes/clients.ts:43`, so
+   `GET /clients` (`:71`) is open to any signed-in identity **deliberately** — a crew member
+   needs the client list because it supplies the headings of their own site list. The three
+   writes carry `requireAtLeast("manager")` (`:82`, `:107`, `:131`). So this surface needs
+   **two** kinds of row: a crew 200 on the read (it is a read crew must keep) and three crew
+   refusals on the writes. It has neither. The read is the more important of the two, because
+   the plausible wrong fix here is a `canSeeClients` gate, and nothing in the table would go red
+   if someone added one.
+2. **Timesheet approval — workstream 2a (`feat/timesheets-approval`, PR 3).**
+   `crewRouter.post("/crew/timecards/:id/approval", requireAtLeast("manager"), …)` at
+   `routes/crew.ts:377`. Two distinct refusals, and the table has a row for neither:
+   the **403** for a crew member with no rank, and the **409** for an approved card
+   (`routes/crew.ts:301`), which refuses a **manager** too — no rank opens it, they reopen the
+   card first. A 409 that applies to every role is exactly the kind of refusal the four
+   status-code populations were built to hold, and it is the one refusal in the API that a
+   rank-shaped test cannot express.
+3. **`/projects/sites/bin` — workstream 6 (`feat/bin-retention`, PR 8).**
+   `projectsRouter.get("/projects/sites/bin", requireAtLeast("manager"), …)` at
+   `routes/projects.ts:315`. Crew refusal: no row.
+4. **`/projects/sites/:id/restore` — workstream 6, same PR.**
+   `projectsRouter.post("/projects/sites/:id/restore", requireAtLeast("manager"), …)` at
+   `routes/projects.ts:326`. Crew refusal: no row. Restore is the undo of a destructive
+   operation, so it is the one of the four whose gate being wrong is least likely to be noticed
+   by its absence and most likely to matter.
+
+**What is and is not covered today.** Each of the four gates is tested in its own workstream's
+suite — these are not routes that shipped untested. What is missing is their place in the
+*table*: the one file that enumerates the crew-facing surface as a population and measures it in
+both directions, and whose six pins are the mechanism that makes a route dropping out of the
+list a red build. A per-route test proves the gate; the table proves the **list of gates** is
+complete. Four surfaces are outside it, so for those four the completeness claim the pins make
+is untrue, and the file reads green saying so.
+
+**Deliberately not fixed in this entry, and this is the owner's instruction, 27 October 2026:**
+*"queue the new rows behind the post-merge transaction-gap fix. Do not add them now; they would
+move three pins and re-run the whole back-port."* Adding the rows moves `EXPECTED_READS`,
+`EXPECTED_REFUSALS` and `EXPECTED_WRITE_STEPS`, and those three pins are back-ported onto three
+different branches at three different positions in the merge order — so the rows cannot be added
+without re-deriving and re-pushing the pin commits on every branch behind them. The rows go on
+**after** the merge lands, in the queue position behind **L105** (the `createCompany`/`createUser`
+transaction gap, which is first).
+
+**Shape of the fix, for whoever picks it up.** Four to seven new rows in the existing lists in
+`crew-permissions-db.test.ts` — one crew-200 read row for `GET /clients`, three crew-403 write
+rows for the client writes, one 403 and one 409 for timecard approval, one crew-403 each for
+`/bin` and `/restore` — each with its positive control on the same endpoint in the same test per
+the standing rule, the three pins raised to the measured lengths in the same commit, and the
+whole thing in the DB-gated suite because every one of them is a permission against Postgres.
