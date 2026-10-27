@@ -125,6 +125,40 @@ export function canApproveDiary(companyRole: unknown): boolean {
 }
 
 /**
+ * Creating, renaming or deleting a CLIENT. Manager+, matching the three write
+ * routes on routes/clients.ts, which all carry requireAtLeast("manager").
+ *
+ * READING the client list is NOT gated and must not be: that route is behind
+ * identity alone, deliberately, because the site a crew member is standing on
+ * is filed under one of these names. So a screen may list clients for anybody
+ * signed in; this predicate decides only whether it offers the add, edit and
+ * delete controls.
+ *
+ * Note what deleting a client does, since the control this gates is the one
+ * that triggers it: it UNFILES the client's sites and deletes none of them.
+ * That is why this is manager+ rather than owner-only — it is a filing change,
+ * not a data loss — and the number of sites affected is quoted in the
+ * confirmation from the list route's `siteCount`.
+ */
+export function canManageClients(companyRole: unknown): boolean {
+  return isManagerOrAbove(companyRole);
+}
+
+/**
+ * Filing a site under a client, or unfiling it. Manager+, matching
+ * PATCH /projects/sites/:id.
+ *
+ * Separate from canManageClients even though both resolve the same way today,
+ * because they are two different controls answering to two different routes on
+ * two different routers — and if either gate moves, the one that moved is the
+ * one that should change here. Clients are filing, not an access boundary, so
+ * refusing this refuses a tidying operation and nothing a person can see.
+ */
+export function canFileSiteUnderClient(companyRole: unknown): boolean {
+  return isManagerOrAbove(companyRole);
+}
+
+/**
  * APPROVING a timesheet. Manager+, and the same shape as canApproveDiary for
  * the same reason: a timecard a crew member approved themselves is a payroll
  * claim with no second pair of eyes on it, and the row carries `approved_by`

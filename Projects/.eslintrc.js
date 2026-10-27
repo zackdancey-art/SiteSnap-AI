@@ -246,6 +246,18 @@ module.exports = {
       //                   company_id predicate, so there is no tenant context
       //                   for withTenant to set here. Exact filename again.
         "services/api/src/routes/sessions-and-tokens-db.test.ts",
+      //   routes/clients-db.test.ts
+      //                   migrations and the drain, and nothing else: the pool
+      //                   is held only to apply the migrations before the app
+      //                   boots and to end itself in after(). Every read behind
+      //                   the route in that file goes through withTenant, which
+      //                   is not optional there - `clients` and `project_sites`
+      //                   are both FORCE ROW LEVEL SECURITY (032 and 022), so a
+      //                   bare pool query would have matched zero rows and the
+      //                   ON DELETE SET NULL assertion would have read undefined
+      //                   for a site that was sitting there intact. This rule is
+      //                   what caught that. Exact filename again.
+        "services/api/src/routes/clients-db.test.ts",
       ],
       rules: {
         "no-restricted-imports": [

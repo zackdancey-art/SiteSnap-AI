@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getSavedUser, saveUser, logout } from "@/lib/api";
+import { getSavedUser, saveUser, logout, SIGN_OUT_SCOPE_NOTICE } from "@/lib/api";
 import type { User } from "@/lib/api";
 import { companyRoleLabel } from "@/lib/roles";
 
@@ -44,6 +44,7 @@ export default function ProfileDropdown() {
   };
 
   const handleSignOut = async () => {
+    if (!confirm(SIGN_OUT_SCOPE_NOTICE)) return;
     await logout();
     router.replace("/");
   };

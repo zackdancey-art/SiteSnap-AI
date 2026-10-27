@@ -30,7 +30,7 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
-EXPECTED_TEST_FILES=15
+EXPECTED_TEST_FILES=16
 # 128, MEASURED on the tree this branch merges into -- main plus the PRs
 # ahead of it in the merge order -- not on this branch alone. The number is
 # POSITION-DEPENDENT: 113 on main, +10 from feat/clients-sites-entries (PR

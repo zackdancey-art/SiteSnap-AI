@@ -10,7 +10,9 @@ import {
   canApproveTimesheet,
   canChangeCompanySettings,
   canDeleteSite,
+  canFileSiteUnderClient,
   canInvite,
+  canManageClients,
   canManageSiteMembers,
   canSeeSupervisorDashboard,
   describeFailure,
@@ -77,19 +79,34 @@ test("crew are the only operational role refused nothing else — every predicat
   // be refused by all of them and granted by none. If a future predicate grants
   // crew something, it does not belong in a module of exceptions and this test
   // should be the thing that says so.
+  // ENUMERATED FROM THE MODULE, NOT LISTED BY HAND.
   //
-  // DERIVED FROM THE MODULE'S EXPORTS, not listed by hand. The hand-written
-  // version of this array sat here for one phase and was already one predicate
-  // short of the module by the time canApproveTimesheet landed — a list that
-  // has to be maintained alongside the thing it is checking is a list that
-  // stops checking the newest entry, which is the only one worth checking.
+  // This was a hand-written array of six, and a hand-written array is how the
+  // rule above stops being enforced: the next predicate added to the module is
+  // not in it, so "every predicate here is an exception" quietly becomes "the
+  // six predicates somebody remembered are". This phase adds two, and eight
+  // more workstreams will add others. Deriving the list means a predicate that
+  // grants crew something fails this test on the day it is written.
+  //
+  // Keyed on the `can` prefix, which is the module's own naming convention for
+  // a permission predicate — `isForbidden` and `describeFailure` answer
+  // questions about an error, not about a role, and take an `unknown` error
+  // rather than a role.
   const predicates = Object.entries(permissionsModule)
-    .filter(([name, value]) => /^can/.test(name) && typeof value === "function")
+    .filter(([name, value]) => name.startsWith("can") && typeof value === "function")
     .map(([, value]) => value as (role: unknown) => boolean);
+
+  // The control on the derivation. Without it, a filter that matched nothing
+  // would make the loop below iterate zero times and pass — the vacuity shape
+  // docs/VACUITY-AUDIT.md names. The floor is the count at the time of writing;
+  // it is a floor rather than an equality because adding a predicate must not
+  // break this test, only granting crew something must.
+  assert.ok(predicates.length >= 8, `expected at least 8 predicates, found ${predicates.length}`);
   assert.ok(
-    predicates.length > 0,
-    "no can* predicates were found — the loop below would assert nothing"
+    predicates.includes(canSeeSupervisorDashboard),
+    "control: the derivation must actually be finding this module's predicates"
   );
+
   for (const p of predicates) {
     assert.equal(p("crew"), false, `${p.name} must refuse crew`);
     assert.ok(
@@ -127,6 +144,39 @@ test("approving a diary is manager+, and that is not the same as using diaries",
     Object.keys(permissionsModule).filter((k) => /diar/i.test(k)),
     ["canApproveDiary"],
     "exactly one diary predicate — a second one is probably a refusal of editing"
+  );
+});
+
+test("managing clients and filing a site are manager+, and READING the client list is not gated at all", () => {
+  // Both match requireAtLeast("manager") — the three writes on routes/clients.ts
+  // and PATCH /projects/sites/:id respectively.
+  assert.equal(canManageClients("crew"), false);
+  assert.equal(canManageClients("viewer"), false);
+  assert.equal(canManageClients("manager"), true);
+  assert.equal(canManageClients("owner"), true);
+
+  assert.equal(canFileSiteUnderClient("crew"), false);
+  assert.equal(canFileSiteUnderClient("viewer"), false);
+  assert.equal(canFileSiteUnderClient("manager"), true);
+  assert.equal(canFileSiteUnderClient("owner"), true);
+
+  // THE ROW THIS FILE EXISTS TO PROTECT, and it is a negative one.
+  //
+  // GET /clients is behind identity alone, deliberately: the site a crew member
+  // is standing on is filed under one of these names, and the client list is
+  // how the grouped site list gets its headings. So the wrong fix here — the
+  // one that would satisfy every assertion above — is a canSeeClients predicate
+  // that hides the list from crew, turning a filing feature into an access
+  // boundary the API does not have. There must be no read predicate to find.
+  //
+  // Same measurement as the diary case below: the module's own exports, not a
+  // claim about them.
+  assert.deepEqual(
+    Object.keys(permissionsModule)
+      .filter((k) => /client/i.test(k))
+      .sort(),
+    ["canFileSiteUnderClient", "canManageClients"],
+    "two client predicates, both about WRITING — a third is probably a read gate the API has not got"
   );
 });
 

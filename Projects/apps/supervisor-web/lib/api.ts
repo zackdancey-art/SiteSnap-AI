@@ -2,7 +2,23 @@ import type { DiaryGeneration } from "./provenance";
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 export type User = { email: string; name: string; role: string; companyId?: string; companyRole?: string };
-export type Site = { id: string; name: string; client: string; address: string; status: string; startDate?: string };
+/**
+ * `client` is free text and `clientId` is the filing; both are real and they
+ * are not the same thing. Nothing backfills `client` on a pre-032 row, filing
+ * overwrites it with the canonical client name, and unfiling keeps it — so a
+ * site can carry a label whose client no longer exists, or a stale label for a
+ * client since renamed. The clients list is the current truth; the label is
+ * what the site itself remembers. `undefined` and `null` both mean unfiled.
+ */
+export type Site = {
+  id: string;
+  name: string;
+  client: string;
+  clientId?: string | null;
+  address: string;
+  status: string;
+  startDate?: string;
+};
 export type EntryPhoto = { uri: string; caption?: string };
 /**
  * A diary entry as `/api/projects/bootstrap` already sends it.
@@ -269,6 +285,19 @@ export async function resetPassword(token: string, newPassword: string): Promise
   await request<{ ok: boolean }>("POST", "/api/auth/reset-password", { token, newPassword });
 }
 
+/**
+ * What a sign-out now does, in one place so three call sites cannot disagree.
+ *
+ * HALF-BUILT-MECHANISMS F5: `/auth/logout` used to clear the cookie and revoke
+ * nothing. It now increments the account's token generation, which is the only
+ * revocation mechanism this product has and is per ACCOUNT rather than per
+ * session — so signing out here also signs out the phone. That is wider than
+ * anybody would assume from a button labelled "Sign Out", so it is said out
+ * loud before it happens rather than discovered on a site.
+ */
+export const SIGN_OUT_SCOPE_NOTICE =
+  "This signs you out on every device using this account. Continue?";
+
 export async function logout() {
   try { await request<{ ok: boolean }>("POST", "/api/auth/logout"); } catch { /* best-effort */ }
   clearLocalSession();
@@ -522,4 +551,92 @@ export async function updateMemberRole(email: string, companyRole: string): Prom
 
 export async function removeCompanyMember(email: string): Promise<void> {
   await request<unknown>("DELETE", `/api/company/members/${encodeURIComponent(email)}`);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+//  CLIENTS. FILING, NOT AN ACCESS BOUNDARY.
+// ───────────────────────────────────────────────────────────────────────────
+//
+// A client groups sites for filing and reporting. It is deliberately NOT a
+// permission scope: recordScope.ts on the API has no `client` record kind, and
+// nothing anywhere decides who may read a site by looking at its client. Two
+// levels only — clients hold sites, sites hold everything else.
+//
+// GET is behind identity rather than rank, because the grouped sites list takes
+// its headings from it. The three writes are requireAtLeast("manager").
+
+export type Client = {
+  id: string;
+  name: string;
+  contactName: string;
+  contactEmail: string;
+  contactPhone: string;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+  /** Sites currently filed under this client. Server-computed; never sent. */
+  siteCount: number;
+};
+
+/** The five writable fields. Spelled out rather than derived from `Client`, so
+ *  `siteCount` cannot be written from the browser even by accident. */
+export type ClientInput = {
+  name: string;
+  contactName: string;
+  contactEmail: string;
+  contactPhone: string;
+  notes: string;
+};
+
+export async function listClients(): Promise<Client[]> {
+  const data = await request<{ clients: Client[] }>("GET", "/api/clients");
+  return data.clients;
+}
+
+export async function createClient(input: ClientInput): Promise<Client> {
+  const data = await request<{ client: Client }>("POST", "/api/clients", input);
+  return data.client;
+}
+
+/**
+ * PATCH does NOT return siteCount — the route answers `{ client }` with the
+ * record only. The caller carries the previous count over; an `undefined`
+ * there is what would make the delete confirmation misstate how many sites
+ * are about to be unfiled.
+ */
+export async function updateClient(
+  id: string,
+  patch: Partial<ClientInput>
+): Promise<Omit<Client, "siteCount">> {
+  const data = await request<{ client: Omit<Client, "siteCount"> }>(
+    "PATCH",
+    `/api/clients/${id}`,
+    patch
+  );
+  return data.client;
+}
+
+/**
+ * Deleting a client UNFILES its sites and deletes none of them. Returns how
+ * many were unfiled, which is the server's count rather than the caller's
+ * prediction — they disagree whenever another session filed a site in between.
+ */
+export async function deleteClient(id: string): Promise<number> {
+  const data = await request<{ ok: boolean; unfiledSites: number }>(
+    "DELETE",
+    `/api/clients/${id}`
+  );
+  return data.unfiledSites;
+}
+
+/** File a site under a client, or pass null to unfile it. Returns the site as
+ *  the server now has it, because filing rewrites its `client` label. */
+export async function fileSiteUnderClient(
+  siteId: string,
+  clientId: string | null
+): Promise<Site> {
+  const data = await request<{ site: Site }>("PATCH", `/api/projects/sites/${siteId}`, {
+    clientId,
+  });
+  return data.site;
 }

@@ -57,6 +57,26 @@ function getTokenExpiry(token: string): number | null {
   }
 }
 
+/**
+ * What a person is told before they sign out, in one place.
+ *
+ * The scope is wider than a button labelled "Sign Out" implies: the only
+ * revocation this product has is `auth_users.token_generation`, which is per
+ * ACCOUNT, so signing out here also signs out the tablet in the site shed.
+ * That trade is recorded in `routes/auth.ts`; this string is the half the
+ * person sees, and it lives next to `logout` so the two cannot drift.
+ *
+ * Exported because two surfaces ask the question — the native Alert and the
+ * Expo-web `confirm` — and three copies of a sentence is how one of them ends
+ * up still describing the old behaviour (HALF-BUILT-MECHANISMS F4 was exactly
+ * that, twice, in the portal).
+ */
+export const SIGN_OUT_SCOPE_FACT =
+  "Signing out ends the session on every device using this account.";
+
+/** The same fact as a question, for the two places that ask before acting. */
+export const SIGN_OUT_SCOPE_NOTICE = `${SIGN_OUT_SCOPE_FACT} Continue?`;
+
 export function isTokenExpiringSoon(token: string | null, thresholdSeconds = 60 * 60): boolean {
   if (!token) return false;
   const exp = getTokenExpiry(token);
@@ -277,7 +297,42 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     clearSessionExpired();
   };
 
+  /**
+   * Sign out — on the server as well as on the phone.
+   *
+   * HALF-BUILT-MECHANISMS F5: this used to be two `removeItem` calls and no
+   * network request at all. The phone forgot the token; the server did not.
+   * A credential a person had deliberately revoked stayed valid for the rest of
+   * its TTL, and anybody holding a copy of it — a proxy log, a second install,
+   * a backup — kept full access to the company's records. On a device handed
+   * back to a hire company or left in a taxi, "Sign Out" was a UI state change.
+   *
+   * So the server is told FIRST, while the credential still exists locally,
+   * and the local clear happens regardless of what the network did. A sign-out
+   * that fails offline must still sign the person out of the app; it just
+   * cannot revoke, and the stale token dies at its TTL as it did before.
+   *
+   * Raw `fetch`, not `authedFetch`: a 401 here is not a session to recover,
+   * and routing it through the shared 401 handler would raise the
+   * "session expired" notice on top of a sign-out the person asked for.
+   */
   const logout = async () => {
+    let current = token;
+    if (!current) {
+      try { current = await AsyncStorage.getItem("sitesnap.token"); } catch { current = null; }
+    }
+    if (current) {
+      try {
+        await fetch(`${BASE_URL}/api/auth/logout`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${current}` },
+        });
+      } catch (err: unknown) {
+        // Offline, or the API unreachable. Say so once and carry on clearing:
+        // the alternative is refusing to sign somebody out of their own phone.
+        console.warn("[auth] sign-out could not reach the server; clearing locally only:", err);
+      }
+    }
     try {
       await AsyncStorage.removeItem("sitesnap.token");
       await AsyncStorage.removeItem("sitesnap.user");
