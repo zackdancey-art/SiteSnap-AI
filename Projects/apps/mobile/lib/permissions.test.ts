@@ -70,15 +70,34 @@ test("crew are the only operational role refused nothing else — every predicat
   // be refused by all of them and granted by none. If a future predicate grants
   // crew something, it does not belong in a module of exceptions and this test
   // should be the thing that says so.
-  const predicates = [
-    canSeeSupervisorDashboard,
-    canInvite,
-    canDeleteSite,
-    canManageSiteMembers,
-    canChangeCompanySettings,
-    canApproveDiary,
-    canVoidSignature,
-  ];
+  // ENUMERATED FROM THE MODULE, NOT LISTED BY HAND.
+  //
+  // This was a hand-written array of seven, and a hand-written array is how the
+  // rule above stops being enforced: the next predicate added to the module is
+  // not in it, so "every predicate here is an exception" quietly becomes "the
+  // seven predicates somebody remembered are". Eight other workstreams add
+  // predicates to this module; by the tree this branch merges into there are
+  // eleven, and a hand-written seven would have tested four of them not at all
+  // while still reading green.
+  //
+  // Keyed on the `can` prefix, which is the module's own naming convention for
+  // a permission predicate -- `isForbidden` and `describeFailure` answer
+  // questions about an error, not about a role.
+  const predicates = Object.entries(permissionsModule)
+    .filter(([name, value]) => name.startsWith("can") && typeof value === "function")
+    .map(([, value]) => value as (role: unknown) => boolean);
+
+  // The control on the derivation. Without it, a filter that matched nothing
+  // would make the loop below iterate zero times and pass -- the vacuity shape
+  // docs/VACUITY-AUDIT.md names. The floor is MEASURED on this branch: seven
+  // `export function can*` in lib/permissions.ts. A floor rather than an
+  // equality because adding a predicate must not break this test; only
+  // granting crew something must.
+  assert.ok(predicates.length >= 7, `expected at least 7 predicates, found ${predicates.length}`);
+  assert.ok(
+    predicates.includes(canSeeSupervisorDashboard),
+    "control: the derivation must actually be finding this module's predicates"
+  );
   for (const p of predicates) {
     assert.equal(p("crew"), false, `${p.name} must refuse crew`);
     assert.ok(

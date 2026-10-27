@@ -96,10 +96,26 @@ export const INTERP_PLACEHOLDER = " ? ";
  * statements and are not column references. Over-inclusion costs coverage (a
  * real column named `status` would be skipped if `status` were listed); it is
  * kept to words that are unambiguously syntax in this codebase's SQL.
+ *
+ * `filter` is the aggregate FILTER clause -- `COUNT(*) FILTER (WHERE status =
+ * 'active')`. It is listed because the function-call escape below tests for a
+ * `(` IMMEDIATELY after the identifier, and SQL:2003 puts a space there, so
+ * FILTER reads as an unqualified column. No table has a column of that name.
+ *
+ * MERGE NOTE. There is no aggregate FILTER in this branch's SQL, so this entry
+ * changes nothing measured here -- it is carried for the tree this branch
+ * merges into. Two other workstreams add five between them (four
+ * `COUNT(*) FILTER (WHERE ...)` aggregates in projectsStore, one in
+ * backfill-clients.ts), and without this word every one of them reported as an
+ * unresolved reference: five findings, all spurious, on a merge where this
+ * auditor and those aggregates meet for the first time. The four floors and
+ * EXPECTED_UNRESOLVED in the test beside this file are measured WITH this
+ * entry in place.
  */
 const SQL_WORDS = new Set(
   `select insert into update delete from where set values returning and or not null is as on conflict do nothing
    order by asc desc limit offset group having distinct count sum avg min max coalesce now current_timestamp
+   filter
    true false case when then else end exists in between like ilike join left right inner outer full cross using
    union all with interval extract epoch date timestamp timestamptz text integer boolean jsonb uuid numeric
    default primary key unique references foreign constraint check create table alter add column if cascade index

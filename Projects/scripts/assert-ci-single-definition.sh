@@ -106,7 +106,23 @@ esac
 #    before a store submission and consolidating it belongs with the owner's
 #    pending decision on that workflow's release trigger (HALF-BUILT F11). An
 #    exemption with a reason and an expiry beats a check nobody can keep green.
-EXEMPT_GATE_WORKFLOWS="build-mobile.yml"
+#
+#    api-post-merge-checks.yml is exempt for the same reason and on the same
+#    terms. It runs `pnpm --filter ./services/api run typecheck` and `... run
+#    test` after a merge to main, which IS a second definition of the gate by
+#    this script's standard. It is exempt rather than deleted because, unlike
+#    the workflow named above, it actually runs: it sets
+#    `defaults.run.working-directory: Projects`, so its relative-path filters
+#    resolve and its steps do real work. Whether a post-merge re-run of the gate
+#    is worth keeping now that `main` requires `validate` to pass pre-merge is
+#    the owner's decision, pending alongside build-mobile.yml's.
+#
+#    That file does not exist on this branch -- it arrives with workstream 0.
+#    The exemption is listed here anyway and is harmless if it never does: the
+#    loop below iterates workflow files that EXIST and skips by basename, so an
+#    exemption naming an absent file matches nothing. Naming it here is what
+#    stops this check going red at the merge that brings the two together.
+EXEMPT_GATE_WORKFLOWS="build-mobile.yml api-post-merge-checks.yml"
 WORKFLOW_DIR="../.github/workflows"
 for wf in "$WORKFLOW_DIR"/*.yml "$WORKFLOW_DIR"/*.yaml; do
   [ -f "$wf" ] || continue
