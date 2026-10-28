@@ -12,7 +12,7 @@ import {
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { router, useFocusEffect } from "expo-router";
-import { useAuth } from "@/lib/auth-context";
+import { useAuth, SIGN_OUT_SCOPE_NOTICE } from "@/lib/auth-context";
 import { authedFetch } from "@/lib/authed-fetch";
 import { isSessionExpired } from "@/lib/session";
 import { SettingsRow, SettingsDivider } from "@/components/SettingsRow";
@@ -54,7 +54,7 @@ export default function SettingsScreen() {
 function SettingsContent() {
   const insets = useTabScreenInsets();
   const { user, logout } = useAuth();
-  const { pendingCount, failedOps } = useData();
+  const { pendingCount, failedOps, clients } = useData();
   const [profile, setProfile] = useState(DEFAULT_PROFILE);
   const [deletingAccount, setDeletingAccount] = useState(false);
 
@@ -103,20 +103,29 @@ function SettingsContent() {
     );
   };
 
+  // The scope is stated before the sign-out because it is wider than a reader
+  // would assume: signing out revokes the account's token generation, so every
+  // device on the account is signed out, not only this one. Both branches ask,
+  // because the web branch asking nothing was how the old copy survived.
+  // HALF-BUILT-MECHANISMS F5.
   const handleLogout = () => {
     if (Platform.OS === "web") {
-      logout();
-      router.replace("/login");
+      if (!confirm(SIGN_OUT_SCOPE_NOTICE)) return;
+      void logout().finally(() => router.replace("/login"));
       return;
     }
-    Alert.alert("Sign Out", "Are you sure you want to sign out?", [
+    Alert.alert("Sign Out", SIGN_OUT_SCOPE_NOTICE, [
       { text: "Cancel", style: "cancel" },
       {
         text: "Sign Out",
         style: "destructive",
         onPress: () => {
-          logout();
-          router.replace("/login");
+          // Navigate once the server has been told, not before: logout() clears
+          // the credential last, and a replace() that unmounts this screen
+          // mid-flight is how the network call gets dropped on a slow site
+          // connection. It resolves either way — logout swallows its own
+          // network failure and clears locally.
+          void logout().finally(() => router.replace("/login"));
         },
       },
     ]);
@@ -161,6 +170,25 @@ function SettingsContent() {
               label="Account"
               description="Your profile and how you sign in."
               onPress={() => router.push("/settings/account")}
+            />
+            <SettingsDivider />
+            {/* Clients. The entry point for app/clients.tsx, and the only one
+                besides the picker's "Manage clients" footer.
+
+                NOT gated: GET /clients is behind identity rather than rank
+                because the grouped site list takes its headings from it, so
+                crew reach a read-only version of the same screen. The add,
+                edit and delete controls there are what `canManageClients`
+                draws. */}
+            <SettingsRow
+              icon="briefcase-outline"
+              label="Clients"
+              description={
+                clients.length === 0
+                  ? "Group your sites under the client they belong to."
+                  : `${clients.length} ${clients.length === 1 ? "client" : "clients"}.`
+              }
+              onPress={() => router.push("/clients")}
             />
             <SettingsDivider />
             <SettingsRow

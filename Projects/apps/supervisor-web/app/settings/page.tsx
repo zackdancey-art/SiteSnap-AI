@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import Topbar from "@/components/Topbar";
-import { getSavedUser, isAuthenticated, logout, changePassword, revokeAllSessions, fetchCompanyProfile, updateCompanyProfile, getAccountSettings, updateAccountSettings, type AccountSettings } from "@/lib/api";
+import { getSavedUser, isAuthenticated, logout, SIGN_OUT_SCOPE_NOTICE, changePassword, revokeAllSessions, fetchCompanyProfile, updateCompanyProfile, getAccountSettings, updateAccountSettings, type AccountSettings } from "@/lib/api";
 import { useRole } from "@/lib/useRole";
 import {
   MAP_PREFS_DEFAULTS, readMapPrefs, writeMapPrefs,
@@ -302,11 +302,22 @@ export default function SettingsPage() {
     }
   };
 
-  const handleSignOut = async () => { await logout(); router.replace("/"); };
+  const handleSignOut = async () => {
+    if (!confirm(SIGN_OUT_SCOPE_NOTICE)) return;
+    await logout();
+    router.replace("/");
+  };
 
   const handleSignOutAll = async () => {
-    if (!confirm("This will rotate your session token. Existing tokens expire within 7 days. Continue?")) return;
-    try { await revokeAllSessions(); alert("Session token rotated. Other sessions will expire at their natural TTL."); }
+    // HALF-BUILT-MECHANISMS F4: this copy described AUDIT L75's behaviour, where
+    // revoke-all minted a new token and invalidated nothing. Phase 2 made the
+    // control real — it increments `token_generation`, and every token behind
+    // the row is refused on its next request. The copy was the last thing still
+    // saying otherwise, which is worse than no copy: a manager with a lost phone
+    // read "will expire at their natural TTL" and went looking for another
+    // remedy that does not exist.
+    if (!confirm("This signs out every other device on your account immediately. This device stays signed in. Continue?")) return;
+    try { await revokeAllSessions(); alert("Signed out everywhere else. Every other session is now refused."); }
     catch (err: unknown) { alert(err instanceof Error ? err.message : "Failed to revoke sessions."); }
   };
 
@@ -670,7 +681,7 @@ export default function SettingsPage() {
                   <Row label="Current session" sub="You are signed in on this device">
                     <span className="badge" style={{ background: "#F0FDF4", color: "#22C55E" }}>Active</span>
                   </Row>
-                  <Row label="Sign out all other devices" sub="Revoke tokens for every other session — your current session stays active" last>
+                  <Row label="Sign out others, stay signed in here" sub="Refuses every other session immediately and keeps this device working — Sign Out ends this one too" last>
                     <BtnGhost onClick={handleSignOutAll} danger>Sign Out All</BtnGhost>
                   </Row>
                 </Panel>

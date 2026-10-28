@@ -161,6 +161,26 @@ test("settings/offline-sync is registered — the AUDIT L59 regression guard", (
   );
 });
 
+test("clients is registered — the screen this workstream added", () => {
+  const audit = auditScreenHeaders(readAppTree(APP_DIR));
+  /**
+   * A named guard beside the offline-sync one above, for the same reason it is
+   * there: the two pinned counts already moved when this screen landed, and a
+   * count can be re-pinned by anyone who raises it without looking at what
+   * moved. This names the screen, so deleting its registration fails here with
+   * the screen's name in the message rather than as "34 !== 33".
+   */
+  assert.ok(
+    audit.screenHeaderRoutes.includes("clients"),
+    "app/clients.tsx no longer renders <ScreenHeader>; this guard is now pointing at nothing"
+  );
+  assert.ok(
+    audit.headerHiddenRoutes.includes("clients"),
+    "app/clients.tsx is showing a native header — it is unregistered or registered " +
+      "without headerShown: false, which is AUDIT L59 again"
+  );
+});
+
 // ── Positive controls on synthetic trees ────────────────────────────────────
 //
 // These are not a substitute for the red-on-revert run against the real file;

@@ -257,6 +257,28 @@ module.exports = {
       //                   API, which is the whole point of a permission table,
       //                   so there is no tenanted query for withTenant to wrap.
         "services/api/src/routes/crew-permissions-db.test.ts",
+      //   routes/crew-timecards-db.test.ts
+      //                   migrations and the drain as above, plus three reads
+      //                   the HTTP API deliberately cannot give it. Two of them
+      //                   are the same assertion from opposite sides: that a
+      //                   refused write did not land, read from the TABLE
+      //                   rather than from the route that just refused - a 403
+      //                   or 409 returned after the row had already changed
+      //                   would satisfy every status assertion in the file. The
+      //                   third is migration 033's CHECK constraint, which no
+      //                   route can exercise because the route's zod enum
+      //                   refuses an undeclared status first; proving the
+      //                   constraint EXISTS means writing one past the route,
+      //                   inside a transaction that is rolled back.
+      //                   Both of those queries set app.company_id with
+      //                   set_config in their own transaction, exactly as
+      //                   withTenant does, because crew_timecards is RLS-forced
+      //                   and a bare pool query would match nothing - which for
+      //                   the CHECK probe would be indistinguishable from a
+      //                   constraint that is not there. That is why the file
+      //                   asserts a VALID write matches one row before trying
+      //                   the invalid one. Exact filename.
+        "services/api/src/routes/crew-timecards-db.test.ts",
       //   routes/sessions-and-tokens-db.test.ts
       //                   migrations and the drain as above, plus two reads a
       //                   store deliberately cannot give it: that
@@ -273,6 +295,31 @@ module.exports = {
       //                   company_id predicate, so there is no tenant context
       //                   for withTenant to set here. Exact filename again.
         "services/api/src/routes/sessions-and-tokens-db.test.ts",
+      //   routes/clients-db.test.ts
+      //                   migrations and the drain, and nothing else: the pool
+      //                   is held only to apply the migrations before the app
+      //                   boots and to end itself in after(). Every read behind
+      //                   the route in that file goes through withTenant, which
+      //                   is not optional there - `clients` and `project_sites`
+      //                   are both FORCE ROW LEVEL SECURITY (032 and 022), so a
+      //                   bare pool query would have matched zero rows and the
+      //                   ON DELETE SET NULL assertion would have read undefined
+      //                   for a site that was sitting there intact. This rule is
+      //                   what caught that. Exact filename again.
+        "services/api/src/routes/clients-db.test.ts",
+      //   routes/inspection-template-id-db.test.ts
+      //                   migrations and the drain as above, plus one read no
+      //                   store can give it: whether inspections.template_id
+      //                   still HAS its foreign key into inspection_templates,
+      //                   read out of information_schema. That constraint is
+      //                   the entire premise of the file - without it the guard
+      //                   under test refuses ids Postgres would have accepted,
+      //                   and three green tests would be defending nothing. It
+      //                   is a catalogue query, so there is no tenanted row and
+      //                   no company context for withTenant to set; every
+      //                   tenanted read and write in the file goes through the
+      //                   HTTP API or through inspectionStore.
+        "services/api/src/routes/inspection-template-id-db.test.ts",
       //   routes/site-bin-db.test.ts
       //                   migrations and the drain as above, plus two kinds of
       //                   read that are deliberately NOT tenanted: four
