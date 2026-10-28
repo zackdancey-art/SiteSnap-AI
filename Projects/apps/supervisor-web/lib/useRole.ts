@@ -156,8 +156,10 @@ export function canApproveDiary(companyRole: string | null | undefined): boolean
  * oversight in either place. canSeeSupervisorDashboard, canReadCompanyProfile
  * and canApproveDiary read the RAW value and let an absent role through, so a
  * manager whose saved session predates the field does not silently lose a
- * screen. `isManager` and `isAtLeast` in useRole() below read the DEFAULTED
- * value and refuse it.
+ * screen. `isManager` in useRole() below reads the DEFAULTED value and
+ * refuses it. (`isAtLeast` used to be named here alongside it; this commit
+ * deletes it as an uncalled fail-open, so the sentence named a function that
+ * no longer exists.)
  *
  * These follow `isManager`, because withholding a button and withholding a
  * screen are not the same mistake. The failure when this is wrong is that a
