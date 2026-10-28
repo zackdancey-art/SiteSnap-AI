@@ -3770,3 +3770,118 @@ path filters like `--filter ./services/api` match nothing"* and tells you to fil
 name. That is the same observation, written as a convenience note. What it does not say — and
 what makes it a hazard rather than a style preference — is that the no-match **passes**. A reader
 who follows §5 is safe; a reader who ignores it does not get an error.
+
+---
+
+### L109 — a DB-gated suite reaches the Postgres path of seven of the eleven stores only by remembering a line nothing checks for, and the omission is silent — MEDIUM (one suite was affected and is fixed; the failure mode is invisible by construction, and it makes a negative assertion vacuous)
+
+**What this is.** `storage/report-payload-db.test.ts` ran against Postgres for the first time on
+28 October 2026, in PR #70's CI, and two of its four tests failed with `undefined` where a
+person's name should have been. The suite migrated the database, seeded it, inserted three
+`auth_users` rows with `full_name` populated, and then read its member list out of an **empty
+in-process `Map`**. The SELECT never ran. Nothing errored; the test simply asked the wrong store.
+
+This is **AUDIT L65's shape for the eighth time** — a test believing it exercised Postgres while
+exercising the in-memory fallback — but the mechanism is narrower and more actionable than L65's
+general warning, and it is the mechanism that is worth filing: **the store a DB suite talks to is
+selected by a line the suite itself has to remember to write, and omitting it is not an error.**
+
+**The one line.**
+
+```ts
+process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
+```
+
+Eight DB-gated suites already carry it at the top of their gated block, several with the same
+justifying comment. `report-payload-db.test.ts` was the ninth and the first to omit it. Measured
+(`grep -l 'process\.env\.DATABASE_URL *=' ` over the `TEST_DATABASE_URL`-gated suites, merged
+tree, before the fix): eight of nine.
+
+**Why the line is needed at all — the split convention.** `test-setup.ts` blanks `DATABASE_URL`
+for every test, deliberately, so that no suite can reach the production database. A store
+therefore only selects Postgres under `test:db` if its own `useDatabase()` knows to look at
+`TEST_DATABASE_URL`. Four do. Seven do not:
+
+| `useDatabase()` consults `TEST_DATABASE_URL` under `NODE_ENV=test` | stores |
+|---|---|
+| **yes** — selects Postgres on its own | `projectsStore`, `inspectionStore`, `incidentStore`, `signatureStore` |
+| **no** — reads `DATABASE_URL` only, so a test must set it | `authStore`, `crewStore`, `deliveriesStore`, `locationStore`, `pushStore`, `templateStore`, `uploadsStore` |
+
+`projectsStore`'s version carries a comment explaining exactly why it is test-aware. Seven stores
+never got the same treatment, so the compensating `DATABASE_URL` line migrated into the test
+files instead, one copy per file, as folklore.
+
+**What it cost here, and the part that matters.** Both failing assertions were **positive
+controls**. Test 1 expects the author of an entry to be named `Dana Okafor`; test 2 expects a
+misfiled row to be attributed to nobody *while the two legitimate rows are attributed correctly*,
+which is what makes the refusal mean something. The refusal halves — "A must not be told B's
+member's name", "the misfiled row must name nobody" — **passed**, because an empty index refuses
+everything. Had the suite been written with the negative assertions alone, in the house style
+before the both-controls rule, the first Postgres run of a compliance-document attribution path
+would have come back **green while testing nothing at all**. The both-controls rule is the only
+reason this was ever seen.
+
+**The measurements.** All from `/Users/zackdancey/Dev/SiteSnap`, 28 October 2026, on
+`feat/report-periods` at `84a78a5` (position 6 of the merge train):
+
+```
+# the suite is new at this position — first Postgres run, so a branch defect, not a merge artefact
+origin/main  TEST_DATABASE_URL-gated suites: 14
+merge (HEAD) TEST_DATABASE_URL-gated suites: 17
+arriving:  storage/report-payload-db.test.ts
+           storage/report-photos-db.test.ts
+           storage/report-range-db.test.ts
+removed:   none
+git log origin/main -- …/report-payload-db.test.ts   -> empty (never on main)
+git diff 04614b5 HEAD  -- …/authStore.ts             -> empty (untouched by the merge)
+git diff 797dbb0 HEAD  -- …/authStore.ts             -> empty (untouched by the branch)
+```
+
+The branch selection itself, measured on the compiled modules with **no database** —
+`TEST_DATABASE_URL` pointed at `127.0.0.1` port 1, so nothing is reachable and nothing is
+written:
+
+```
+DATABASE_URL blank:  listCompanyMembers("…") -> []            # MEMORY path, never asked Postgres
+                     resolveAuthorName -> undefined, undefined # the CI failure, reproduced locally
+DATABASE_URL set:    listCompanyMembers("…") -> throws ECONNREFUSED  # POSTGRES path, tried to connect
+```
+
+That is the whole defect: a branch, not a column. `USER_COLUMNS` includes `full_name`, `mapUser`
+maps it to `fullName`, and `listCompanyMembers`' query —
+`SELECT <USER_COLUMNS> FROM auth_users WHERE company_id = $1 ORDER BY created_at ASC` — is
+correct. It was never executed.
+
+**A false claim of my own, recorded rather than amended away.** Commit `44b5637`'s message
+asserts that eight route DB suites "have been running auth in memory under `test:db` all along"
+and that their `deleteUserAccount` cleanup is a Postgres-side no-op. **That is wrong.** All eight
+already set `DATABASE_URL`; their cleanup does reach Postgres. The claim was reasoned from
+`authStore`'s source without checking the suites, and `312307d` corrects it in the same branch's
+history. `--amend` is unavailable in this environment, so the false statement remains in the log
+and this paragraph is how a future reader learns not to act on it. There is no eight-suite gap.
+
+**Remedies, neither taken yet.** The fix shipped on `feat/report-periods` is the per-file line,
+matching the other eight — the smallest change that makes the suite test what it claims, with no
+effect on any other suite. The standing problem is untouched:
+
+1. **Make the seven stores' `useDatabase()` test-aware**, as `projectsStore`'s already is. All
+   nine per-file lines then become redundant and the hazard disappears at its source. Blast
+   radius is every DB-gated suite at once, since each would begin exercising Postgres paths it
+   currently takes in memory, and it cannot be verified in this environment — there is no local
+   Postgres, no Docker and no `psql`. It needs a CI run or a scratch `TEST_DATABASE_URL`.
+2. **Enforce the convention structurally** in `services/api/scripts/run-tests.sh`, which already
+   refuses to pass vacuously on three counters. The check is derivable rather than hand-written:
+   the set of non-test-aware stores is greppable (`function useDatabase` without
+   `TEST_DATABASE_URL` in its body), so any `TEST_DATABASE_URL`-gated suite importing one of them
+   and lacking the `DATABASE_URL` assignment is a failure. This is the cheaper of the two and does
+   not need a database to validate.
+
+Option 1 is the real fix and option 2 is what stops the ninth omission becoming a tenth. They are
+not alternatives.
+
+**Where it is already half-recorded.** `CLAUDE.md` §5 explains that `test` and `test:db` are
+separate runs *because* "some stores are test-aware … so setting `TEST_DATABASE_URL` for the
+whole suite flips those stores to the DB and breaks tests that assume the in-memory store". That
+is the same split, written from the other side — as a reason the two runs exist. What it does not
+say is that for the seven stores on the other side of the split, a DB suite gets the in-memory
+store unless it intervenes, and gets no warning when it does not.
