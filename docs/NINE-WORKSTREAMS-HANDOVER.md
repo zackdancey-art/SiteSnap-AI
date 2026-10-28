@@ -589,6 +589,10 @@ correction — 11 on the union — is unchanged; the claim about main is not.
 
 ## 7. The merge-conflict result
 
+**ALL ELEVEN CODE POSITIONS ARE MERGED. `main` is `e00b8f8`. 7a through 7c are
+the rehearsal record and are left as written; §7d is the as-merged result and is
+the authority — read it first, and read it before relying on any row above.**
+
 **The counts in 7a were re-derived on 28 October 2026 and six of the twelve were
 wrong. Read 7a-note before relying on a row.**
 
@@ -890,6 +894,154 @@ these resolutions cannot exist on a branch at all. §9 has the measured result,
 the per-item classification and the two further semantic conflicts the second
 rehearsal found.
 
+### 7d. As merged — all eleven landed, and where the result deviated from the rehearsal
+
+**This subsection is the authority on what happened. 7a, 7a-note, 7b and 7c above
+are the rehearsal record and are deliberately left as written.** The sequence is
+complete: PRs #65 through #75 are merged, positions 1 through 11, and `main` is at
+`e00b8f8`. PR 12 (this document) is position 12 and is the only one outstanding.
+
+**The prediction held where it could be checked.** Every row's resolution applied
+as recorded, and the trunk-equality check that 7a-note made the whole prediction
+conditional on — `git diff <trunk at N-1> origin/main` empty before each merge —
+never once came back non-empty. The strongest form of that: at position 11,
+`main`'s tree came back **byte-identical** to the branch tip's tree
+(`e00b8f8^{tree}` = `e833c3e4…`, the same tree the merge commit `14e93d1`
+produced), so GitHub's squash-free merge introduced no drift anywhere in the
+eleven-merge sequence.
+
+**Gates on `main` as merged**, measured at position 11 rather than inherited:
+
+```
+./scripts/ci.sh --no-db --no-redis   exit 0
+mobile  run-tests.sh                 26 files, 207 tests, 207 pass, 0 fail, 0 skip
+API     run-tests.sh (in-memory)     68 files, 323 tests, 296 pass, 0 fail, 27 skip
+```
+
+The 27 skips are still the pinned value exactly — `EXPECTED_DB_SUITES` 20 +
+`EXPECTED_REDIS_TESTS` 4 + `EXPECTED_LIVE_OPENAI_TESTS` 3 — and the mobile pins
+matched **untouched**, which was the part of the pin plan that could not be
+checked any other way.
+
+**The one arithmetic difference from §9a, and it reconciles exactly.** The second
+rehearsal measured the API in-memory suite at 322 tests / 295 pass; as merged it is
+323 / 296, with skips unchanged at 27. That is **+1 test, +1 pass, +0 skips**, and
+it is entirely PR 8's deviation below: `routes/integration.test.ts` gained exactly
+one `test(...)` — *"a binned site refuses a new entry, and a live one accepts it"* —
+and the DB-gated half of that same commit added assertions to an existing test
+rather than a new one, so no skip count moved. No other position changed a count.
+
+#### The four positions that deviated
+
+Four of the eleven landed with something the rehearsal had not recorded. None was
+a resolution applied differently from the record; all four were things found *at*
+the merge, by running the gates or by reading the tree the merge produced.
+
+| position | PR | deviation | commit | kind |
+|---|---|---|---|---|
+| 8 | #72 `feat/bin-retention` | `createEntry` had no site-liveness check on either store path | `598fff1` | **a defect found mid-merge, fixed** |
+| 9 | #73 `feat/consent-and-native` | `app.config.ts` named a guard file that does not exist | `ffeb68e` | **a comment that was false** |
+| 10 | #74 `feat/branding-and-dashboard-parity` | the fourth conflict was real, and had a fourth hunk the rehearsal never saw | `bedb91e` | **a conflict under-recorded** |
+| 11 | #75 `feat/debt-and-cost-out` | four merge-time corrections, git flagged none of them | `14e93d1` | **pins and guards invalidated by the union** |
+
+**Position 8 — a silent data loss, found because the merge made me read
+`createEntry`.** `createEntry` accepted a POST against a **binned** site on both
+store paths, inserted the row and answered **201**; because `listEntries` filters
+through `onLiveSite()` on Postgres and `!…deletedAt` in memory, that row was never
+readable again. The caller was told the entry was saved and it was gone. The route
+that reaches this in practice is the offline replay — `apps/mobile/lib/offline-drain.ts:201`
+drains the queue onto `POST /projects/entries` and each 201 dequeues one entry as
+delivered — so **a site binned while a phone was out of signal consumed the day's
+work silently.** `createEntry` now returns null when the actor's company has no
+live site with that id (binned, another company's and nonexistent all answer
+alike, so an invisible site is not distinguishable from an absent one) and the
+route answers 404, matching its two sibling handlers. The check is liveness and
+tenancy only and deliberately **not** `canManageSite`: filing against a site is not
+managing it, and a role check there would stop a crew member diarising the site
+they are standing on. The client needed no change — a 404 is a server refusal, so
+offline-drain's `markOpFailed` branch (AUDIT L30) keeps the op, dead-letters it
+with its status and shows it as unsynced. Red-on-revert was run on the in-memory
+half, the half this environment can run: removing the two-line guard gives
+`not ok 98 … expected: 404, actual: 201` with **268 others still green**, so the
+new test is the only thing defending it. The Postgres half is carried by CI, and
+`routes/site-bin-db.test.ts` asserts the 404 **and** that `project_entries` holds
+no row — the listing is deliberately not what is checked, because a 201 plus a
+hidden row satisfies any assertion about the listing.
+
+**Position 9 — a pointer to a test that does not exist.** The L60 removal block in
+`app.config.ts` said it was *"Guarded by `lib/app-config-permissions.test.ts`"*.
+There is no such file. The guard is real and does everything the comment claims —
+it parses `app.config.ts` with comments stripped first, so the commented-out
+location declarations preserved at the top cannot satisfy it, and it refuses to
+report a pass if the file is missing, implausibly short or uninterpretable — but it
+is named `lib/native-permission-audit.test.ts`. Worth its own commit because of
+what the wrong name costs later: the removal deliberately leaves those
+declarations in place as comments, so a future reader who goes looking for the
+thing stopping them being uncommented back in, finds nothing at the named path, and
+concludes the guard was deleted, is one step from restoring an App Store review
+rejection. **A pointer to a nonexistent test is worse than no pointer.**
+Comment-only; no behaviour change and no pin moved.
+
+**Position 10 — the fourth conflict, and a fourth hunk.** 7a-note predicted 4 and
+was right; what deviated is the composition. §7a's row counted three and carried a
+bare `+`, because `supervisor-web/app/sites/page.tsx` was recorded in 7b as the
+home of three *semantic* conflicts and not also as a textual one. It is both. At
+the merge it came in as **four hunks resolved line by line**, and the fourth is one
+the rehearsal never recorded: the card JSX, where the unconflicted tail git aligned
+below the marker (`group.data.map(renderCard)`) belongs to main's side, so taking
+HEAD there orphans it — **confirmed as a TS17002 unterminated-JSX error, not a
+silent one.** Three of the four typecheck on neither parent. Also measured in both
+directions rather than reasoned about: with only the branch's import block
+`groupSitesByClient`/`shouldShowGroupHeadings` are undefined, with only main's six
+names are. The mobile `app/(tabs)/index.tsx` import union is the same shape
+mirrored. `tsconfig.test.json` was 53 + 4 = **57** entries, verified by set
+difference in both directions rather than by count. And the merge confirmed PR 8's
+`createEntry` guard survived the auto-merge of `projectsStore.ts` intact, including
+its transactional `liveOnly("project_sites")` predicate.
+
+**Position 11 — four corrections, none of them flagged by git.** Seven textual
+conflicts, and separately four things the union invalidated silently. In short, with
+full provenance in `14e93d1`: (1) **`EXPECTED_PINNED` 3 → 4** — not a conflict, and
+now filed as a hazard class in its own right, **AUDIT L112**; (2) **two
+`DDL_EXEMPT` entries** for `sqlSchemaAudit.ts` and `testMigrations.ts`, in a
+main-only file absent from the branch so it never conflicted, verified by running
+the guard's own walk against the merged tree — 2 offenders before, 0 after, 67 files
+walked; (3) an **`.eslintrc.js` exemption for `sqlSchemaAudit.test.ts` in its own
+block** with `DYNAMIC_POOL_IMPORT_BAN` re-listed inside it, because an overrides
+block replaces a rule's options wholesale rather than merging them — joining the
+soft-delete registry list would have set `no-restricted-syntax` to `"off"` and
+dropped the pool ban for that file with no sign of it, proven with an identical
+dynamic-import probe under both configs (**0 errors lumped, 1 scoped**); (4) the
+**`permissions.test.ts` floor comment**, where both parents wrote the floor as "the
+count at the time of writing", 7 on one side and 8 on the other, a sentence that
+stops being true the moment two branches of predicates land together — measured at
+**11** on the merged tree and deliberately left reading `>= 8`, because a floor
+raised here goes red on every sibling branch not yet carrying all eleven.
+
+A fifth thing was found at position 11 and is not a merge correction: verifying a
+deletion premise against the **merged** tree rather than the branch — the practice
+L112 argues for — showed `isAtLeast` had zero real callers, so the deletion held,
+but surfaced a `useRole.ts` doc comment still naming it. Fixed in `c85d5ae`, after
+the merge commit.
+
+#### What this leaves owing
+
+Three floors are loose on `main` and are queued as **one** post-merge commit, held
+back until this batch is fully landed because raising any of them on a branch goes
+red on its siblings. Measured on `main` at position 11:
+
+| floor | reads | measured | where |
+|---|---|---|---|
+| `predicates.length` | `>= 8` | **11** | `apps/mobile/lib/permissions.test.ts:135` |
+| `files.length` | `>= 40` | **67** | `services/api/src/storage/store-ddl-guard.test.ts:110` |
+| `files.length` | `>= 14` | **15** | `services/api/src/routes/async-route-errors.test.ts:276` |
+
+The argument for raising them rather than leaving them is **AUDIT L112**, which is
+the `EXPECTED_PINNED` instance generalised: a floor cannot distinguish "the
+population is as I measured it" from "the population has changed and I am no longer
+measuring anything", and it was an equality check — not a floor — that caught the
+one stale pin this batch produced.
+
 ---
 
 ## 8. The PR open order, with a compare URL each
@@ -1065,6 +1217,9 @@ database, and migrations run there at boot from `migrate.ts`.
 
 ## 9. The second rehearsal — run on the back-ported branches, 27 October 2026
 
+**As merged: 9a-9e are the rehearsal record, left as written. §9f settles what
+they predicted correctly and what they did not.**
+
 The thirteen resolutions in §7b are now on their owning branches, and the
 rehearsal was re-run **from scratch** on a new throwaway branch to prove the
 merged tree comes out green with the resolutions *carried* rather than applied by
@@ -1164,6 +1319,68 @@ that branch's earlier version of the file swapped in. On the union all three pas
 which the rehearsal's `# fail 0` is. So update PR 11 onto main **before** reading
 its checks; main requires branches to be up to date anyway, and that update is
 what makes them green.
+
+### 9f. As merged — what the second rehearsal predicted correctly, and what it did not
+
+**9a through 9e are the rehearsal record, left as written. This is the outcome.**
+All eleven code positions are merged (#65–#75); `main` is `e00b8f8`. §7d carries
+the full as-merged account and the four deviating positions; this subsection
+settles only what §9 itself claimed.
+
+**9a's figures, against the merged reality:**
+
+| 9a measured on `rehearsal/merge-all-2` | as merged on `main` | |
+|---|---|---|
+| typecheck exit 0 | exit 0 | held |
+| `lint --max-warnings=0` exit 0 | exit 0 | held |
+| mobile 26 files, 207 pass, 0 fail, 0 skip | 26 files, 207 pass, 0 fail, 0 skip | **exact** |
+| API 322 tests, 295 pass, 0 fail, 27 skip | **323 tests, 296 pass**, 0 fail, 27 skip | **+1/+1**, reconciled in §7d |
+| `ci.sh --no-db --no-redis` exit 0 | exit 0 | held |
+
+The portal suite's 4 files / 36 tests were not re-measured separately at position
+11; `ci.sh` covers them and it exits 0. The +1 is PR 8's single new in-memory test
+and nothing else — §7d does the arithmetic.
+
+**9b's classification held completely.** The five carryable resolutions carried;
+the seven merge-time ones were applied at the merges they were predicted for, each
+at the position §9b names; 12A stayed withdrawn. No resolution had to be moved
+between the two categories at the merge, and none was applied differently from the
+record. This is the claim §9 existed to test — that a resolution which does not
+typecheck, does not lint, or does not exist on either parent **cannot** be
+back-ported and must be made at the merge — and it survived eleven merges.
+
+**9c's two additions held, and item 15 is now a filed hazard class.** Item 14 (the
+two `DDL_EXEMPT` entries) recurred exactly as predicted at the position-11 merge
+and was re-applied there, because it cannot be exempted on workstream 2b. Item 15
+(`EXPECTED_PINNED` auto-merging at 3) recurred too, and is the subject of **AUDIT
+L112** — filed as a class rather than as a third instance, with the three-way merge
+reproduced on the blobs to show that `EXPECTED_WORKFLOWS` conflicted and
+`EXPECTED_PINNED` eleven lines below it did not, for no reason other than whether
+`main` had independently edited the same line.
+
+**9d was right about the mechanism and right to name it.** All three pins listed
+there were invalidated by the union, exactly as described: `EXPECTED_PINNED` went
+red and was corrected to 4; the two floors merged clean and **stayed green**, which
+is what 9d said made them worth naming. They are still green and still loose on
+`main` — 11 against a floor of 8, 15 against 14, and a third at 67 against 40 that
+9d did not list. All three are queued as one commit. 9d's `EXPECTED_WRITE_STEPS = 13`
+comparison is the right one and is now the standing argument in L112.
+
+**9e's prediction about PR 11's CI was correct and the remedy worked.** That
+branch's own checks were red before the merge commit, by construction, on pins
+measured for the union. Updating it onto `main` first is what made them green, and
+nothing about that redness turned out to be a defect.
+
+**One thing 9 did not anticipate at all.** Every deviation in §7d was found at the
+merge rather than predicted by either rehearsal, and three of the four were found
+by *reading code the merge forced me to open* rather than by a gate going red —
+PR 8's silent 201, PR 9's pointer to a nonexistent test, and PR 11's `useRole.ts`
+comment naming a function the same commit deleted. The rehearsals were built to
+predict conflicts and pins, and they did that well. They were not capable of
+predicting these, because in each case both parents were green and the merged tree
+was green too. The practice that actually caught them is the one L112 recommends:
+**verify every premise against the merged tree rather than against either parent**,
+including premises that have nothing to do with the conflict in front of you.
 
 ---
 

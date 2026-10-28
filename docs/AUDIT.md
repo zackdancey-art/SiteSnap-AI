@@ -3885,3 +3885,275 @@ whole suite flips those stores to the DB and breaks tests that assume the in-mem
 is the same split, written from the other side — as a reason the two runs exist. What it does not
 say is that for the seven stores on the other side of the split, a DB suite gets the in-memory
 store unless it intervenes, and gets no warning when it does not.
+
+---
+
+### L110 — the TAP counter parsers in both `run-tests.sh` scripts depend on node's default test reporter, which changed between node 20 and node 24 — LOW (tooling hazard; CI is unaffected because it pins node 20, and the local failure is fail-closed and loud)
+
+**What this is.** Both vacuity-guarding test runners read their counters out of `node --test`'s TAP
+summary with `awk '/^# pass /{print $3}'`. That is the *default* output format on node 20 and is not
+the default on node 24: node switched the default reporter for a non-TTY stdout from `tap` to `spec`,
+and the spec reporter writes `ℹ pass 2` where the TAP reporter writes `# pass 2`. The parsers
+therefore read nothing on node 24, and every pinned count the runners exist to check becomes
+unreadable at once.
+
+**Why this is LOW and not higher.** CI pins the version that works, at
+`.github/workflows/ci.yml:67` (`node-version: 20`), so no pinned count is unchecked on any branch or
+on `main`. And the mobile parser fails **closed** — the message is already written for exactly this
+cause:
+
+```sh
+# apps/mobile/scripts/run-tests.sh:100
+PASSED=$(awk '/^# pass /{print $3}' "$OUT" | tail -1)
+if [ -z "$PASSED" ]; then
+  echo "ERROR: could not find a '# pass' line in the test output." >&2
+  echo "  The runner's summary format changed; update this parser rather than" >&2
+  echo "  dropping the check." >&2
+  exit 1
+fi
+```
+
+So the realistic cost is a local run on a system node that stops with an accurate diagnosis, not a
+green run that checked nothing. This is filed because the *next* reporter change may not be a
+rename, and because one of the four sites does not fail this cleanly — see the asymmetry below.
+
+**The measurements.** A two-test probe, run four ways on 29 October 2026. Local node is
+`/usr/local/bin/node` v24.13.1 (a system install); only v20.20.0 exists under `~/.nvm`.
+
+| node | flags | the line the parsers look for |
+|---|---|---|
+| v20.20.0 | default | `# pass 2` — **found** |
+| v24.13.1 | default | `ℹ pass 2` — **no `# pass` line at all** |
+| v24.13.1 | `--test-reporter=tap` | `# pass 2` — **found** |
+| v20.20.0 | `--test-reporter=tap` | `# pass 2` — **found** |
+
+The fourth row is the one that matters for the remedy: the flag is **backward-safe**, so it can be
+added without a version check and without touching CI's pinned 20. Note also that node 24's default
+run still **exits 0** — the reporter change is not itself an error, which is why the parsers are the
+only thing that notices.
+
+**A correction to my own earlier record.** I wrote, in PR 11's body and in the instruction this entry
+was filed from, that the dependency is in "all three `run-tests.sh` files" and that the fix touches
+"all three scripts". That is wrong in both halves. Measured:
+
+| | count | where |
+|---|---|---|
+| `run-tests.sh` scripts in the repo | **2** | `apps/mobile/scripts/`, `services/api/scripts/` |
+| TAP counter parse sites | **4** | mobile `100` (`# pass`), `122` (`# skipped`); API `239` (`# skipped`), `291` (`# pass`) |
+| real `node --test` invocation sites | **3** | mobile `88`; API `200`, `226` |
+
+There is no third script. The "three" was a conflation of the three *invocation* sites with the
+number of files, and one of those three invocations — API `200`, the `exec` on the DB path — parses
+nothing at all, so the flag is needed at only two of them for correctness and at all three for
+consistency.
+
+**The asymmetry between the four parse sites, which is the part worth keeping.** Three of the four
+fail closed with the "could not find a '# pass' line" message. The fourth, `services/api/scripts/run-tests.sh:291`, does not:
+
+```sh
+PASSED=$(awk '/^# pass /{print $3}' "$OUT" | tail -1)
+if [ "${PASSED:-0}" -ne "$EXPECTED_PASSES" ]; then
+  echo "ERROR: $MODE run passed 0 test(s), expected $EXPECTED_PASSES." >&2
+```
+
+`${PASSED:-0}` turns an unparseable summary into a **measured zero**, so the failure is reported as
+"the run passed 0 tests" rather than as "the parser stopped working". Those are different problems
+with different fixes, and a reader handed the first one will go looking at the test suite. The
+default is doing the opposite of what defaults are for here: it is converting a known-unknown into a
+confident wrong answer. Worth fixing even if the reporter question never arises again.
+
+**The remedy, not taken.** Pass `--test-reporter=tap` explicitly at all three `node --test`
+invocation sites, and replace `${PASSED:-0}` at API `291` with the same `[ -z "$PASSED" ]`
+fail-closed branch the other three use. One commit, five lines.
+
+**Why it is deliberately not done yet.** It is cross-cutting: both scripts are in the conflict set of
+nine of the twelve merges in the eleven-workstream train (`apps/mobile/scripts/run-tests.sh` is the
+single most frequent textual conflict in the whole batch — see
+`docs/NINE-WORKSTREAMS-HANDOVER.md` §7a). Editing either one mid-train adds a conflict hunk to every
+branch behind it, for a change that fixes nothing CI can see. It belongs in the same post-merge
+commit as the three loose floors, and is queued there.
+
+---
+
+### L111 — `rate-limit-redis-connecting.test.ts` is load-dependent and will occasionally go red in CI; that is expected and is not a regression — LOW (known flake, documented rather than fixed; an occasional random red in this file is not a signal)
+
+**What this is, and why it is being recorded rather than repaired.** This suite asserts things about a
+**time window**, not about a return value. It points the rate limiter at an unreachable Redis
+(`REDIS_URL = "redis://127.0.0.1:1"`) and then checks what the system says about itself at specific
+wall-clock moments: that it is quiet during the grace period and complains exactly once after it. The
+assertions are therefore races between the code's timers and the machine's scheduling, and on a
+loaded 8-core box running a 68-file suite in parallel they can lose.
+
+**The constants it races.** All four are set at module top or inline, and all four are real durations
+rather than fake timers:
+
+| constant | value | what it bounds |
+|---|---|---|
+| `RATE_LIMIT_REDIS_CONNECT_GRACE_MS` | `2000` | how long a connecting Redis stays unannounced |
+| `RATE_LIMIT_REDIS_READY_TIMEOUT_MS` | `800` | how long a readiness probe waits |
+| the "silence is bounded" sleep | `2600` | the test's own wait past the grace window |
+| the mid-flight sample | `250` | when state is read against a socket that accepts and never speaks RESP |
+
+The margin on the one that fails is **600 ms** — a 2600 ms sleep against a 2000 ms grace. A test
+process descheduled for longer than that inside the sleep reads the post-window state late, or reads
+it before the timer that was supposed to have fired has run, and the equality assertions
+(`degradationReports === 1`, `state === "degraded"`) go red. Nothing is wrong with the code when that
+happens.
+
+**What was measured, and on what date.** 28–29 October 2026.
+
+| measurement | result |
+|---|---|
+| the original observation | **green / red / green** across three full in-memory suite runs on the same tree, nothing edited in between |
+| the file in isolation, repeated | **8 of 8 green** (`flake-iso-1..8`), 4 tests each |
+| the failing test, when it fails | `not ok 144 - 'connected' is never claimed while the socket is still opening` |
+| the file's blob across the whole train | `1a2b38c4b0…` **identical** at base `ee7e093` and at `main` `e00b8f8` |
+| `middleware/rateLimit.ts` across the train | `5f9ab8357c…` **identical** at both |
+| `git log ee7e093..origin/main -- <file>` | **empty** |
+
+So the conclusion that matters for reading CI: **no branch in the eleven-workstream batch touched
+this file or the middleware it tests.** A red here cannot have been introduced by any of them. If it
+goes red on a PR, re-run it; if it goes red twice on the same tree and green on a third, that is this
+entry and not a finding.
+
+**An honest negative result.** I tried to reproduce it deliberately, by loading all 8 cores and
+re-running the file under contention. It **did not reproduce** — 2 completed loaded runs, both
+4 pass / 0 fail. The experiment also cost more than it returned: the construct I used to generate
+load spawned two batches of spinning subshells that outlived their parent and were reparented to
+PID 1, taking the load average to 24.21 before I noticed and killed them. That was my own error, not
+a property of the test.
+
+The consequence for this entry is that it rests on (a) the original green/red/green on an unchanged
+tree, (b) the blob-identity proof that nothing in the batch is implicated, (c) today's 8/8 in
+isolation, and (d) the 600 ms margin above — **not** on a reproduction I can perform on demand. The
+mechanism is inferred from the constants, and it is the only mechanism consistent with a file that is
+8/8 alone and intermittently red in a parallel suite. I have not proved it, and if the real cause is
+something else, the thing that will show it is a red run whose timing does not fit these numbers.
+
+**Remedies, none taken.** In increasing order of honesty and cost: raise the 2600 ms sleep, which
+widens the margin and makes the suite slower without making the assertion deterministic; replace the
+sleeps with injected fake timers, which makes it deterministic and stops it testing the real timer
+path it exists to test; or move the file to a serial, non-parallel mode in `run-tests.sh` the way the
+DB suites already are (`--test-concurrency=1`), which keeps the real timers and removes the
+contention. The third is the right one if this becomes annoying. It is not worth a cross-cutting
+`run-tests.sh` edit mid-train, for the reason in L110.
+
+---
+
+### L112 — a merge resolution can change the population a pinned count measures while leaving the pin line untouched on that side, so git auto-merges a now-stale pin with no conflict — MEDIUM (merge-integrity hazard class; one live instance, caught only because the pin was an equality check and not a floor)
+
+**What this is.** A pinned count is an assertion about a population — how many workflows, test files,
+tests, gated suites, predicates. A merge can change that population *without touching the line that
+records it*, because the population lives in other files. When the side that changes the population is
+also the side that did not edit the pin line, git has nothing to resolve: one side edited the line,
+the other did not, so the three-way merge takes the edit and reports success. The merged tree then
+pins a number measured against a population that no longer exists.
+
+This is not the same hazard as a pin that both sides edited — that conflicts, and conflicts get read.
+It is the complement of it, and it is invisible by exactly the mechanism that makes the other one
+visible.
+
+**The instance, and it is reproducible rather than anecdotal.** `scripts/assert-workflow-runners-pinned.sh`
+carries two pins eleven lines apart. Workstream 8 had deleted `deploy-api.yml`, so on that branch both
+pins were correctly lowered. Ruling F3 then kept workstream 0's *renamed* replacement for that
+workflow, which puts the file back — so both lowered pins became wrong at the moment the resolution
+was chosen. Three-way state:
+
+| ref | `EXPECTED_WORKFLOWS` | `EXPECTED_PINNED` |
+|---|---|---|
+| merge base `ee7e093` | 3 | 4 |
+| `main` at position 10 `274ae567` | **4** (raised — a workflow was added) | 4 (untouched) |
+| workstream 8 tip `b5dbbf5` | **2** (lowered) | **3** (lowered) |
+
+Both pins were wrong in the same way, for the same reason, and needed the same correction. Git
+flagged one and carried the other. Reproduced directly on the three blobs:
+
+```
+$ git merge-file -L ours -L base -L theirs result.sh base.sh theirs.sh
+merge-file exit: 1
+
+40:<<<<<<< ours
+41:EXPECTED_WORKFLOWS=2  # ci.yml, build-mobile.yml (deploy-api.yml deleted: HALF-BUILT F3)
+42:=======
+50:EXPECTED_WORKFLOWS=4
+51:>>>>>>> theirs
+95:EXPECTED_PINNED=3  # build-mobile.yml has two jobs, ci.yml one (deploy-api.yml deleted: HALF-BUILT F3)
+```
+
+`EXPECTED_WORKFLOWS` is inside conflict markers because `main` happened to have edited that line too.
+`EXPECTED_PINNED=3` is at line 95 with **no marker**, because `main` happened not to have. The
+difference between a pin a human is forced to read and a pin that slides through is not the pin's
+importance, not its staleness, and not whether the merge invalidated it — it is the coincidence of
+whether the other branch independently edited the same line. That is the whole finding.
+
+**The detection point, which is the argument.** The merged tree failed:
+
+```
+FAIL: matched 4 pinned 'runs-on:' lines, expected 3.
+./scripts/ci.sh → exit 1
+```
+
+It failed because that check is written as an **equality**, `[ "$PINNED" != "$EXPECTED_PINNED" ]`.
+Had it been written as the floor the same script's sibling checks use — `[ "$PINNED" -lt "$EXPECTED_PINNED" ]`,
+or the `>= 8` shape used in three test files in this repo — then 4 pinned runners against a pin of 3
+would have **passed**, and the merged tree would have carried a pin asserting less than the truth with
+nothing to say so. The stale pin was found by the pin, and only because of how the pin was spelled.
+
+**Equality over floors wherever the population is knowable, and this is now evidence for it rather
+than a preference.** The standing rule in this project is that any pinned count is measured, never
+hand-written, after `EXPECTED_WRITE_STEPS = 13` read green against a sequence of 14 for the life of a
+branch. L112 adds the second half of that rule: a **measured** count still has to be written as an
+equality to do its job, because a floor cannot distinguish "the population is as I measured it" from
+"the population has grown and I am no longer measuring anything". Three floors in this repo were loose
+on the merged tree at position 11, each measured and each still passing:
+
+| floor | reads | measured on `main` | where |
+|---|---|---|---|
+| `predicates.length` | `>= 8` | **11** | `apps/mobile/lib/permissions.test.ts:135` |
+| `files.length` | `>= 40` | **67** | `services/api/src/storage/store-ddl-guard.test.ts:110` |
+| `files.length` | `>= 14` | **15** | `services/api/src/routes/async-route-errors.test.ts:276` |
+
+None of the three is a defect today and all three are green. That is the point: they are green at 11
+against 8 and at 67 against 40, so they would be equally green at 2 against 8 having lost nine
+predicates, and equally green having lost 27 route files — any of which is the population changing
+underneath a check that has stopped noticing. Raising them is queued as one post-merge commit.
+
+**The distinction not to overstate, because one of those same files gets it right.**
+`async-route-errors.test.ts` uses a floor at line 276 for the *population* and an **equality** at 293
+for the *property*:
+
+```ts
+assert.ok(files.length >= 14, `expected the route files to still be here, found ${files.length}`);
+...
+assert.equal(wrapped, files.length,
+  `expected all ${files.length} route files to build a wrapped router, ${wrapped} do`);
+```
+
+That is a legitimate shape — the floor is a vacuity guard answering "did I read anything at all", and
+the real assertion is the equality against whatever population was read. A floor used that way does
+not go stale in the same manner, because the number it compares against is measured at run time
+rather than written down. So the rule is not "no floors": it is **equality wherever the number is
+written down, and a run-time-derived population wherever one can be derived.** A hand-written floor is
+the worst of the three, because it is a written-down number that cannot fail upward.
+
+**What would actually have caught this, and what would not.** Not a floor. Not reading the diff —
+there is no diff to read on the carried line, which is the hazard. Not running the branch's own gates,
+because the pin is correct on the branch. Three things would:
+
+1. **Equality checks on every written-down pin**, which is what caught this one.
+2. **Re-measuring every pin on the merged tree rather than on either parent** — the practice this
+   batch adopted after the first instance, and the one that found the `isAtLeast` stale doc comment at
+   position 11 as well.
+3. **A deliberate audit of the pins adjacent to any line resolved by hand.** The generalisation of
+   this instance: when a resolution is made on one line of a file, every *other* pin in that file is a
+   candidate for having been invalidated by the same resolution, and git's silence about them carries
+   no information.
+
+**Where it is already recorded, and why this entry exists anyway.** This instance is written up twice
+already — in `scripts/assert-workflow-runners-pinned.sh`'s own comment block and in
+`docs/NINE-WORKSTREAMS-HANDOVER.md` §9c item 15, which notes it is the *second* occurrence of the same
+shape and that "back-porting a pin fixes the line you edited and leaves the line next to it to merge
+silently". Both of those record it as an incident in a specific merge. It is filed here as a class,
+because the conditions that produce it are generic — a pin, a population in other files, a resolution
+that changes the population, and one side not having touched the pin line — and none of them is
+specific to workflows, to this script, or to this batch.
