@@ -1,19 +1,39 @@
 "use client";
 
-import { useEffect, useState, useMemo, useRef } from "react";
+import { Fragment, useCallback, useEffect, useState, useMemo, useRef } from "react";
 import { useRouter, useParams } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import ProfileDropdown from "@/components/ProfileDropdown";
 import { SkeletonTable } from "@/components/Skeleton";
+import { siteStatusCfg } from "@/lib/siteStatus";
 import {
   fetchBootstrap, getSavedUser, isAuthenticated,
   fetchTimecards, fetchIncidents, fetchInspections, fetchDeliveries,
-  approveDiary, signUploadPaths,
+  approveDiary, signUploadPaths, listClients, fileSiteUnderClient,
+  setTimecardApproval, updateEntryPhotos,
 } from "@/lib/api";
 import type {
-  BootstrapData, Diary, Entry, User,
+  BootstrapData, Client, Diary, Entry, EntryPhoto, User,
   Timecard, Incident, Inspection, Delivery,
 } from "@/lib/api";
+import { useRole, canApproveTimesheet } from "@/lib/useRole";
+import {
+  describeApprovalFailure,
+  isTimecardEditable,
+  normaliseApprovalStatus,
+  TIMECARD_APPROVAL_STATUSES,
+  TIMECARD_NOTE_MAX_LENGTH,
+  type TimecardApprovalStatus,
+} from "@/lib/timecard-approval";
+import { describeCaptureTime } from "@/lib/photo-capture-time";
+import {
+  describePhotoAuthor, describePhotoDerivation, describePhotoPlace,
+  describePhotoRecord, stepPhotoIndex,
+} from "@/lib/photo-provenance";
+import { buildViewerShots, buildViewerShotsForRecords } from "@/lib/photo-viewer-set";
+import PhotoAnnotator from "@/components/PhotoAnnotator";
+import { buildAnnotationDerivative, type AnnotationVector } from "@/lib/annotation-derivative";
+import type { ViewerShot as LibViewerShot } from "@/lib/photo-viewer-set";
 
 type Tab = "overview" | "entries" | "timesheets" | "incidents" | "inspections" | "dockets" | "photos" | "reports";
 
@@ -68,14 +88,92 @@ const SEVERITY_CFG: Record<string, { label: string; color: string; bg: string }>
   critical:    { label: "Critical",  color: "#7C3AED", bg: "#F5F3FF" },
 };
 
+/**
+ * How each approval state is drawn, and the words used for it.
+ *
+ * Shaped like SEVERITY_CFG above and drawn from the same hex pairs already used
+ * on this page — the Open/Closed incident badges and the major-severity red — so
+ * this adds a vocabulary, not a palette.
+ *
+ * It lives here rather than in `lib/timecard-approval.ts` for the same reason
+ * SEVERITY_CFG lives here: the module next door holds the decisions, which are
+ * the parts that can be reasoned about and, when the portal gets a test harness,
+ * tested. Colours are rendering.
+ *
+ * "SENT BACK" RATHER THAN "REJECTED"
+ *
+ * The API's word is `rejected`, and the manager reading this screen is not the
+ * only person who will: these are somebody's hours, and "rejected" reads as a
+ * judgement of the worker rather than of a form that needs a correction. Mobile
+ * uses the same two words on the same state for the same reason.
+ *
+ * Typed `Record<TimecardApprovalStatus, …>` and not `Record<string, …>` — unlike
+ * SEVERITY_CFG, which needs a `?? SEVERITY_CFG.minor` fallback at every call
+ * site because its key is an unvalidated string. Every read of this table goes
+ * through `normaliseApprovalStatus` first, so the key is one of exactly three
+ * values and a missing entry is a compile error rather than a blank badge.
+ */
+const APPROVAL_CFG: Record<TimecardApprovalStatus, { label: string; color: string; bg: string }> = {
+  pending:  { label: "Pending",   color: "#CA8A04", bg: "#FEF9C3" },
+  approved: { label: "Approved",  color: "#22C55E", bg: "#F0FDF4" },
+  rejected: { label: "Sent back", color: "#EF4444", bg: "#FEF2F2" },
+};
+
+/**
+ * The timesheet table's columns, as a list rather than as markup.
+ *
+ * The send-back note opens in a row of its own underneath the card it belongs
+ * to, and that row needs a `colSpan` covering the whole table. Written as a
+ * literal it would read correctly against the wrong number for the life of the
+ * file — a column added later leaves the note box one cell short, which is a
+ * silent layout break nothing reports. Rendering the header from this list means
+ * the span is counted from the same place the columns come from.
+ *
+ * The Approval column is NOT in here: it is only drawn for a manager, so it is
+ * added to the count where that is known rather than conditionally removed.
+ */
+const TIMECARD_COLUMNS = [
+  "Date", "Worker", "Trade", "Start", "End", "Break", "Regular", "OT", "Notes", "Status",
+] as const;
+
 function formatTime(t?: string) {
   if (!t) return "—";
   const [h, m] = t.split(":").map(Number);
   return `${h % 12 || 12}:${String(m).padStart(2, "0")} ${h >= 12 ? "PM" : "AM"}`;
 }
 
-type PhotoView = { uri: string; caption?: string };
-type Shot = { url: string; caption?: string };
+/**
+ * One photograph together with the record it belongs to.
+ *
+ * The entry travels with the photograph because three of the four questions the
+ * viewer has to answer cannot be answered from the image alone: the entry
+ * supplies the work date, the stand-in address when the photograph carries no
+ * coordinates of its own, and the account that logged it. The Photos tab
+ * flattens every entry's photographs into one grid, so without this pairing a
+ * photograph in that grid has no way back to its record.
+ *
+ * The shape and the two functions that build it live in `lib/photo-viewer-set.ts`
+ * and are tested there. This is only the concrete instantiation for the portal's
+ * own `EntryPhoto` and `Entry`.
+ */
+type ViewerShot = LibViewerShot<EntryPhoto, Entry>;
+
+/**
+ * What the lightbox is showing: WHICH set, and where in it we are.
+ *
+ * `entryId` names the set rather than holding it — null meaning "every
+ * photograph on this site", an id meaning "just that record's". It held the
+ * built `ViewerShot[]` instead, and that was wrong in a way nothing would have
+ * reported: the array is a snapshot taken when the viewer opened, so saving an
+ * annotation appended a photograph the open viewer could not see. The person
+ * would have clicked Save, seen nothing change, and had no way to tell whether
+ * it had worked. Naming the set means the viewer re-derives it from the entries
+ * on every render, so a save shows up where it was made.
+ */
+type Lightbox = { entryId: string | null; index: number };
+
+const MAX_ZOOM = 6;
+const clampZoom = (value: number) => Math.min(MAX_ZOOM, Math.max(1, value));
 
 /**
  * One photograph tile, in whichever of its three states applies: signed and
@@ -89,20 +187,26 @@ type Shot = { url: string; caption?: string };
 function PhotoTile({
   photo, index, signedUrls, errors, compact, onOpen,
 }: {
-  photo: PhotoView;
+  photo: EntryPhoto;
   index: number;
   signedUrls: Map<string, string>;
   errors: Map<string, string>;
   /** Small, with the caption rendered beneath by the caller rather than over the image. */
   compact?: boolean;
-  onOpen: (shot: Shot) => void;
+  /**
+   * Opens the viewer on THIS tile. It takes no argument on purpose: the tile
+   * knows which photograph it is, but only the caller knows which ordered set
+   * that position belongs to, and a tile that built its own set would disagree
+   * with the grid it sits in.
+   */
+  onOpen: () => void;
 }) {
   const signedUrl = signedUrls.get(photo.uri);
   const failure = signedUrl ? undefined : errors.get(photo.uri);
 
   return (
     <div
-      onClick={() => signedUrl && onOpen({ url: signedUrl, caption: photo.caption })}
+      onClick={() => signedUrl && onOpen()}
       title={failure ?? photo.caption ?? undefined}
       style={{
         borderRadius: compact ? 8 : 12, overflow: "hidden",
@@ -153,35 +257,372 @@ function PhotoTile({
   );
 }
 
-/** The full-screen view of one photograph. Shared for the same reason as the tile. */
-function PhotoLightbox({ shot, onClose }: { shot: Shot; onClose: () => void }) {
+/**
+ * One metadata line in the viewer.
+ *
+ * `degraded` is what makes the three states of a question visibly different
+ * rather than three sentences in the same grey. A photograph whose location is
+ * the entry's address and one whose location is its own must not read the same,
+ * because the first is a stand-in and an auditor is entitled to know that.
+ */
+function ViewerFact({ text, degraded }: { text: string; degraded?: boolean }) {
+  return (
+    <div style={{
+      fontSize: 13, lineHeight: 1.45,
+      color: degraded ? "var(--warning)" : "rgba(255,255,255,0.88)",
+    }}>
+      {degraded && <span style={{ marginRight: 6 }}>⚠</span>}
+      {text}
+    </div>
+  );
+}
+
+/**
+ * The full-screen view of one photograph, with what is known about it and a way
+ * through the rest of its record.
+ *
+ * Every label comes from `lib/photo-capture-time.ts` and `lib/photo-provenance.ts`,
+ * which are the pinned twins of mobile's copies — so the two surfaces state the
+ * same thing about the same photograph, and neither one formats its own
+ * sentence. Nothing here decides what is true; it decides only how an already
+ * decided answer is laid out.
+ *
+ * `toLocaleString` runs inside `describeCaptureTime`, which is a hydration
+ * hazard everywhere else in this portal (AUDIT L49) and is safe here for a
+ * structural reason rather than a lucky one: this component only ever mounts in
+ * response to a click, so it is never part of the server-rendered tree and
+ * there is no server output for it to disagree with.
+ *
+ * NOT VERIFIED IN A BROWSER: this environment has no browser and no Playwright,
+ * so the pointer arithmetic for pinch and pan below is reasoned, not observed.
+ * The zoom buttons and the keyboard controls exist so the viewer is fully
+ * usable even if that arithmetic needs tuning on a real trackpad.
+ */
+function PhotoLightbox({
+  shots, index, signedUrls, onIndex, onClose, actorEmail, onAnnotated,
+}: {
+  shots: ViewerShot[];
+  index: number;
+  signedUrls: Map<string, string>;
+  onIndex: (next: number) => void;
+  onClose: () => void;
+  /**
+   * Who is signed in, for the annotation's provenance. Optional because the
+   * page resolves it from localStorage after mount, so the viewer can briefly
+   * open without it — and an unknown annotator is recorded as ABSENT rather
+   * than as a blank string (see buildAnnotationDerivative).
+   */
+  actorEmail?: string;
+  /** The entry as the API returned it after a save, so the page stops showing a guess. */
+  onAnnotated?: (entry: Entry) => void;
+}) {
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  /**
+   * Mirrors `dragFrom` as state rather than reading the ref in render. A ref
+   * mutation does not re-render, so a cursor or a transition driven off
+   * `dragFrom.current` would be read once and then never updated — it would
+   * look like working code and do nothing.
+   */
+  const [dragging, setDragging] = useState(false);
+  const [annotating, setAnnotating] = useState(false);
+  const [savingAnnotation, setSavingAnnotation] = useState(false);
+  const [annotationError, setAnnotationError] = useState<string | null>(null);
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const dragFrom = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
+  const pointers = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const pinchFrom = useRef<{ distance: number; zoom: number } | null>(null);
+
+  // Escape to leave, arrows to move. A viewer whose only exit is a 38px mouse
+  // target is not an exit for someone on a keyboard, and L51's tap-target work
+  // is still open — so the keyboard path is the one that is certainly usable.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // With the annotator open these keys belong to it: Escape closes the
+      // annotator (it handles its own, in the capture phase) and an arrow must
+      // NOT step the photograph out from under a drawing in progress.
+      if (annotating) return;
+      if (e.key === "Escape") { onClose(); return; }
+      if (e.key === "ArrowLeft") { e.preventDefault(); onIndex(stepPhotoIndex(index, -1, shots.length)); }
+      if (e.key === "ArrowRight") { e.preventDefault(); onIndex(stepPhotoIndex(index, 1, shots.length)); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [index, shots.length, onIndex, onClose, annotating]);
+
+  // A new photograph starts unzoomed. Carrying a 4x zoom and its pan offset
+  // across a step would leave the next image showing an arbitrary corner of
+  // itself with no indication why.
+  useEffect(() => { setZoom(1); setOffset({ x: 0, y: 0 }); setDragging(false); }, [index]);
+
+  // Registered by hand rather than as an `onWheel` prop because React attaches
+  // wheel listeners passively, where `preventDefault()` is ignored and the page
+  // scrolls behind the viewer while it zooms.
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      setZoom((z) => clampZoom(z * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+    };
+    stage.addEventListener("wheel", onWheel, { passive: false });
+    return () => stage.removeEventListener("wheel", onWheel);
+  }, []);
+
+  const shot = shots[index];
+  // Hooks above this line, unconditionally. An out-of-range index is reachable
+  // if the set shrinks under an open viewer, so it is handled rather than
+  // assumed away.
+  if (!shot) return null;
+
+  const signedUrl = signedUrls.get(shot.photo.uri);
+  const capture = describeCaptureTime(shot.photo);
+  const place = describePhotoPlace(shot.photo, shot.entry);
+  const author = describePhotoAuthor(shot.photo, shot.entry);
+  const derivation = describePhotoDerivation(shot, shots);
+  // Pan is discarded, not stored, while the image fits the stage — there is
+  // nothing off-screen to pan to, and a remembered offset would make the next
+  // zoom jump.
+  const pan = zoom > 1 ? offset : { x: 0, y: 0 };
+  /**
+   * Annotation is offered on an ORIGINAL that has an id, and nowhere else.
+   *
+   * The id requirement is not a style choice: `derivedFromId` has to match the
+   * source's stored `id`, because that is what mobile's renderer and the
+   * viewer's own `describePhotoDerivation` match on. A photograph recorded
+   * before ids existed has nothing to point at, so a derivative of it would be
+   * an orphan by construction — `buildAnnotationDerivative` returns null for
+   * exactly that case, and the button is hidden rather than offered and refused.
+   *
+   * Originals-only is a narrower rule than the data allows: the builder
+   * supports annotating an annotation and is tested for it. That is a UI policy
+   * — one annotation layer per photograph keeps the provenance a reader has to
+   * follow one step deep — and loosening it later needs no data change.
+   */
+  const canAnnotate =
+    !!signedUrl && !!shot.photo.id && !!shot.entry.id && shot.photo.kind !== "annotated";
+
+  const saveAnnotation = async (vector: AnnotationVector) => {
+    const sourceId = shot.photo.id;
+    const entryId = shot.entry.id;
+    if (!sourceId || !entryId) return;
+    setSavingAnnotation(true);
+    setAnnotationError(null);
+    try {
+      const photos = buildAnnotationDerivative({
+        photos: shot.entry.photos ?? [],
+        sourceId,
+        vector,
+        // `crypto.randomUUID` needs a secure context, which the portal is
+        // (https in production, localhost in dev). The fallback is not a
+        // weaker id generator — a duplicate id here would attach the next
+        // annotation to the wrong photograph — it is refusing to save.
+        id: typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : "",
+        now: new Date().toISOString(),
+        annotatedBy: actorEmail,
+      });
+      if (!photos || !photos[photos.length - 1]?.id) {
+        setAnnotationError("Could not record this annotation against the original.");
+        return;
+      }
+      const entry = await updateEntryPhotos(entryId, photos);
+      // The page's copy is replaced with what the API returned, not with the
+      // array just sent: if another client changed the entry, this is where the
+      // true set arrives, and the last-write-wins caveat becomes visible rather
+      // than papered over by an optimistic update.
+      onAnnotated?.(entry);
+      setAnnotating(false);
+    } catch (err) {
+      setAnnotationError(
+        err instanceof Error ? err.message : "Could not save the annotation."
+      );
+    } finally {
+      setSavingAnnotation(false);
+    }
+  };
+
+  const atFirst = index === 0;
+  const atLast = index === shots.length - 1;
+
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.current.size === 2) {
+      const [a, b] = [...pointers.current.values()];
+      pinchFrom.current = { distance: Math.hypot(a.x - b.x, a.y - b.y), zoom };
+      dragFrom.current = null;
+      setDragging(false);
+      return;
+    }
+    if (zoom > 1) {
+      dragFrom.current = { x: e.clientX, y: e.clientY, ox: offset.x, oy: offset.y };
+      setDragging(true);
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+    }
+  };
+
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!pointers.current.has(e.pointerId)) return;
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const pinch = pinchFrom.current;
+    if (pointers.current.size >= 2 && pinch && pinch.distance > 0) {
+      const [a, b] = [...pointers.current.values()];
+      setZoom(clampZoom(pinch.zoom * (Math.hypot(a.x - b.x, a.y - b.y) / pinch.distance)));
+      return;
+    }
+    const from = dragFrom.current;
+    if (!from) return;
+    setOffset({ x: from.ox + (e.clientX - from.x), y: from.oy + (e.clientY - from.y) });
+  };
+
+  const endPointer = (e: React.PointerEvent<HTMLDivElement>) => {
+    pointers.current.delete(e.pointerId);
+    if (pointers.current.size < 2) pinchFrom.current = null;
+    if (pointers.current.size === 0) { dragFrom.current = null; setDragging(false); }
+  };
+
+  const navButton = (spent: boolean): React.CSSProperties => ({
+    background: "rgba(255,255,255,0.15)", border: "none", color: "#fff",
+    borderRadius: 10, width: 38, height: 38, fontSize: 18,
+    cursor: spent ? "default" : "pointer",
+    opacity: spent ? 0.3 : 1,
+  });
+
   return (
     <div
       style={{
         position: "fixed", inset: 0, zIndex: 1000,
-        background: "rgba(10,18,30,0.92)",
-        display: "flex", alignItems: "center", justifyContent: "center",
-        padding: 24,
+        background: "rgba(10,18,30,0.94)",
+        display: "flex", flexDirection: "column",
       }}
       onClick={onClose}
     >
-      <button
-        onClick={onClose}
-        style={{ position: "absolute", top: 20, right: 20, background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: 10, width: 38, height: 38, fontSize: 20, cursor: "pointer" }}
-      >
-        ✕
-      </button>
-      <img
-        src={shot.url}
-        alt={shot.caption ?? "Site photo"}
-        style={{ maxWidth: "90vw", maxHeight: "85vh", borderRadius: 12, objectFit: "contain", boxShadow: "0 20px 60px rgba(0,0,0,0.5)" }}
+      {/* ── top bar: where we are, how to zoom, how to leave ── */}
+      <div
         onClick={(e) => e.stopPropagation()}
-      />
-      {shot.caption && (
-        <div style={{ position: "absolute", bottom: 28, left: "50%", transform: "translateX(-50%)", color: "#fff", fontSize: 14, fontWeight: 500, background: "rgba(0,0,0,0.5)", padding: "6px 16px", borderRadius: 20 }}>
-          {shot.caption}
+        style={{
+          display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+          padding: "14px 18px", color: "#fff", fontSize: 13,
+        }}
+      >
+        <span style={{ fontWeight: 600 }}>
+          {shots.length > 1 ? `${index + 1} of ${shots.length}` : "1 photograph"}
+        </span>
+        <span style={{ flex: 1 }} />
+        {canAnnotate && (
+          <button
+            onClick={() => { setAnnotationError(null); setAnnotating(true); }}
+            style={{ ...navButton(false), width: "auto", padding: "0 14px", fontSize: 13, fontWeight: 600 }}
+            title="Mark up a copy of this photograph"
+          >
+            Annotate
+          </button>
+        )}
+        <button onClick={() => setZoom((z) => clampZoom(z / 1.4))} style={navButton(zoom <= 1)} title="Zoom out" aria-label="Zoom out">−</button>
+        <button onClick={() => { setZoom(1); setOffset({ x: 0, y: 0 }); }} style={{ ...navButton(zoom === 1), width: "auto", padding: "0 12px", fontSize: 13 }} title="Fit to screen">
+          {Math.round(zoom * 100)}%
+        </button>
+        <button onClick={() => setZoom((z) => clampZoom(z * 1.4))} style={navButton(zoom >= MAX_ZOOM)} title="Zoom in" aria-label="Zoom in">+</button>
+        <button onClick={onClose} style={navButton(false)} title="Close (Escape)" aria-label="Close">✕</button>
+      </div>
+
+      {/* ── the annotator, over the top of the viewer ──
+          Rendered inside the viewer so closing it returns to the same
+          photograph at the same place in the set, rather than to the grid. */}
+      {annotating && signedUrl && (
+        <div onClick={(e) => e.stopPropagation()}>
+          <PhotoAnnotator
+            src={signedUrl}
+            alt={shot.photo.caption ?? `Photograph ${index + 1}`}
+            caption={shot.photo.caption}
+            saving={savingAnnotation}
+            error={annotationError}
+            onSave={saveAnnotation}
+            onCancel={() => { if (!savingAnnotation) { setAnnotating(false); setAnnotationError(null); } }}
+          />
         </div>
       )}
+
+      {/* ── the photograph ── */}
+      <div
+        ref={stageRef}
+        onClick={(e) => e.stopPropagation()}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endPointer}
+        onPointerCancel={endPointer}
+        style={{
+          flex: 1, minHeight: 0, overflow: "hidden",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          touchAction: "none",
+          cursor: zoom > 1 ? (dragging ? "grabbing" : "grab") : "default",
+        }}
+      >
+        {signedUrl ? (
+          <img
+            src={signedUrl}
+            alt={shot.photo.caption ?? `Photograph ${index + 1}`}
+            draggable={false}
+            style={{
+              maxWidth: "100%", maxHeight: "100%", objectFit: "contain",
+              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+              transformOrigin: "center center",
+              transition: dragging ? "none" : "transform 0.08s linear",
+              userSelect: "none",
+            }}
+          />
+        ) : (
+          // The grid can show a refused photograph as unavailable; so must this,
+          // rather than an empty black rectangle that reads as a slow load.
+          <div style={{ color: "rgba(255,255,255,0.7)", fontSize: 14, textAlign: "center", padding: 24 }}>
+            <div style={{ fontSize: 32, opacity: 0.5, marginBottom: 8 }}>⚠</div>
+            This photograph could not be loaded.
+          </div>
+        )}
+      </div>
+
+      {/* ── what is known about it, and the way through the record ── */}
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          padding: "14px 18px 20px", display: "flex", gap: 16,
+          alignItems: "flex-end", flexWrap: "wrap",
+          background: "linear-gradient(transparent, rgba(0,0,0,0.45))",
+        }}
+      >
+        <div style={{ flex: 1, minWidth: 220, display: "flex", flexDirection: "column", gap: 5 }}>
+          {shot.photo.caption && (
+            <div style={{ fontSize: 15, fontWeight: 600, color: "#fff" }}>{shot.photo.caption}</div>
+          )}
+          <ViewerFact text={capture.label} degraded={capture.state !== "known"} />
+          <ViewerFact text={place.label} degraded={place.state !== "photograph"} />
+          <ViewerFact text={author.label} degraded={author.state === "annotator-unrecorded" || author.state === "unknown"} />
+          <ViewerFact text={describePhotoRecord(shot.entry)} />
+          <ViewerFact text={derivation.label} degraded={derivation.state === "annotation-orphaned"} />
+        </div>
+
+        {shots.length > 1 && (
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              onClick={() => onIndex(stepPhotoIndex(index, -1, shots.length))}
+              disabled={atFirst}
+              style={navButton(atFirst)}
+              title="Previous (left arrow)"
+              aria-label="Previous photograph"
+            >
+              ‹
+            </button>
+            <button
+              onClick={() => onIndex(stepPhotoIndex(index, 1, shots.length))}
+              disabled={atLast}
+              style={navButton(atLast)}
+              title="Next (right arrow)"
+              aria-label="Next photograph"
+            >
+              ›
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -222,17 +663,31 @@ function PhotoFailureBanner({
 }
 
 function PhotosTab({
-  photos, signedUrls, errors, requestError, signing, onRetry,
+  entries, signedUrls, errors, requestError, signing, onRetry, actorEmail, onAnnotated,
 }: {
-  photos: PhotoView[];
+  /**
+   * The ENTRIES, not a flat photo list. The grid is still flat, but a tile has
+   * to be able to answer which record it came from, and a flattened
+   * `EntryPhoto[]` has thrown that away before this component sees it.
+   */
+  entries: Entry[];
   signedUrls: Map<string, string>;
   errors: Map<string, string>;
   requestError: string | null;
   signing: boolean;
   onRetry: () => void;
+  /** Who is signed in, and where a saved annotation goes back to. Threaded
+   *  rather than read here, so the page stays the single owner of entry state. */
+  actorEmail?: string;
+  onAnnotated?: (entry: Entry) => void;
 }) {
-  const [lightbox, setLightbox] = useState<Shot | null>(null);
-  const failedCount = photos.filter((p) => errors.has(p.uri)).length;
+  const [lightbox, setLightbox] = useState<Lightbox | null>(null);
+
+  // Ordered per record and concatenated, so the grid and the viewer step
+  // through the photographs in the same order. If they disagreed, clicking the
+  // fourth tile would open the fifth photograph.
+  const shots = useMemo(() => buildViewerShotsForRecords<EntryPhoto, Entry>(entries), [entries]);
+  const failedCount = shots.filter((s) => errors.has(s.photo.uri)).length;
 
   return (
     <>
@@ -240,11 +695,11 @@ function PhotosTab({
         <div className="card-header">
           <span>📷</span>
           <span className="card-title">Site Photos</span>
-          <span className="card-count">{photos.length}</span>
+          <span className="card-count">{shots.length}</span>
           {signing && (
             <span style={{ marginLeft: 8, fontSize: 12, color: "var(--text-secondary)" }}>
-              {photos.length > SIGN_BATCH_SIZE
-                ? `Loading ${signedUrls.size} of ${photos.length}…`
+              {shots.length > SIGN_BATCH_SIZE
+                ? `Loading ${signedUrls.size} of ${shots.length}…`
                 : "Loading…"}
             </span>
           )}
@@ -253,21 +708,43 @@ function PhotosTab({
         {/* A manager looking at grey squares is told what went wrong and can ask
             again. Shown whether the failure was per-path or whole-request. */}
         {!signing && (
-          <PhotoFailureBanner failedCount={failedCount} total={photos.length} requestError={requestError} onRetry={onRetry} />
+          <PhotoFailureBanner failedCount={failedCount} total={shots.length} requestError={requestError} onRetry={onRetry} />
         )}
 
-        {photos.length === 0 ? (
+        {shots.length === 0 ? (
           <div className="empty-state"><p>No photos uploaded yet.</p></div>
         ) : (
           <div style={{ padding: 20, display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 14 }}>
-            {photos.map((p, i) => (
-              <PhotoTile key={`${p.uri}-${i}`} photo={p} index={i} signedUrls={signedUrls} errors={errors} onOpen={setLightbox} />
+            {shots.map((shot, i) => (
+              <PhotoTile
+                key={`${shot.photo.uri}-${i}`}
+                photo={shot.photo}
+                index={i}
+                signedUrls={signedUrls}
+                errors={errors}
+                onOpen={() => setLightbox({ entryId: null, index: i })}
+              />
             ))}
           </div>
         )}
       </div>
 
-      {lightbox && <PhotoLightbox shot={lightbox} onClose={() => setLightbox(null)} />}
+      {/* The site-wide set: this grid is every record's photographs at once, so
+          stepping forward from the last photograph of one day lands on the
+          first of the next, which is the order the grid itself shows. */}
+      {lightbox && (
+        <PhotoLightbox
+          /* Derived here, not stored in `lightbox`, so an annotation saved
+             from inside the viewer appears in the set it was added to. */
+          shots={shots}
+          index={lightbox.index}
+          signedUrls={signedUrls}
+          onIndex={(index) => setLightbox((open) => (open ? { ...open, index } : open))}
+          onClose={() => setLightbox(null)}
+          actorEmail={actorEmail}
+          onAnnotated={onAnnotated}
+        />
+      )}
     </>
   );
 }
@@ -286,7 +763,7 @@ function PhotosTab({
  * with a photograph fix.
  */
 function EntriesTab({
-  entries, signedUrls, errors, requestError, signing, onRetry, formatDate,
+  entries, signedUrls, errors, requestError, signing, onRetry, formatDate, actorEmail, onAnnotated,
 }: {
   entries: Entry[];
   signedUrls: Map<string, string>;
@@ -295,8 +772,12 @@ function EntriesTab({
   signing: boolean;
   onRetry: () => void;
   formatDate: (value?: string | null, options?: Intl.DateTimeFormatOptions) => string;
+  /** Who is signed in, and where a saved annotation goes back to. Threaded
+   *  rather than read here, so the page stays the single owner of entry state. */
+  actorEmail?: string;
+  onAnnotated?: (entry: Entry) => void;
 }) {
-  const [lightbox, setLightbox] = useState<Shot | null>(null);
+  const [lightbox, setLightbox] = useState<Lightbox | null>(null);
 
   // Newest first — the office reads the most recent day first. `date` is the
   // work date and `timestamp` when it was logged; the second breaks ties within
@@ -312,6 +793,20 @@ function EntriesTab({
 
   const allPhotos = entries.flatMap((e) => e.photos ?? []);
   const failedCount = allPhotos.filter((p) => errors.has(p.uri)).length;
+
+  /**
+   * The open viewer's set: just the record it was opened from.
+   *
+   * Empty when that record is no longer in `entries` — the viewer renders
+   * nothing for an out-of-range index, so a record that disappears closes the
+   * viewer rather than showing another day's photographs under its caption.
+   */
+  const openShots = useMemo(() => {
+    const open = lightbox?.entryId
+      ? entries.find((e) => e.id === lightbox.entryId)
+      : undefined;
+    return open ? buildViewerShots<EntryPhoto, Entry>(open) : [];
+  }, [lightbox?.entryId, entries]);
 
   return (
     <>
@@ -334,7 +829,11 @@ function EntriesTab({
         ) : (
           <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 14 }}>
             {ordered.map((entry) => {
-              const photos = entry.photos ?? [];
+              // Scoped to THIS record, which is what "swipe between the
+              // photographs on one record" asks for: stepping forward from the
+              // last photograph of an entry stops there rather than silently
+              // crossing into another day's evidence.
+              const shots = buildViewerShots<EntryPhoto, Entry>(entry);
               return (
                 <article
                   key={entry.id}
@@ -373,24 +872,24 @@ function EntriesTab({
                     {entry.notes?.trim() || "No notes recorded for this entry."}
                   </p>
 
-                  {photos.length > 0 && (
+                  {shots.length > 0 && (
                     <div style={{
                       marginTop: 12, display: "grid",
                       gridTemplateColumns: "repeat(auto-fill, minmax(104px, 1fr))", gap: 10,
                     }}>
-                      {photos.map((photo, i) => (
-                        <figure key={`${photo.uri}-${i}`} style={{ margin: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+                      {shots.map((shot, i) => (
+                        <figure key={`${shot.photo.uri}-${i}`} style={{ margin: 0, display: "flex", flexDirection: "column", gap: 4 }}>
                           <PhotoTile
-                            photo={photo}
+                            photo={shot.photo}
                             index={i}
                             signedUrls={signedUrls}
                             errors={errors}
                             compact
-                            onOpen={setLightbox}
+                            onOpen={() => setLightbox({ entryId: entry.id, index: i })}
                           />
-                          {photo.caption && (
+                          {shot.photo.caption && (
                             <figcaption style={{ fontSize: 10, lineHeight: 1.3, color: "var(--text-secondary)" }}>
-                              {photo.caption}
+                              {shot.photo.caption}
                             </figcaption>
                           )}
                         </figure>
@@ -404,8 +903,97 @@ function EntriesTab({
         )}
       </div>
 
-      {lightbox && <PhotoLightbox shot={lightbox} onClose={() => setLightbox(null)} />}
+      {lightbox && (
+        <PhotoLightbox
+          /* Rebuilt from the named record every render, for the same reason:
+             the set an annotation lands in is the one on screen. */
+          shots={openShots}
+          index={lightbox.index}
+          signedUrls={signedUrls}
+          onIndex={(index) => setLightbox((open) => (open ? { ...open, index } : open))}
+          onClose={() => setLightbox(null)}
+          actorEmail={actorEmail}
+          onAnnotated={onAnnotated}
+        />
+      )}
     </>
+  );
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  THE CLIENT ROW OF THE SITE INFORMATION TABLE
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * Read-only for everyone, and a select for a manager. It is one component
+ * rather than two branches at the call site so that the thing a crew member
+ * sees and the thing a manager sees cannot drift into saying different words
+ * about the same site.
+ *
+ * WHAT IT PREFERS AND WHY
+ *
+ * The canonical client name from `clients` first, then the site's own stored
+ * `client` label. They agree immediately after any filing — the API rewrites
+ * the label — and disagree after a client is renamed, until something files
+ * this site again. The canonical name is the one shown on the clients screen,
+ * so it is the one shown here.
+ *
+ * A site filed under a client NOT in the list keeps its label and is not shown
+ * as unfiled, matching lib/site-grouping.ts. The select is given an extra
+ * option for that id in that case, because a `<select>` whose value matches no
+ * option renders blank — the control would claim the site is unfiled, and the
+ * first change would make that true.
+ */
+function ClientFilingCell({
+  site, clients, canFile, filing, error, onFile,
+}: {
+  site: { id: string; client: string; clientId?: string | null };
+  clients: Client[];
+  canFile: boolean;
+  filing: boolean;
+  error: string | null;
+  onFile: (clientId: string | null) => void;
+}) {
+  const filedUnder = site.clientId ?? null;
+  const canonical = filedUnder ? clients.find((c) => c.id === filedUnder)?.name : undefined;
+  const label = canonical || site.client || (filedUnder ? "Filed — name unavailable" : "");
+
+  // No list means no choices, so no control. Stated as its own branch rather
+  // than folded into `canFile` because the two are different reasons and a
+  // manager seeing a read-only row should be able to tell which it was.
+  if (!canFile || clients.length === 0) {
+    return <span>{label || "— Unfiled —"}</span>;
+  }
+
+  const unknownFiled = filedUnder !== null && canonical === undefined;
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+      <select
+        value={filedUnder ?? ""}
+        disabled={filing}
+        onChange={(e) => onFile(e.target.value === "" ? null : e.target.value)}
+        aria-label="Client this site is filed under"
+        style={{ height: 34, fontSize: 13, maxWidth: 260 }}
+      >
+        <option value="">— Unfiled —</option>
+        {unknownFiled && (
+          <option value={filedUnder}>{site.client || filedUnder}</option>
+        )}
+        {clients.map((c) => (
+          <option key={c.id} value={c.id}>{c.name}</option>
+        ))}
+      </select>
+      {filing && <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>Saving…</span>}
+      {error && (
+        <span style={{ fontSize: 12, color: "var(--error, #ef4444)" }}>{error}</span>
+      )}
+      {!filing && !error && (
+        <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
+          Filing only. Nothing about a client decides who may open this site.
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -421,6 +1009,24 @@ export default function SiteDetailPage() {
   const [loadingMain, setLoadingMain]   = useState(true);
   const [tab, setTab]                   = useState<Tab>("overview");
   const [approving, setApproving]       = useState<string | null>(null);
+  /**
+   * The timesheet approval controls' state.
+   *
+   * `approvingCard` is the id of the card with a request in flight, matching
+   * `approving` above for diaries: one at a time, so the button that was pressed
+   * is the one that goes quiet rather than all of them.
+   *
+   * `approvalError` is a single string and not a per-row map, unlike
+   * `photoErrors`. Photographs fail in bulk — forty tiles, forty independent
+   * signatures — but these writes happen one at a time because the manager
+   * presses one button, so there is never more than one failure to report and a
+   * map would be machinery for a case that cannot arise.
+   */
+  const [approvingCard, setApprovingCard] = useState<string | null>(null);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
+  // Which row has its send-back note box open, and what has been typed into it.
+  const [sendBackFor, setSendBackFor]     = useState<string | null>(null);
+  const [sendBackNote, setSendBackNote]   = useState("");
   /**
    * Two things that exist only in the browser, and the React hydration errors
    * they were causing (AUDIT L49: #418, #423, #425 in the production console).
@@ -460,6 +1066,63 @@ export default function SiteDetailPage() {
   const entries = bootstrap?.entries.filter((e) => e.siteId === siteId) ?? [];
   const diaries = bootstrap?.diaries.filter((d) => d.siteId === siteId) ?? [];
 
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════
+   *  FILING THIS SITE UNDER A CLIENT
+   * ═══════════════════════════════════════════════════════════════════════════
+   *
+   * PATCH /api/projects/sites/:id with { clientId }, which is
+   * requireAtLeast("manager") on the API. `canFileSiteUnderClient` hides the
+   * control for everyone else, and that is presentation only — the gate is the
+   * route, proved red-on-revert in services/api/src/routes/clients-db.test.ts.
+   * A crew member who reaches the endpoint by hand gets a 403 whatever this
+   * page draws.
+   *
+   * The client list is fetched here rather than taken from the bootstrap,
+   * which does not carry clients. A failed fetch leaves `clients` empty and the
+   * control unrendered: with no list there is nothing to choose from, and a
+   * select with one option that silently unfiles the site is worse than no
+   * select. The label below still shows what the site is filed under, because
+   * that comes from the site itself.
+   */
+  const { canFileSiteUnderClient } = useRole();
+  const [clients, setClients] = useState<Client[]>([]);
+  const [filing, setFiling] = useState(false);
+  const [filingError, setFilingError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    listClients()
+      .then((list) => { if (live) setClients(list); })
+      .catch(() => { /* see above: no list, no control. The site's own label stands. */ });
+    return () => { live = false; };
+  }, []);
+
+  const handleFile = async (clientId: string | null) => {
+    if (!site) return;
+    setFiling(true);
+    setFilingError(null);
+    try {
+      const updated = await fileSiteUnderClient(site.id, clientId);
+      // The SERVER's site, not a local merge. Filing rewrites the `client`
+      // label as well as `client_id`, so patching only the field we sent would
+      // leave the label disagreeing with the filing until the next full load.
+      setBootstrap((prev) => prev ? {
+        ...prev,
+        sites: prev.sites.map((x) => x.id === updated.id ? updated : x),
+      } : prev);
+      // The counts on the clients screen are now stale by one in two places.
+      // Re-read rather than adjust them here: another manager may have filed
+      // something in between, and a count this page computed would be a guess.
+      listClients().then(setClients).catch(() => {});
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Could not change the client.";
+      setFilingError(msg);
+    } finally {
+      setFiling(false);
+    }
+  };
+
   useEffect(() => {
     if (!isAuthenticated()) { router.replace("/"); return; }
     Promise.all([
@@ -476,6 +1139,29 @@ export default function SiteDetailPage() {
       setDeliveries(del);
     }).catch(console.error).finally(() => setLoadingMain(false));
   }, [siteId]);
+
+  /**
+   * Replace one entry in the loaded bootstrap with the version the API returned.
+   *
+   * `entries` is derived from `bootstrap` by filter, so this is the only place
+   * an entry change can be applied — and it is applied by id rather than by
+   * refetching the whole bootstrap, because a refetch would discard the signed
+   * photo URLs and blank every tile on the page for a second.
+   *
+   * An annotation derivative shares its original's `uri`, so the signing
+   * pipeline already holds a signed URL for it and the new photograph renders
+   * immediately with no second round trip. That is a consequence of storing a
+   * vector rather than new bytes; if annotation ever rasterises to a new object
+   * key, this comment is the thing that stops being true and the signing effect
+   * will need to re-run.
+   */
+  const applyEntryUpdate = useCallback((updated: Entry) => {
+    setBootstrap((prev) =>
+      prev
+        ? { ...prev, entries: prev.entries.map((e) => (e.id === updated.id ? updated : e)) }
+        : prev
+    );
+  }, []);
 
   const photos = useMemo(() => {
     return entries.flatMap((e) => (e.photos ?? []));
@@ -620,6 +1306,109 @@ export default function SiteDetailPage() {
     }
   };
 
+  /**
+   * Whether this viewer is offered the approval controls at all.
+   *
+   * `canApproveTimesheet(user?.companyRole)` and NOT `useRole()`, which is the
+   * hook every other page uses. `useRole()` calls `getSavedUser()` during
+   * render, and `getSavedUser()` reads `localStorage` — the exact shape that
+   * produced the hydration mismatches recorded on the `user`/`mounted` state
+   * above (AUDIT L49). This page deliberately resolves the saved user in an
+   * effect instead, so it has to read the role from that state.
+   *
+   * `mounted &&` for the same reason the dates use it: before the effect runs
+   * `user` is null, and an absent role is allowed through by design — so without
+   * the gate the server and the first client render would both draw the controls
+   * and a crew member would watch them disappear. Server and first render agree
+   * that nothing is drawn, then the browser fills in what only it can know.
+   */
+  const mayApproveTimesheets = mounted && canApproveTimesheet(user?.companyRole);
+
+  /**
+   * How many cards sit in each approval state.
+   *
+   * Keyed off `TIMECARD_APPROVAL_STATUSES` rather than counting `"approved"` and
+   * calling the rest a remainder, so a card in some state this build does not
+   * recognise is counted as the pending one `normaliseApprovalStatus` reports it
+   * as, and never silently inflates the approved figure. The approved count is
+   * the number a manager is actually looking for — it is how much of the week's
+   * payroll is signed off — so it must not be arrived at by subtraction.
+   */
+  const approvalCounts = useMemo(() => {
+    const counts = Object.fromEntries(
+      TIMECARD_APPROVAL_STATUSES.map((status) => [status, 0])
+    ) as Record<TimecardApprovalStatus, number>;
+    for (const tc of timecards) counts[normaliseApprovalStatus(tc.approvalStatus)] += 1;
+    return counts;
+  }, [timecards]);
+
+  /**
+   * Write an approval decision, and re-read the list when it is refused.
+   *
+   * THE RELOAD ON FAILURE IS THE POINT, NOT TIDINESS
+   *
+   * The one refusal this route gives that is not a bug is the 409 for a card
+   * somebody else approved between this page loading and the button being
+   * pressed. That means the row on screen is stale — it is drawn as pending with
+   * a Send back button, and the database holds an approved card. Reporting the
+   * refusal and leaving the stale row in place would leave the manager pressing
+   * a button that cannot work, against a row the portal is describing wrongly.
+   * Re-reading is what makes the message match what they are looking at.
+   *
+   * The nested catch keeps what is on screen if the re-read also fails: a failed
+   * reload is not a reason to blank the table, and `approvalError` is already
+   * set, so the manager is not told everything is fine.
+   */
+  const applyApproval = async (tc: Timecard, status: TimecardApprovalStatus, note?: string) => {
+    setApprovingCard(tc.id);
+    setApprovalError(null);
+    try {
+      const updated = await setTimecardApproval(tc.id, status, note);
+      setTimecards((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+      setSendBackFor(null);
+      setSendBackNote("");
+    } catch (e) {
+      setApprovalError(
+        describeApprovalFailure(e, `Could not update ${tc.workerName}'s timecard.`)
+      );
+      try {
+        setTimecards(await fetchTimecards(siteId));
+      } catch {
+        /* Keep the rows already shown; the error above is what gets read. */
+      }
+    } finally {
+      setApprovingCard(null);
+    }
+  };
+
+  /**
+   * The two decisions that get a confirmation, and the one that does not.
+   *
+   * Approving locks the card, and reopening erases who approved it and when —
+   * both are consequential and neither is undone by pressing the button again,
+   * so both are confirmed, which is this portal's existing convention for a
+   * change of that kind (`app/team/page.tsx`, `app/settings/page.tsx`).
+   *
+   * Sending a card back is NOT confirmed, because it has its own surface: the
+   * note box below the row, which the manager has to type into and submit. A
+   * confirmation on top of that would be a second dialog for one decision.
+   */
+  const confirmApproveTimecard = (tc: Timecard) => {
+    if (!confirm(
+      `Approve ${tc.workerName}'s hours for ${tc.date}? The card is locked once approved` +
+      ` — if it needs changing after that, reopen it first.`
+    )) return;
+    void applyApproval(tc, "approved");
+  };
+
+  const confirmReopenTimecard = (tc: Timecard) => {
+    if (!confirm(
+      `Reopen ${tc.workerName}'s timecard for ${tc.date}? This clears the record of who` +
+      ` approved it and when, and lets them edit the hours again.`
+    )) return;
+    void applyApproval(tc, "pending");
+  };
+
   return (
     <div className="app-shell">
       <Sidebar userName={user?.name ?? user?.email ?? "Manager"} />
@@ -630,7 +1419,13 @@ export default function SiteDetailPage() {
           <div className="topbar-title">{site?.name ?? "Site Detail"}</div>
           {site && (
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              {site.client && <span style={{ fontSize: 12, color: "var(--text-secondary)", background: "var(--surface-secondary)", padding: "4px 10px", borderRadius: 8 }}>🏢 {site.client}</span>}
+              {(() => {
+                // Canonical name first, same precedence as ClientFilingCell.
+                // Written inline because this chip is the only other place the
+                // client is named and a second helper for one string is worse.
+                const chip = (site.clientId ? clients.find((c) => c.id === site.clientId)?.name : undefined) || site.client;
+                return chip ? <span style={{ fontSize: 12, color: "var(--text-secondary)", background: "var(--surface-secondary)", padding: "4px 10px", borderRadius: 8 }}>🏢 {chip}</span> : null;
+              })()}
               {site.address && <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>📍 {site.address}</span>}
             </div>
           )}
@@ -710,14 +1505,28 @@ export default function SiteDetailPage() {
                 <div className="card-body">
                   <table className="data-table">
                     <tbody>
-                      {[
+                      {([
                         ["Site Name", site.name],
-                        ["Client", site.client || "—"],
+                        // The one row that is not a string. Typed as ReactNode
+                        // for the whole array rather than special-cased out of
+                        // the loop, so the next row that needs a control does
+                        // not have to be lifted out either.
+                        ["Client", <ClientFilingCell
+                          key="client"
+                          site={site}
+                          clients={clients}
+                          canFile={canFileSiteUnderClient}
+                          filing={filing}
+                          error={filingError}
+                          onFile={handleFile}
+                        />],
                         ["Address", site.address || "—"],
                         ["Start Date", localDate(site.startDate)],
-                        ["Status", site.status],
+                        // The raw value ("on-hold") was printed here; the shared label
+                        // is what the badge on every other page shows.
+                        ["Status", siteStatusCfg(site.status).label],
                         ["Total Hours Logged", `${(totalHours.regular + totalHours.overtime).toFixed(1)}h (${totalHours.regular.toFixed(1)}h reg + ${totalHours.overtime.toFixed(1)}h OT)`],
-                      ].map(([label, value]) => (
+                      ] as [string, React.ReactNode][]).map(([label, value]) => (
                         <tr key={label}>
                           <td style={{ fontWeight: 600, width: 200, color: "var(--text-secondary)", borderBottom: "1px solid var(--border)" }}>{label}</td>
                           <td style={{ borderBottom: "1px solid var(--border)" }}>{value}</td>
@@ -761,27 +1570,192 @@ export default function SiteDetailPage() {
                   {totalHours.regular.toFixed(1)}h reg · <span style={{ color: "var(--accent)" }}>{totalHours.overtime.toFixed(1)}h OT</span> · <strong>{(totalHours.regular + totalHours.overtime).toFixed(1)}h total</strong>
                 </div>
               </div>
+              {approvalError && (
+                <div
+                  role="alert"
+                  style={{
+                    margin: "12px 16px 0", padding: "10px 14px", borderRadius: 6,
+                    background: "#FEF2F2", border: "1px solid #FECACA",
+                    color: "#991B1B", fontSize: 13, display: "flex", alignItems: "center", gap: 10,
+                  }}
+                >
+                  <span style={{ flex: 1 }}>{approvalError}</span>
+                  <button
+                    className="btn-ghost"
+                    style={{ fontSize: 12, padding: "4px 10px" }}
+                    onClick={() => setApprovalError(null)}
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
               {timecards.length === 0
                 ? <div className="empty-state"><p>No timecard records yet.</p></div>
                 : (
+                <>
+                  {/*
+                    The approval breakdown, which is the number a manager comes to
+                    this tab for: how much of these hours is signed off. Every
+                    state is listed even at zero, because "0 pending" and "the
+                    pending figure is missing" are different facts and a row that
+                    disappears when it empties makes them look the same.
+                  */}
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", padding: "10px 16px", borderBottom: "1px solid var(--border)" }}>
+                    {TIMECARD_APPROVAL_STATUSES.map((status) => (
+                      <span
+                        key={status}
+                        className="badge"
+                        style={{ background: APPROVAL_CFG[status].bg, color: APPROVAL_CFG[status].color }}
+                      >
+                        {approvalCounts[status]} {APPROVAL_CFG[status].label.toLowerCase()}
+                      </span>
+                    ))}
+                  </div>
                   <table className="data-table">
-                    <thead><tr><th>Date</th><th>Worker</th><th>Trade</th><th>Start</th><th>End</th><th>Break</th><th>Regular</th><th>OT</th><th>Notes</th></tr></thead>
+                    <thead>
+                      <tr>
+                        {TIMECARD_COLUMNS.map((label) => <th key={label}>{label}</th>)}
+                        {mayApproveTimesheets && <th>Approval</th>}
+                      </tr>
+                    </thead>
                     <tbody>
-                      {timecards.map((tc) => (
-                        <tr key={tc.id}>
-                          <td>{tc.date}</td>
-                          <td style={{ fontWeight: 600 }}>{tc.workerName}</td>
-                          <td style={{ color: "var(--text-secondary)" }}>{tc.trade || "—"}</td>
-                          <td>{formatTime(tc.startTime)}</td>
-                          <td>{formatTime(tc.endTime)}</td>
-                          <td>{tc.breakMinutes ? `${tc.breakMinutes}m` : "—"}</td>
-                          <td>{tc.hoursRegular.toFixed(2)}h</td>
-                          <td style={{ color: tc.hoursOvertime > 0 ? "var(--accent)" : "var(--text-tertiary)", fontWeight: tc.hoursOvertime > 0 ? 700 : 400 }}>{tc.hoursOvertime > 0 ? `${tc.hoursOvertime.toFixed(2)}h` : "—"}</td>
-                          <td style={{ color: "var(--text-secondary)", fontSize: 12 }}>{tc.notes || "—"}</td>
-                        </tr>
-                      ))}
+                      {timecards.map((tc) => {
+                        const status   = normaliseApprovalStatus(tc.approvalStatus);
+                        const cfg      = APPROVAL_CFG[status];
+                        // Not read for anything drawn here — the portal has no
+                        // timecard editor — but it is what decides whether the
+                        // card can still change at all, so the controls below
+                        // ask it rather than comparing against "approved".
+                        const open     = isTimecardEditable(status);
+                        const busy     = approvingCard === tc.id;
+                        const noteOpen = sendBackFor === tc.id;
+                        return (
+                          <Fragment key={tc.id}>
+                            <tr>
+                              <td>{tc.date}</td>
+                              <td style={{ fontWeight: 600 }}>{tc.workerName}</td>
+                              <td style={{ color: "var(--text-secondary)" }}>{tc.trade || "—"}</td>
+                              <td>{formatTime(tc.startTime)}</td>
+                              <td>{formatTime(tc.endTime)}</td>
+                              <td>{tc.breakMinutes ? `${tc.breakMinutes}m` : "—"}</td>
+                              <td>{tc.hoursRegular.toFixed(2)}h</td>
+                              <td style={{ color: tc.hoursOvertime > 0 ? "var(--accent)" : "var(--text-tertiary)", fontWeight: tc.hoursOvertime > 0 ? 700 : 400 }}>{tc.hoursOvertime > 0 ? `${tc.hoursOvertime.toFixed(2)}h` : "—"}</td>
+                              <td style={{ color: "var(--text-secondary)", fontSize: 12 }}>{tc.notes || "—"}</td>
+                              <td>
+                                <span className="badge" style={{ background: cfg.bg, color: cfg.color }}>{cfg.label}</span>
+                                {/*
+                                  Who decided, and why. `approvedBy` is written
+                                  from the session by the API and never from a
+                                  request body, which is what makes a manager
+                                  approving their own hours auditable rather than
+                                  invisible — so it is shown, not hidden.
+                                */}
+                                {tc.approvedBy && (
+                                  <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 4 }}>
+                                    {status === "rejected" ? "Sent back by " : "By "}{tc.approvedBy}
+                                    {tc.approvedAt && ` · ${localDate(tc.approvedAt)}`}
+                                  </div>
+                                )}
+                                {tc.approvalNote && (
+                                  <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2, maxWidth: 220, whiteSpace: "normal" }}>
+                                    “{tc.approvalNote}”
+                                  </div>
+                                )}
+                              </td>
+                              {mayApproveTimesheets && (
+                                <td>
+                                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                                    {/*
+                                      Three states, three offers. An approved card
+                                      gets Reopen only: approving it again is a
+                                      no-op and there is nothing to send back from
+                                      a card nobody can edit. A card already sent
+                                      back gets Approve only, because sending it
+                                      back twice says nothing new.
+                                    */}
+                                    {open ? (
+                                      <>
+                                        {status === "pending" && (
+                                          <button
+                                            className="btn-ghost"
+                                            style={{ fontSize: 12, padding: "5px 10px" }}
+                                            disabled={busy}
+                                            onClick={() => {
+                                              setApprovalError(null);
+                                              setSendBackNote(tc.approvalNote ?? "");
+                                              setSendBackFor(noteOpen ? null : tc.id);
+                                            }}
+                                          >
+                                            {noteOpen ? "Cancel" : "Send back"}
+                                          </button>
+                                        )}
+                                        <button
+                                          className="btn-accent"
+                                          style={{ fontSize: 12, padding: "5px 10px" }}
+                                          disabled={busy}
+                                          onClick={() => confirmApproveTimecard(tc)}
+                                        >
+                                          {busy ? "…" : "✓ Approve"}
+                                        </button>
+                                      </>
+                                    ) : (
+                                      <button
+                                        className="btn-ghost"
+                                        style={{ fontSize: 12, padding: "5px 10px" }}
+                                        disabled={busy}
+                                        onClick={() => confirmReopenTimecard(tc)}
+                                      >
+                                        {busy ? "…" : "Reopen"}
+                                      </button>
+                                    )}
+                                  </div>
+                                </td>
+                              )}
+                            </tr>
+                            {mayApproveTimesheets && noteOpen && (
+                              <tr>
+                                <td colSpan={TIMECARD_COLUMNS.length + 1} style={{ background: "var(--surface-2, #FAFAFA)" }}>
+                                  <div style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: "4px 0" }}>
+                                    <textarea
+                                      value={sendBackNote}
+                                      onChange={(e) => setSendBackNote(e.target.value)}
+                                      maxLength={TIMECARD_NOTE_MAX_LENGTH}
+                                      rows={2}
+                                      placeholder={`Why is ${tc.workerName}'s timecard going back? They will see this.`}
+                                      style={{ flex: 1, fontSize: 13, padding: "6px 8px", borderRadius: 6, border: "1px solid var(--border)", fontFamily: "inherit", resize: "vertical" }}
+                                    />
+                                    <button
+                                      className="btn-accent"
+                                      style={{ fontSize: 12, padding: "6px 12px" }}
+                                      disabled={busy || sendBackNote.trim().length === 0}
+                                      onClick={() => void applyApproval(tc, "rejected", sendBackNote)}
+                                    >
+                                      {busy ? "…" : "Send back"}
+                                    </button>
+                                  </div>
+                                  {/*
+                                    The note is required HERE and optional at the
+                                    API, which takes it as `z.string().optional()`.
+                                    That is not a disagreement: the route has to
+                                    stay callable by the mobile screen, which has
+                                    nowhere to type one. This surface has a
+                                    keyboard, and a card sent back with no reason
+                                    tells the worker only that somebody was
+                                    unhappy — so it is refused where the reason can
+                                    actually be written.
+                                  */}
+                                  <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+                                    A reason is required here. Sending the card back lets {tc.workerName} edit it again.
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        );
+                      })}
                     </tbody>
                   </table>
+                </>
                 )
               }
             </div>
@@ -896,18 +1870,22 @@ export default function SiteDetailPage() {
               signing={signingPhotos}
               onRetry={retryPhotos}
               formatDate={localDate}
+              actorEmail={user?.email}
+              onAnnotated={applyEntryUpdate}
             />
           )}
 
           {/* ── Photos ── */}
           {!loadingMain && tab === "photos" && (
             <PhotosTab
-              photos={photos}
+              entries={entries}
               signedUrls={signedPhotoUrls}
               errors={photoErrors}
               requestError={photoRequestError}
               signing={signingPhotos}
               onRetry={retryPhotos}
+              actorEmail={user?.email}
+              onAnnotated={applyEntryUpdate}
             />
           )}
 

@@ -19,6 +19,14 @@ import { AnnotatedImage } from "@/components/AnnotatedImage";
 import { PhotoAnnotator } from "@/components/PhotoAnnotator";
 import { authedJson as apiJson } from "@/lib/authed-fetch";
 import { isSessionExpired } from "@/lib/session";
+import {
+  WhsChecklist,
+  builtInSelectionId,
+  isBuiltInSelection,
+  resolveChecklistItems,
+  suggestedInspectionName,
+  templateIdForCreate,
+} from "@/lib/whs-checklists";
 import { describeIncompleteSignature, describeSignatureSaveFailure } from "@/lib/signature-input";
 import { useData, uploadPhotos } from "@/lib/data-context";
 import { useAuth } from "@/lib/auth-context";
@@ -223,6 +231,15 @@ const DEFAULT_ITEMS = [
   "Emergency exits clear",
 ];
 
+/**
+ * The name the form starts with, and the one a built-in checklist is allowed to
+ * replace. Named rather than written out three times: handleCreate has to be
+ * able to tell "the person left the default alone" from "the person typed
+ * this", and comparing against a copy of the literal is how that stops being
+ * true the first time the default wording changes.
+ */
+const DEFAULT_INSPECTION_NAME = "Safety Inspection";
+
 function SectionHeader({ title }: { title: string }) {
   return <Text style={styles.sectionHeader}>{title}</Text>;
 }
@@ -297,6 +314,19 @@ export default function InspectionsScreen() {
 
   const [inspections, setInspections] = useState<Inspection[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
+  /**
+   * The five built-in Australian WHS checklists, from GET /api/whs-checklists.
+   *
+   * They are hardcoded in the API (routes/templates.ts) and live in no table,
+   * so they have no row in inspection_templates for the inspections.template_id
+   * foreign key to point at. That is why a selection from this list is sent as
+   * templateId null plus the checklist's NAME, and why the whole
+   * built-in-vs-template question is answered by lib/whs-checklists.ts rather
+   * than by searching this array — see the note there. An empty array here
+   * means the fetch failed, and must not silently become "every selection is a
+   * template id".
+   */
+  const [whsChecklists, setWhsChecklists] = useState<WhsChecklist[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [showActive, setShowActive] = useState<Inspection | null>(null);
@@ -308,7 +338,7 @@ export default function InspectionsScreen() {
   const [annotatingTarget, setAnnotatingTarget] = useState<{ idx: number; photo: Photo } | null>(null);
 
   // New inspection form state
-  const [inspName, setInspName] = useState("Safety Inspection");
+  const [inspName, setInspName] = useState(DEFAULT_INSPECTION_NAME);
   const [inspDate, setInspDate] = useState(new Date().toISOString().split("T")[0]);
   const [selectedTemplate, setSelectedTemplate] = useState<string>("");
   const [cScope, setCScope] = useState("");
@@ -352,9 +382,12 @@ export default function InspectionsScreen() {
 
   const load = async () => {
     try {
-      const [inspData, tplData] = await Promise.all([
+      const [inspData, tplData, whsData] = await Promise.all([
         apiJson<{ inspections: Inspection[] }>(`/api/inspections?siteId=${siteId}`),
         apiJson<{ templates: Template[] }>(`/api/inspection-templates`),
+        // Third parallel request, not a fourth round trip: the checklists are
+        // five static objects and the picker cannot be drawn without them.
+        apiJson<{ checklists: WhsChecklist[] }>(`/api/whs-checklists`),
       ]);
       // Re-attach base64 from the local payload store (same source hydrateEntriesWithPhotoPayloads
       // reads) so checklist photos are displayable/exportable, matching the entry-photo flow.
@@ -376,6 +409,7 @@ export default function InspectionsScreen() {
       }));
       setInspections(hydratedInspections);
       setTemplates(tplData.templates);
+      setWhsChecklists(whsData.checklists ?? []);
     } catch (err) {
       console.error(err);
     } finally {
@@ -484,25 +518,50 @@ export default function InspectionsScreen() {
     };
   }, [siteId]);
 
-  const getItems = () => {
-    if (selectedTemplate) {
-      const tpl = templates.find((t) => t.id === selectedTemplate);
-      if (tpl) return tpl.items;
-    }
-    return DEFAULT_ITEMS;
-  };
+  /**
+   * The checklist items the new inspection will be created with.
+   *
+   * One selection string now addresses two different populations — the user's
+   * own inspection_templates rows and the API's built-in WHS checklists — so
+   * resolving it lives in lib/whs-checklists.ts, which is unit-tested, rather
+   * than here where it is not. DEFAULT_ITEMS stays the fallback for every
+   * unresolvable case: an inspection with zero items is a form that cannot be
+   * filled in.
+   */
+  const getItems = () =>
+    resolveChecklistItems(selectedTemplate, templates, whsChecklists, DEFAULT_ITEMS);
 
   const handleCreate = async () => {
     if (!inspName.trim()) { Alert.alert("Error", "Inspection name is required."); return; }
     setSaving(true);
     try {
       const items = getItems();
+      /**
+       * A built-in checklist must NEVER be sent as templateId.
+       *
+       * inspections.template_id is `REFERENCES inspection_templates(id)`
+       * (migration 009) and the built-ins have no row there, so sending one is
+       * a 23503 — a 500 reading "Failed to create inspection." against
+       * Postgres, and a clean 201 against the in-memory store, which is why no
+       * test in the API's in-memory suite would have noticed. The API refuses
+       * it too (400 `unknown_inspection_template`); this is the half that
+       * means the refusal is never reached in normal use.
+       *
+       * The checklist's NAME is what records which built-in was used, since
+       * nothing else on the row can: a user template leaves its id behind, a
+       * built-in leaves no trace at all. Only applied when the person has not
+       * renamed the inspection themselves.
+       */
+      const templateId = templateIdForCreate(selectedTemplate);
+      const suggested = suggestedInspectionName(selectedTemplate, whsChecklists);
+      const typedName = inspName.trim();
+      const name = suggested && typedName === DEFAULT_INSPECTION_NAME ? suggested : typedName;
       await apiJson(`/api/inspections`, {
         method: "POST",
         body: JSON.stringify({
           siteId,
-          templateId: selectedTemplate || null,
-          name: inspName.trim(),
+          templateId,
+          name,
           date: inspDate,
           results: items.map((item) => ({ item, passed: null, notes: "", na: false })),
           scope: cScope.trim(),
@@ -514,7 +573,7 @@ export default function InspectionsScreen() {
         }),
       });
       setShowForm(false);
-      setInspName("Safety Inspection");
+      setInspName(DEFAULT_INSPECTION_NAME);
       setCScope(""); setCArea(""); setCTime("");
       setCInspectorName(""); setCInspectorRole(""); setCInspectorCompany("");
       await load();
@@ -956,9 +1015,9 @@ export default function InspectionsScreen() {
             <TextInput style={styles.input} placeholder="Inspector name (optional)" value={cInspectorName} onChangeText={setCInspectorName} placeholderTextColor={Colors.textTertiary} />
             <TextInput style={styles.input} placeholder="Inspector role (optional)" value={cInspectorRole} onChangeText={setCInspectorRole} placeholderTextColor={Colors.textTertiary} />
             <TextInput style={styles.input} placeholder="Inspector company (optional)" value={cInspectorCompany} onChangeText={setCInspectorCompany} placeholderTextColor={Colors.textTertiary} />
-            {templates.length > 0 && (
+            {(templates.length > 0 || whsChecklists.length > 0) && (
               <View>
-                <Text style={styles.inputLabel}>Template (optional)</Text>
+                <Text style={styles.inputLabel}>Checklist (optional)</Text>
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 8 }}>
                   <View style={{ flexDirection: "row", gap: 8 }}>
                     <Pressable
@@ -967,6 +1026,33 @@ export default function InspectionsScreen() {
                     >
                       <Text style={[styles.chipText, !selectedTemplate && styles.chipTextActive]}>Default ({DEFAULT_ITEMS.length})</Text>
                     </Pressable>
+                    {/*
+                      The built-ins first, and visually distinguished.
+
+                      They are the API's five standard Australian WHS
+                      checklists; the user's own templates below them are rows
+                      they created. Those are different kinds of thing and one
+                      of them is not editable from this app, so they are not
+                      presented as one undifferentiated list. The selection
+                      value carries the `whs:` prefix (builtInSelectionId) —
+                      that prefix, not a search of this array, is what later
+                      decides whether the selection may be sent as templateId.
+                    */}
+                    {whsChecklists.map((checklist) => {
+                      const selection = builtInSelectionId(checklist.id);
+                      const active = selectedTemplate === selection;
+                      return (
+                        <Pressable
+                          key={selection}
+                          style={[styles.chip, styles.chipBuiltIn, active && styles.chipActive]}
+                          onPress={() => setSelectedTemplate(selection)}
+                        >
+                          <Text style={[styles.chipText, active && styles.chipTextActive]}>
+                            {checklist.name} ({checklist.items.length})
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
                     {templates.map((tpl) => (
                       <Pressable
                         key={tpl.id}
@@ -978,6 +1064,9 @@ export default function InspectionsScreen() {
                     ))}
                   </View>
                 </ScrollView>
+                {isBuiltInSelection(selectedTemplate) && (
+                  <Text style={styles.chipHint}>Standard WHS checklist</Text>
+                )}
               </View>
             )}
             <Text style={styles.previewLabel}>{getItems().length} checklist items will be created</Text>
@@ -1487,6 +1576,11 @@ const styles = StyleSheet.create({
   inputLabel: { fontSize: 13, color: Colors.textSecondary, marginBottom: 2 },
   chip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, borderWidth: 1, borderColor: Colors.border, backgroundColor: Colors.surface },
   chipActive: { backgroundColor: Colors.primary, borderColor: Colors.primary },
+  // The built-ins read as a distinct group without a second colour scheme: a
+  // dashed border says "not one of yours" and still takes chipActive's fill
+  // when selected, so the selected state stays one thing across both groups.
+  chipBuiltIn: { borderStyle: "dashed" },
+  chipHint: { marginTop: 6, fontSize: 12, color: Colors.textTertiary },
   chipText: { fontSize: 13, color: Colors.textSecondary, fontWeight: "600" },
   chipTextActive: { color: Colors.white },
   previewLabel: { fontSize: 13, color: Colors.textTertiary, textAlign: "center" },

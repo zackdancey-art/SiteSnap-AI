@@ -3,6 +3,7 @@ import { asyncSafeRouter } from "../middleware/asyncRouter";
 import { z } from "zod";
 import { verifyProvenance } from "../services/diaryProvenance";
 import { FIELD_ACCESS, requireAtLeast, AuthenticatedRequest } from "../middleware/auth";
+import { getClient } from "../storage/clientsStore";
 import { requireOwnRecord } from "../middleware/recordOwnership";
 import { createAuthToken } from "../utils/authToken";
 import { findUserByEmail } from "../storage/authStore";
@@ -21,23 +22,28 @@ import {
   deleteSite,
   deleteSiteInvite,
   deleteTemplate,
+  getPortfolioCounts,
   getScopedBootstrap,
   getSupervisorReport,
   listDiaries,
   listEntries,
   listSiteInvites,
   listSiteMembers,
+  listBinnedSites,
   listSites,
   listTemplates,
   removeSiteMember,
   updateDiary,
   updateEntry,
   updateSiteProgress,
+  updateSiteClient,
   updateTemplate,
+  restoreSite,
 } from "../storage/projectsStore";
 import { isRateLimitedByAccount, LIMITS } from "../middleware/rateLimit";
 import { sendSiteInvite } from "../services/notificationService";
 import { normalizeEmail } from "../utils/emailAddresses";
+import { BIN_RETENTION_DAYS, daysInBin } from "../storage/softDelete";
 
 function parsePagination(query: Record<string, unknown>) {
   const limit = Math.min(Math.max(Number(query.limit) || 200, 1), 500);
@@ -48,10 +54,36 @@ function parsePagination(query: Record<string, unknown>) {
 const SiteSchema = z.object({
   name: z.string().min(1),
   address: z.string().min(1),
+  // Still required, still free text. Migration 032 added `client_id` but did
+  // not retire this: every existing site has a name typed into it, the report
+  // header and the mobile search box read it, and making it optional would mean
+  // a site created by a client that has not shipped the clients UI yet arrives
+  // with no client name at all. `clientId` below is the filing; this is the
+  // label. When both are present the label is kept in step with the client's
+  // canonical name — see updateSiteClient in projectsStore.
   client: z.string().min(1),
   startDate: z.string().min(1),
   status: z.enum(["active", "completed", "on-hold"]),
+  // Optional and nullable: a site created before the clients UI ships, or by a
+  // client that never sends it, is Unfiled rather than rejected.
+  clientId: z.string().min(1).nullish(),
 });
+
+/**
+ * Filing a site under a client, as its own route and its own schema.
+ *
+ * `.strict()` and one field. This is NOT the missing general site-edit route:
+ * there is still no way to change a site's name, address or status anywhere in
+ * this product, which is a real gap and deliberately not closed here — a PATCH
+ * that accepted the whole site would be a bigger surface than this workstream
+ * asked for, and `requireAtLeast("manager")` on a wide-open patch is exactly
+ * the kind of route that quietly grows. One field, one meaning.
+ *
+ * `clientId: null` unfiles.
+ */
+const SiteFilingSchema = z.object({
+  clientId: z.string().min(1).nullable(),
+}).strict();
 
 const EntrySchema = z.object({
   siteId: z.string().min(1),
@@ -181,23 +213,30 @@ projectsRouter.get("/projects/bootstrap", async (req, res) => {
   res.json(payload);
 });
 
+/**
+ * Portfolio totals. AUDIT L98.
+ *
+ * This route used to answer by loading three lists and measuring them, with no
+ * limit passed — so every figure it returned was silently capped at
+ * `listSites`/`listEntries`/`listDiaries`' default `limit = 200`. It now asks
+ * `getPortfolioCounts`, which counts in SQL; read that function's comment for
+ * why the cap is removed rather than raised, and for how the count borrows the
+ * lists' own visibility predicate instead of copying it.
+ *
+ * `activeSites`, `completedSites` and `onHoldSites` are new. The previously
+ * returned keys are unchanged in name and meaning, so the response is additive:
+ * nothing that read the old shape has to change to keep working.
+ *
+ * Called by the portal dashboard's metric cards —
+ * `apps/supervisor-web/app/dashboard/page.tsx`, via `fetchPortfolioSummary` in
+ * `apps/supervisor-web/lib/api.ts`. Before this workstream the route had no
+ * client caller at all, in either app, which is why nobody ever saw it report
+ * two hundred of five thousand entries.
+ */
 projectsRouter.get("/projects/summary", requireAtLeast("viewer"), async (req, res) => {
   const actor = getActor(req as unknown as AuthenticatedRequest);
-  const [sites, entries, diaries] = await Promise.all([
-    listSites(actor),
-    listEntries(actor),
-    listDiaries(actor),
-  ]);
-
-  const approvedDiaries = diaries.filter((diary) => diary.status === "approved").length;
-  res.json({
-    sites: sites.length,
-    entries: entries.length,
-    diaries: diaries.length,
-    approvedDiaries,
-    draftDiaries: diaries.length - approvedDiaries,
-    actorRole: actor.role,
-  });
+  const counts = await getPortfolioCounts(actor);
+  res.json({ ...counts, actorRole: actor.role });
 });
 
 projectsRouter.get("/projects/sites", async (req, res) => {
@@ -212,14 +251,86 @@ projectsRouter.post("/projects/sites", requireAtLeast("manager"), async (req, re
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid site payload.", details: parsed.error.flatten() });
   }
-  const site = await createSite(actor, parsed.data);
+  // Validate the filing HERE rather than relying on the foreign key. Two
+  // reasons: against Postgres a bad id is a 23503 the caller reads as a 500,
+  // and the in-memory store has no foreign keys at all, so this is the only
+  // check on the dev and test path. `getClient` is company-scoped, so another
+  // company's client id is "not found" rather than a cross-tenant filing.
+  const { clientId, ...siteFields } = parsed.data;
+  let clientName: string | undefined;
+  if (clientId) {
+    const client = await getClient(actor, clientId);
+    if (!client) return res.status(400).json({ error: "Client not found." });
+    clientName = client.name;
+  }
+  const site = await createSite(actor, {
+    ...siteFields,
+    clientId: clientId ?? null,
+    // Keep the free-text label in step with the client's canonical name, the
+    // same way updateSiteClient does — otherwise a site created with a clientId
+    // prints whatever the form happened to have in the client text box.
+    client: clientName ?? siteFields.client,
+  });
   return res.status(201).json({ site });
 });
 
+/**
+ * File a site under a client, or unfile it. Manager+, matching POST and DELETE.
+ *
+ * Mounted before `/projects/sites/:id/progress` reads no differently to Express
+ * — the paths are distinct — but it sits next to the site routes it belongs
+ * with rather than next to progress, which is a field update by any role.
+ */
+projectsRouter.patch("/projects/sites/:id", requireAtLeast("manager"), async (req, res) => {
+  const actor = getActor(req as unknown as AuthenticatedRequest);
+  const parsed = SiteFilingSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid site patch.", details: parsed.error.flatten() });
+  }
+  let clientName: string | undefined;
+  if (parsed.data.clientId) {
+    const client = await getClient(actor, parsed.data.clientId);
+    if (!client) return res.status(400).json({ error: "Client not found." });
+    clientName = client.name;
+  }
+  const site = await updateSiteClient(actor, req.params.id, { clientId: parsed.data.clientId, clientName });
+  if (!site) return res.status(404).json({ error: "Site not found." });
+  return res.json({ site });
+});
+
+// Still DELETE, and still 404 when it does nothing, so no client changes to
+// keep working. What changed is underneath: this now bins the site instead of
+// hard-deleting it and nine cascading tables with it. The response gains
+// `binned: true` and the retention period so a client can say what happened;
+// `ok: true` is kept for the callers that only check that.
 projectsRouter.delete("/projects/sites/:id", requireAtLeast("manager"), async (req, res) => {
   const removed = await deleteSite(getActor(req as unknown as AuthenticatedRequest), req.params.id);
   if (!removed) return res.status(404).json({ error: "Site not found." });
-  return res.json({ ok: true });
+  return res.json({ ok: true, binned: true, retentionDays: BIN_RETENTION_DAYS });
+});
+
+// The bin. Manager and above, matching the gate on DELETE: whoever can put a
+// site in the bin can see what is in it and take it back out. A viewer cannot,
+// and crew cannot — neither can delete a site in the first place.
+projectsRouter.get("/projects/sites/bin", requireAtLeast("manager"), async (req, res) => {
+  const { limit, offset } = parsePagination(req.query as Record<string, unknown>);
+  const sites = await listBinnedSites(getActor(req as unknown as AuthenticatedRequest), limit, offset);
+  return res.json({
+    sites: sites.map((site) => ({ ...site, daysInBin: daysInBin(site.deletedAt) })),
+    retentionDays: BIN_RETENTION_DAYS,
+    limit,
+    offset,
+  });
+});
+
+projectsRouter.post("/projects/sites/:id/restore", requireAtLeast("manager"), async (req, res) => {
+  const site = await restoreSite(getActor(req as unknown as AuthenticatedRequest), req.params.id);
+  // 404 covers both "no such site" and "that site is not in the bin". They are
+  // the same answer to the caller — there is nothing at that address to restore
+  // — and distinguishing them would tell a manager in company A that a site id
+  // belonging to company B exists.
+  if (!site) return res.status(404).json({ error: "Site not found in the bin." });
+  return res.json({ site });
 });
 
 projectsRouter.get("/projects/entries", async (req, res) => {
@@ -237,6 +348,10 @@ projectsRouter.post("/projects/entries", async (req, res) => {
     return res.status(400).json({ error: "Invalid entry payload.", details: parsed.error.flatten() });
   }
   const entry = await createEntry(actor, parsed.data);
+  // A binned site, another company's site and a nonexistent one are one answer.
+  // See createEntry: an entry filed against a binned site is written and then
+  // never readable, so a 201 here loses the work and calls it saved.
+  if (!entry) return res.status(404).json({ error: "Site not found." });
   return res.status(201).json({ entry });
 });
 

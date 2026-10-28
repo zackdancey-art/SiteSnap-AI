@@ -226,6 +226,19 @@ test("a store failure on a real route becomes a response, not a hung request", a
   const target = projectsStore as unknown as Record<string, unknown>;
   const original = target.updateSiteProgress;
   target.updateSiteProgress = async () => {
+    // The disable below is not SQL being written by hand -- it is the Postgres
+    // ERROR TEXT that L99 produced in production, reproduced verbatim so the
+    // route's 500-handling is tested against the real message. The ban on the
+    // column name exists to stop the predicate being written out; asserting on
+    // what the database said when it was is the opposite of that mistake. The
+    // predicate itself now comes from storage/softDelete.ts.
+    //
+    // The directive has to be the line IMMEDIATELY above the code -- with the
+    // explanation after a `--` on the directive line, the following `//` lines
+    // are separate comments and "next line" lands on one of them, so the
+    // directive applies to a comment and the error stands. Measured, not
+    // assumed: that is exactly what the first attempt did.
+    // eslint-disable-next-line no-restricted-syntax
     throw new Error('column "deleted_at" does not exist');
   };
   try {

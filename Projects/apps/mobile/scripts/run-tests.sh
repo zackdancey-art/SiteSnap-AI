@@ -30,7 +30,13 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
-EXPECTED_TEST_FILES=15
+# 26, MEASURED on the tree this branch merges into -- main plus the PRs
+# ahead of it in the merge order -- not on this branch alone. The number is
+# POSITION-DEPENDENT: 15 on main, +1 clients, +1 whs, +2 storage-ceiling, +1
+# report-periods, +1 photo-viewer, +1 bin-retention, +2 consent-and-native,
+# +2 here = 26. FINAL value: the one PR after this adds a test but no test
+# FILE. Every count and every position: docs/NINE-WORKSTREAMS-HANDOVER.md.
+EXPECTED_TEST_FILES=26
 # 207, MEASURED on the tree this branch merges into -- main plus the ten PRs
 # ahead of it -- not on this branch alone, where the count is 114. The
 # number is POSITION-DEPENDENT: this branch is ELEVENTH AND LAST in the

@@ -395,7 +395,20 @@ if (!process.env.TEST_DATABASE_URL) {
       await step("send a location ping", "POST", "/location/update", {
         latitude: -36.8485, longitude: 174.7633, accuracy: 5, siteId, userName: who,
       });
-      await step("update site progress", "PATCH", `/projects/sites/${siteId}/progress`, { progressPercent: 42 });
+      const progressed = await step<{ site: { progressPercent?: number } }>(
+        "update site progress", "PATCH", `/projects/sites/${siteId}/progress`, { progressPercent: 42 }
+      );
+      // Not just the status code. This route answered 200 while returning a
+      // site with no progressPercent at all: mapSite never read the
+      // `progress_percent` column, so the Postgres path wrote the value and
+      // never gave it back, and the mobile slider reset to zero on every
+      // reload. A status-code assertion cannot see that — the step above
+      // passed throughout. AUDIT L99 fixed the statement; this is the half of
+      // the same defect that survived it.
+      assert.equal(
+        progressed.body.site?.progressPercent, 42,
+        "PATCH /progress answered 200 but did not return the progress it stored"
+      );
       // Last, because it removes the row the first two steps created.
       await step("delete that entry", "DELETE", `/projects/entries/${entryId ?? "missing"}`);
       return out;

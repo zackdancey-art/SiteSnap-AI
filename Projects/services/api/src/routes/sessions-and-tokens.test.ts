@@ -243,6 +243,78 @@ test("revoke-all ends another device's session, and the acting device keeps work
   assert.equal(await status(replacement), 200, "the replacement credential must work");
 });
 
+test("signing out ends the session on the server, not just on the device", async () => {
+  await seedOwner();
+  const acting = await login();
+  const otherDevice = signClaims({ email: OWNER });
+
+  // CONTROL, BEFORE THE SIGN-OUT, on the route the 401s below are read from.
+  // Without it a refusal is satisfied just as well by an /auth/me that has
+  // started refusing everybody.
+  assert.equal(await status(acting), 200, "the acting token must work before the sign-out");
+  assert.equal(await status(otherDevice), 200, "the other device's token must work before the sign-out");
+
+  const signedOut = await req<{ ok?: boolean }>("POST", "/auth/logout", {}, acting);
+  assert.equal(signedOut.status, 200, `logout failed: ${JSON.stringify(signedOut.body)}`);
+  assert.equal(signedOut.body.ok, true);
+
+  // THE DEFECT, ASSERTED — HALF-BUILT-MECHANISMS F5. /auth/logout used to clear
+  // a cookie and revoke nothing, so a bearer client signed out by forgetting a
+  // credential that stayed live on the server for the rest of its TTL. This is
+  // the phone handed back to the hire company.
+  const afterSignOut = await req<{ code?: string }>("GET", "/auth/me", undefined, acting);
+  assert.equal(afterSignOut.status, 401, `the signed-out token still works: ${JSON.stringify(afterSignOut.body)}`);
+  assert.equal(afterSignOut.body.code, "session_expired", "a signed-out token must be indistinguishable from an expired one");
+
+  // THE SCOPE, ASSERTED RATHER THAN DOCUMENTED. The only revocation mechanism
+  // this product has is per ACCOUNT, so signing out here signs out the other
+  // device too. That is wider than the button's label implies and the clients
+  // say so before they do it; this line is what makes the claim checkable, and
+  // what will fail if a later change narrows the scope without updating them.
+  assert.equal(await status(otherDevice), 401, "sign-out must end every session on the account");
+
+  // AND IT CANNOT BE UNDONE BY A REFRESH. /auth/refresh is deliberately not
+  // behind requireAuth (AUDIT L74), so it carries its own generation check; if
+  // that ever stops, a sign-out is a round trip to a fresh credential.
+  const resurrect = await req<{ code?: string }>("POST", "/auth/refresh", {}, acting);
+  assert.equal(resurrect.status, 401, `a signed-out token refreshed itself: ${JSON.stringify(resurrect.body)}`);
+
+  // POSITIVE CONTROL, SAME ROUTE: the account is signed out, not locked out.
+  assert.equal(await status(await login()), 200, "signing in again must work after a sign-out");
+});
+
+test("signing out clears the portal's cookie, and answers 200 with no credential at all", async () => {
+  await seedOwner();
+
+  // The portal's journey: a cookie, no Authorization header anywhere.
+  const signedIn = await req<{ token?: string }>("POST", "/auth/login", { email: OWNER, password: PASSWORD });
+  assert.equal(signedIn.status, 200, `login failed: ${JSON.stringify(signedIn.body)}`);
+  const cookie = sessionCookieFrom(signedIn.headers, "login");
+  assert.equal(await cookieStatus(cookie), 200, "control: the session cookie works before the sign-out");
+
+  const signedOut = await req<{ ok?: boolean }>("POST", "/auth/logout", {}, undefined, cookie);
+  assert.equal(signedOut.status, 200, `logout over the cookie transport failed: ${JSON.stringify(signedOut.body)}`);
+
+  // The browser is told to drop it — asserted on the header rather than through
+  // sessionCookieFrom, because a cleared cookie and a minted one are the same
+  // shape to that helper and only the expiry tells them apart.
+  const cleared = (signedOut.headers["set-cookie"] ?? []).find((c) => c.startsWith(`${SESSION_COOKIE}=`));
+  assert.ok(cleared, `logout sent no ${SESSION_COOKIE} cookie, so a browser keeps the one it has`);
+  assert.match(cleared as string, /Expires=Thu, 01 Jan 1970/, `logout did not expire the cookie: ${cleared}`);
+
+  // ...and the cookie itself is dead on the server, which is the half that a
+  // Set-Cookie header cannot prove: a browser that ignored the instruction, or
+  // any other copy of that cookie, is refused too.
+  assert.equal(await cookieStatus(cookie), 401, "the signed-out cookie must stop working server-side");
+
+  // IT NEVER FAILS. A logout with no credential is not an error — it is the
+  // state the caller is asking for. `requireAuth` here would 401 a dead cookie
+  // and leave it in the browser, which is the opposite of signing out.
+  const bare = await req<{ ok?: boolean }>("POST", "/auth/logout", {});
+  assert.equal(bare.status, 200, `logout without a credential answered ${bare.status}`);
+  assert.equal(bare.body.ok, true);
+});
+
 test("revocation reaches /auth/refresh, the one route that could have exempted itself", async () => {
   await seedOwner();
   const acting = await login();

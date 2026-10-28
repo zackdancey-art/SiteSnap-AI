@@ -7,7 +7,8 @@
     "build": "next build",
     "build:analyze": "ANALYZE=true next build",
     "start": "next start -p ${PORT:-3001}",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "rm -rf dist-test && pnpm exec tsc -p tsconfig.test.json && ./scripts/run-tests.sh"
   },
   "engines": {
     "node": "20.x"

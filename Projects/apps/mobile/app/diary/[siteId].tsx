@@ -23,8 +23,21 @@ import { describeGeneration } from "@/lib/provenance";
 import { buildDiaryReportHtml, runReportExport, ReportExportFormat } from "@/lib/export-utils";
 import { reportMediaFailure } from "@/lib/media-telemetry";
 import { BackButton } from "@/components/BackButton";
-
-type ReportPeriod = "daily" | "weekly" | "monthly";
+// AUDIT L92. The period arithmetic that used to live in this file is now one
+// module, shared with the report header and pinned against the API's copy —
+// see `lib/report-window.ts` for why it is a duplicate and not an import.
+import {
+  ReportPeriod,
+  ReportWindow,
+  anchoredWindowFor,
+  describeWindow,
+  filterEntriesByWindow,
+  latestEntryDate,
+  nextWindow,
+  previousWindow,
+  todayLocal,
+  validateWindow,
+} from "@/lib/report-window";
 
 const REPORT_OPTIONS: Array<{ key: ReportPeriod; label: string }> = [
   { key: "daily", label: "Daily" },
@@ -59,36 +72,6 @@ function normalizeSection(section: Partial<DiarySection>): DiarySection {
     issues: section.issues || "N/A",
     photoAnalysis: section.photoAnalysis || "N/A",
   };
-}
-
-function dateOnly(value: string) {
-  return new Date(`${value}T00:00:00`);
-}
-
-function formatDateKey(date: Date) {
-  const year = date.getFullYear();
-  const month = `${date.getMonth() + 1}`.padStart(2, "0");
-  const day = `${date.getDate()}`.padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function filterEntriesByPeriod(entries: DailyEntry[], period: ReportPeriod) {
-  if (entries.length === 0) return [];
-  const sorted = [...entries].sort((a, b) => dateOnly(a.date).getTime() - dateOnly(b.date).getTime());
-  const latest = dateOnly(sorted[sorted.length - 1].date);
-  if (period === "daily") {
-    const key = sorted[sorted.length - 1].date || formatDateKey(latest);
-    return sorted.filter((entry) => entry.date === key);
-  }
-  if (period === "weekly") {
-    const start = new Date(latest);
-    start.setDate(start.getDate() - 6);
-    return sorted.filter((entry) => dateOnly(entry.date) >= start && dateOnly(entry.date) <= latest);
-  }
-  return sorted.filter((entry) => {
-    const d = dateOnly(entry.date);
-    return d.getFullYear() === latest.getFullYear() && d.getMonth() === latest.getMonth();
-  });
 }
 
 function getEntryActivityTime(entry: DailyEntry) {
@@ -136,12 +119,48 @@ export default function DiaryPreviewScreen() {
 
   const [generating, setGenerating] = useState(false);
   const [selectedPeriod, setSelectedPeriod] = useState<ReportPeriod>("daily");
+  /**
+   * The window the user has stepped to, or null for "the default for the
+   * selected period".
+   *
+   * Held as an OVERRIDE rather than as the window itself so that changing the
+   * period, or new entries syncing in, re-anchors instead of leaving a range on
+   * screen that no longer relates to what the site has recorded.
+   */
+  const [windowOverride, setWindowOverride] = useState<ReportWindow | null>(null);
+  /**
+   * The window the API says the generated report actually covers, from the
+   * response's `reportWindow`.
+   *
+   * Session-scoped, and NOT persisted: `GeneratedDiary` has no place to put it,
+   * so a report reopened later falls back to showing the period word alone. The
+   * field belongs on the stored diary, which is a change to the save route and
+   * the diary schema rather than to this screen — flagged in the PR body.
+   */
+  const [generatedWindow, setGeneratedWindow] = useState<{ from: string; to: string } | null>(null);
   const [currentDiary, setCurrentDiary] = useState<GeneratedDiary | null>(null);
   const [isEditingReport, setIsEditingReport] = useState(false);
   const [editedSummary, setEditedSummary] = useState("");
   const [editedFullReport, setEditedFullReport] = useState("");
 
-  const filteredEntries = useMemo(() => filterEntriesByPeriod(entries, selectedPeriod), [entries, selectedPeriod]);
+  /**
+   * What the window is counted back from when the user has not stepped.
+   *
+   * The latest entry this screen can see, which is the anchor the API falls
+   * back to as well — NOT today. A site last worked a month ago must still
+   * produce its monthly report rather than an empty window. `todayLocal()` is
+   * only reached when there are no usable entry dates at all, and in that case
+   * no range is sent (see `handleGenerate`).
+   */
+  const localAnchor = useMemo(() => latestEntryDate(entries), [entries]);
+  const reportWindow = useMemo(
+    () => windowOverride ?? anchoredWindowFor(selectedPeriod, localAnchor ?? todayLocal()),
+    [windowOverride, selectedPeriod, localAnchor]
+  );
+  const windowSelection = useMemo(() => filterEntriesByWindow(entries, reportWindow), [entries, reportWindow]);
+  const filteredEntries = windowSelection.entries;
+  /** The step forward, or null when it would cover days that have not happened. */
+  const forwardWindow = useMemo(() => nextWindow(reportWindow), [reportWindow]);
   const totalPhotos = entries.reduce((sum, entry) => sum + entry.photos.length, 0);
   const latestMatchingDiary = useMemo(
     () => siteDiaries.find((diary) => (diary.reportPeriod || "daily") === selectedPeriod) || null,
@@ -149,6 +168,9 @@ export default function DiaryPreviewScreen() {
   );
 
   useEffect(() => {
+    // A stored diary carries no window (see `generatedWindow`), so the dates
+    // from the last generation in this session must not be shown against it.
+    setGeneratedWindow(null);
     if (!latestMatchingDiary) {
       setCurrentDiary(null);
       return;
@@ -192,10 +214,40 @@ export default function DiaryPreviewScreen() {
       : [];
 
   const handleGenerate = async () => {
-    if (filteredEntries.length === 0) {
-      Alert.alert("No Entries", `No ${selectedPeriod} entries available to generate a diary.`);
+    const validated = validateWindow(reportWindow);
+    if (!validated.ok) {
+      // Refused here rather than by the API, so the user is not charged a round
+      // trip to be told the same sentence. The message IS the API's message.
+      Alert.alert("Report range", validated.message);
       return;
     }
+    if (filteredEntries.length === 0) {
+      // Names the dates. The old copy said "No daily entries available", which
+      // described a window the user had no way to see and, on the anchored
+      // path, had never chosen. AUDIT L92.
+      Alert.alert(
+        "No Entries",
+        `No entries are recorded between ${reportWindow.from} and ${reportWindow.to}.`
+      );
+      return;
+    }
+
+    /**
+     * Whether to send the range at all.
+     *
+     * Sent when the user stepped to a window, or when this screen has a real
+     * entry to anchor on — in both cases the screen has just told them which
+     * days the report will cover and the request must match that promise.
+     *
+     * NOT sent when there is no usable local entry date, because the anchor
+     * would then be today: on a site last worked a month ago that is a request
+     * for an empty window, and the server anchoring on what it can see is the
+     * better answer. An older API that does not know these fields drops them
+     * (zod strips unknown keys) and anchors too, so the deploy gap degrades to
+     * the previous behaviour rather than to an error.
+     */
+    const sendRange = windowOverride !== null || localAnchor !== null;
+    const range = sendRange ? { from: reportWindow.from, to: reportWindow.to } : {};
 
     setGenerating(true);
     try {
@@ -203,6 +255,7 @@ export default function DiaryPreviewScreen() {
       let res = await apiRequest("POST", "/api/generate-diary", {
         siteId: safeSiteId,
         period: selectedPeriod,
+        ...range,
       });
       let payload = (await res.json()) as {
         success?: boolean;
@@ -213,6 +266,15 @@ export default function DiaryPreviewScreen() {
         // wrote — the downgrade was invisible to the user and to this code.
         generation?: DiaryGeneration;
         warning?: string;
+        /**
+         * The dates the report covers, as the server resolved them. Worth
+         * reading even when this screen sent the range: on the no-range path
+         * the server anchored, and these are the only dates that say what the
+         * document contains.
+         */
+        reportWindow?: { from: string; to: string; mode?: "explicit" | "anchored" };
+        /** Entries the server left out for having no usable date. */
+        undatedEntries?: number;
         diary?: {
           summary?: string;
           fullReport?: string;
@@ -230,6 +292,7 @@ export default function DiaryPreviewScreen() {
       if (shouldRetryWithLocalEntries) {
         res = await apiRequest("POST", "/api/generate-diary", {
           period: selectedPeriod,
+          ...range,
           site: {
             name: site.name,
             client: site.client,
@@ -265,6 +328,20 @@ export default function DiaryPreviewScreen() {
         generation: payload.generation ?? null,
       });
       setCurrentDiary(diary);
+      setGeneratedWindow(
+        payload.reportWindow
+          ? { from: payload.reportWindow.from, to: payload.reportWindow.to }
+          : null
+      );
+      if (typeof payload.undatedEntries === "number" && payload.undatedEntries > 0) {
+        // The server counted entries it could not place in any window. Said
+        // once, here, rather than left for the reader of the report to notice
+        // that a day is missing.
+        Alert.alert(
+          "Some entries were left out",
+          `${payload.undatedEntries} entr${payload.undatedEntries === 1 ? "y has" : "ies have"} no usable date and could not be included in this report.`
+        );
+      }
     } catch (err: unknown) {
       console.warn("Generate diary error:", err);
       const message =
@@ -361,7 +438,12 @@ export default function DiaryPreviewScreen() {
       "=".repeat(44),
       `Client: ${site.client}`,
       `Address: ${site.address}`,
-      `Report Period: ${resolvedPeriod.toUpperCase()}`,
+      // AUDIT L92: the period word alone named no days. The dates come first
+      // now, and the word is kept after them because that is what the reader
+      // asked for.
+      generatedWindow
+        ? `Report Period: ${describeWindow(generatedWindow)} (${resolvedPeriod.toUpperCase()})`
+        : `Report Period: ${resolvedPeriod.toUpperCase()}`,
       `Generated: ${new Date(currentDiary.generatedAt).toLocaleString("en-AU")}`,
       `Status: ${currentDiary.status.toUpperCase()}`,
       `Generator: ${describeGeneration(currentDiary.generation).label}`,
@@ -479,7 +561,13 @@ export default function DiaryPreviewScreen() {
                 <Pressable
                   key={option.key}
                   style={[styles.periodChip, selectedPeriod === option.key && styles.periodChipActive]}
-                  onPress={() => setSelectedPeriod(option.key)}
+                  onPress={() => {
+                    setSelectedPeriod(option.key);
+                    // Re-anchor. Carrying a stepped February range across from
+                    // "weekly" to "monthly" would show dates the user did not
+                    // choose for the period they just picked.
+                    setWindowOverride(null);
+                  }}
                 >
                   <Text style={[styles.periodChipText, selectedPeriod === option.key && styles.periodChipTextActive]}>
                     {option.label}
@@ -487,9 +575,56 @@ export default function DiaryPreviewScreen() {
                 </Pressable>
               ))}
             </View>
-            <Text style={styles.periodHint}>
-              {filteredEntries.length} entr{filteredEntries.length === 1 ? "y" : "ies"} will be included.
-            </Text>
+            {/* AUDIT L92. The window is now shown and steppable. It used to be
+                computed from the entry list on every render and displayed
+                nowhere, so "Weekly" meant the seven days ending at the last
+                recorded entry and the reader of the report could not tell. */}
+            <View style={styles.windowRow}>
+              <Pressable
+                style={styles.windowStep}
+                onPress={() => setWindowOverride(previousWindow(reportWindow))}
+                accessibilityRole="button"
+                accessibilityLabel="Previous period"
+                hitSlop={8}
+              >
+                <Ionicons name="chevron-back" size={18} color={Colors.text} />
+              </Pressable>
+              <View style={styles.windowLabelBox}>
+                <Text style={styles.windowLabel}>{describeWindow(reportWindow)}</Text>
+                <Text style={styles.windowSubLabel}>
+                  {filteredEntries.length} entr{filteredEntries.length === 1 ? "y" : "ies"} will be included
+                </Text>
+              </View>
+              <Pressable
+                style={[styles.windowStep, !forwardWindow && styles.windowStepDisabled]}
+                onPress={() => forwardWindow && setWindowOverride(forwardWindow)}
+                disabled={!forwardWindow}
+                accessibilityRole="button"
+                accessibilityLabel="Next period"
+                accessibilityState={{ disabled: !forwardWindow }}
+                hitSlop={8}
+              >
+                <Ionicons
+                  name="chevron-forward"
+                  size={18}
+                  color={forwardWindow ? Colors.text : Colors.textTertiary}
+                />
+              </Pressable>
+            </View>
+            {windowOverride === null && localAnchor !== null && (
+              <Text style={styles.periodHint}>
+                Counted back from the last recorded entry ({localAnchor}).
+              </Text>
+            )}
+            {windowSelection.undatedCount > 0 && (
+              // Said out loud rather than swallowed. Before this change a single
+              // entry with a blank date emptied the whole screen silently.
+              <Text style={styles.windowWarning}>
+                {windowSelection.undatedCount} entr
+                {windowSelection.undatedCount === 1 ? "y has" : "ies have"} no usable date and
+                {windowSelection.undatedCount === 1 ? " is" : " are"} left out of every report.
+              </Text>
+            )}
             <Pressable
               style={[styles.generateButton, generating && styles.generateButtonDisabled]}
               onPress={handleGenerate}
@@ -504,7 +639,7 @@ export default function DiaryPreviewScreen() {
                 <>
                   <Ionicons name="sparkles" size={20} color={Colors.white} />
                   <Text style={styles.generateButtonText}>
-                    Generate {selectedPeriod} Report
+                    Generate Report
                   </Text>
                 </>
               )}
@@ -526,7 +661,7 @@ export default function DiaryPreviewScreen() {
                 </Text>
               </View>
               <Text style={styles.generatedDate}>
-                {resolvedPeriod.toUpperCase()} •{" "}
+                {generatedWindow ? describeWindow(generatedWindow) : resolvedPeriod.toUpperCase()} •{" "}
                 {new Date(currentDiary.generatedAt).toLocaleDateString("en-AU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}
               </Text>
             </View>
@@ -679,7 +814,7 @@ export default function DiaryPreviewScreen() {
           <>
             <View style={styles.rawEntriesHeader}>
               <Ionicons name="list" size={16} color={Colors.textSecondary} />
-              <Text style={styles.rawEntriesLabel}>Entries in Selected Period</Text>
+              <Text style={styles.rawEntriesLabel}>Entries in {describeWindow(reportWindow)}</Text>
             </View>
             {filteredEntries.map((entry, idx) => (
               <EntryCard key={entry.id} entry={entry} index={idx} total={filteredEntries.length} />
@@ -691,7 +826,10 @@ export default function DiaryPreviewScreen() {
           <View style={styles.emptyState}>
             <Ionicons name="document-text-outline" size={48} color={Colors.textTertiary} />
             <Text style={styles.emptyTitle}>No entries in this period</Text>
-            <Text style={styles.emptyText}>Switch to another report period or add new entries.</Text>
+            <Text style={styles.emptyText}>
+              Nothing is recorded between {reportWindow.from} and {reportWindow.to}. Step back to an
+              earlier period, switch periods, or add new entries.
+            </Text>
           </View>
         )}
       </ScrollView>
@@ -891,6 +1029,26 @@ const styles = StyleSheet.create({
   periodChipText: { fontSize: 13, fontFamily: "Inter_600SemiBold", color: Colors.textSecondary },
   periodChipTextActive: { color: Colors.white },
   periodHint: { fontSize: 12, fontFamily: "Inter_400Regular", color: Colors.textTertiary },
+  windowRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  windowStep: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  windowStepDisabled: { opacity: 0.4 },
+  windowLabelBox: { flex: 1, alignItems: "center" },
+  windowLabel: { fontSize: 14, fontFamily: "Inter_700Bold", color: Colors.text, textAlign: "center" },
+  windowSubLabel: {
+    fontSize: 12,
+    fontFamily: "Inter_400Regular",
+    color: Colors.textSecondary,
+    textAlign: "center",
+  },
+  windowWarning: { fontSize: 12, fontFamily: "Inter_400Regular", color: Colors.warning },
   generateButton: {
     flexDirection: "row",
     alignItems: "center",

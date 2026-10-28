@@ -32,8 +32,21 @@ import {
  * a screen, so the change is deliberate and visible in review rather than a
  * count drifting unobserved — the same bargain as scripts/run-tests.sh.
  */
-const EXPECTED_ROUTES = 33;
-const EXPECTED_SCREEN_HEADER = 11;
+// 35, MEASURED on the tree this branch merges into -- main plus the PRs
+// ahead of it in the merge order -- not on this branch alone. The number is
+// POSITION-DEPENDENT: 33 on main, +1 from feat/clients-sites-entries (PR 2,
+// the clients screen), +1 here (settings/site-bin) = 35. Both branches wrote
+// 34, so git auto-merged two IDENTICAL edits and the union inherited one
+// increment for two new screens -- no conflict, nothing red, and the only
+// way to see it is to count the routes after both have merged. Every count
+// and every position: docs/NINE-WORKSTREAMS-HANDOVER.md.
+const EXPECTED_ROUTES = 35;
+// 13, MEASURED on the tree this branch merges into -- main plus the PRs
+// ahead of it in the merge order -- not on this branch alone. The number is
+// POSITION-DEPENDENT: 11 on main, +1 from PR 2, +1 here = 13. Same
+// identical-edit auto-merge as EXPECTED_ROUTES above. Every count and every
+// position: docs/NINE-WORKSTREAMS-HANDOVER.md.
+const EXPECTED_SCREEN_HEADER = 13;
 const EXPECTED_NATIVE_HEADER = 9;
 const EXPECTED_LAYOUTS = 2;
 
@@ -145,6 +158,26 @@ test("settings/offline-sync is registered — the AUDIT L59 regression guard", (
   assert.ok(
     audit.headerHiddenRoutes.includes("settings/offline-sync"),
     "settings/offline-sync is showing a native header again — this is exactly AUDIT L59"
+  );
+});
+
+test("clients is registered — the screen this workstream added", () => {
+  const audit = auditScreenHeaders(readAppTree(APP_DIR));
+  /**
+   * A named guard beside the offline-sync one above, for the same reason it is
+   * there: the two pinned counts already moved when this screen landed, and a
+   * count can be re-pinned by anyone who raises it without looking at what
+   * moved. This names the screen, so deleting its registration fails here with
+   * the screen's name in the message rather than as "34 !== 33".
+   */
+  assert.ok(
+    audit.screenHeaderRoutes.includes("clients"),
+    "app/clients.tsx no longer renders <ScreenHeader>; this guard is now pointing at nothing"
+  );
+  assert.ok(
+    audit.headerHiddenRoutes.includes("clients"),
+    "app/clients.tsx is showing a native header — it is unregistered or registered " +
+      "without headerShown: false, which is AUDIT L59 again"
   );
 });
 

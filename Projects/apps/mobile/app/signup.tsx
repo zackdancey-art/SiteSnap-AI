@@ -19,6 +19,8 @@ import Colors from "@/constants/colors";
 import { apiRequest } from "@/lib/query-client";
 import { BackButton, goBackSafe } from "@/components/BackButton";
 import { composeE164, DIALLING_CODES } from "@/lib/phone";
+import { TERMS_OF_SERVICE } from "@/constants/legal/terms-of-service-content";
+import { PRIVACY_POLICY } from "@/constants/legal/privacy-policy-content";
 
 type PrefixOption = {
   label: string;
@@ -58,6 +60,20 @@ export default function SignUpScreen() {
   const [emailCode, setEmailCode] = useState("");
   const [smsCode, setSmsCode] = useState("");
   const [showPrefixModal, setShowPrefixModal] = useState(false);
+  /**
+   * Terms and privacy consent. ONE tick for BOTH documents, which is what the
+   * person is actually agreeing to -- they are accepting the service, and the
+   * service has two documents. Two separate checkboxes would present a choice
+   * that does not exist, since declining either one ends the signup, and would
+   * double the friction on the screen with the highest abandonment in the
+   * product. Both are named in the label and both are reachable from it, which
+   * is the part that matters.
+   *
+   * The API still records them SEPARATELY, one row per document with its own
+   * version, because the documents are revised independently and a single
+   * combined record could not say which text was current when.
+   */
+  const [acceptedLegal, setAcceptedLegal] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -123,6 +139,13 @@ export default function SignUpScreen() {
       setError("Please enter a valid phone number.");
       return;
     }
+    // Belt as well as braces: the button below is disabled until this is true,
+    // and this is here because a disabled button is a presentation decision and
+    // somebody will restyle it. The API records consent; the refusal is here.
+    if (!acceptedLegal) {
+      setError("Please accept the Terms of Service and the Privacy Policy to continue.");
+      return;
+    }
 
     setError("");
     setMessage("");
@@ -134,6 +157,22 @@ export default function SignUpScreen() {
         email: email.trim().toLowerCase(),
         phone: normalizedPhone,
         password,
+        acceptedTerms: true,
+        acceptedPrivacy: true,
+        /**
+         * The version of the text THIS BUILD RENDERS, not a version the server
+         * supplied. The two can differ -- an older build in the field shows an
+         * older document -- and the record has to say what the person was
+         * actually shown, so it comes from the same constant the screens render.
+         *
+         * `lastUpdated` rather than a separate version number on purpose: it is
+         * part of the compared text in Projects/scripts/ci.sh, which diffs this
+         * file word-for-word against docs/legal/ and the website copy, so it
+         * cannot drift from the words it names. A hand-maintained number beside
+         * it could.
+         */
+        termsVersion: TERMS_OF_SERVICE.lastUpdated,
+        privacyVersion: PRIVACY_POLICY.lastUpdated,
       });
       const data = (await res.json()) as {
         error?: string;
@@ -407,9 +446,51 @@ export default function SignUpScreen() {
                 </View>
 
                 <Pressable
-                  style={({ pressed }) => [styles.primaryButton, pressed && styles.primaryButtonPressed]}
+                  style={styles.consentRow}
+                  onPress={() => setAcceptedLegal((previous) => !previous)}
+                  accessibilityRole="checkbox"
+                  accessibilityState={{ checked: acceptedLegal }}
+                  accessibilityLabel="I agree to the Terms of Service and the Privacy Policy"
+                  hitSlop={8}
+                >
+                  <Ionicons
+                    name={acceptedLegal ? "checkbox" : "square-outline"}
+                    size={24}
+                    color={acceptedLegal ? Colors.primary : Colors.textSecondary}
+                  />
+                  <Text style={styles.consentText}>
+                    I agree to the{" "}
+                    {/* Links, not a modal: both documents already have screens,
+                        and sending someone to a modal they must dismiss to get
+                        back to a half-filled form loses the form on some
+                        navigators. These push and come back. */}
+                    <Text
+                      style={styles.consentLink}
+                      onPress={() => router.push("/terms-of-service")}
+                      suppressHighlighting
+                    >
+                      Terms of Service
+                    </Text>{" "}
+                    and the{" "}
+                    <Text
+                      style={styles.consentLink}
+                      onPress={() => router.push("/privacy-policy")}
+                      suppressHighlighting
+                    >
+                      Privacy Policy
+                    </Text>
+                    .
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.primaryButton,
+                    pressed && styles.primaryButtonPressed,
+                    !acceptedLegal && styles.primaryButtonDisabled,
+                  ]}
                   onPress={handleStartRegistration}
-                  disabled={submitting}
+                  disabled={submitting || !acceptedLegal}
                 >
                   {submitting ? (
                     <ActivityIndicator color={Colors.white} />
@@ -628,6 +709,29 @@ const styles = StyleSheet.create({
     height: 54,
   },
   primaryButtonPressed: { opacity: 0.9, transform: [{ scale: 0.98 }] },
+  primaryButtonDisabled: { opacity: 0.45 },
+  // minHeight 44 is the iOS minimum tap target; the row is the hit area, not
+  // the 24pt icon inside it, so the label is tappable too.
+  consentRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 10,
+    minHeight: 44,
+    paddingVertical: 10,
+    marginBottom: 4,
+  },
+  consentText: {
+    flex: 1,
+    fontSize: 13,
+    lineHeight: 19,
+    fontFamily: "Inter_400Regular",
+    color: Colors.textSecondary,
+  },
+  consentLink: {
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.primary,
+    textDecorationLine: "underline",
+  },
   primaryButtonText: { fontSize: 16, fontFamily: "Inter_600SemiBold", color: Colors.white },
   secondaryButtonText: { fontSize: 14, fontFamily: "Inter_600SemiBold", color: Colors.accent },
   linkRow: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 6 },

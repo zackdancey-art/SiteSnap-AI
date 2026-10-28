@@ -50,6 +50,7 @@ import { createUser, deleteUserAccount } from "../storage/authStore";
 import { createAuthToken } from "../utils/authToken";
 import { hashPassword } from "../utils/password";
 import { signUploadPath } from "../utils/signedUrl";
+import { uploadIdsBelongingToActorCompany } from "../storage/uploadsStore";
 import { applyMigrations } from "../storage/testMigrations";
 
 if (!process.env.TEST_DATABASE_URL) {
@@ -323,5 +324,95 @@ if (!process.env.TEST_DATABASE_URL) {
       /row-level security/i,
       "company B must not be able to attribute a new upload row to company A"
     );
+  });
+
+  // ── The batch ownership query ──────────────────────────────────────────────
+  //
+  // `POST /uploads/sign` used to call the single-id ownership check once per
+  // path inside a `Promise.all`, which on a fifty-path request was fifty
+  // `withTenant` TRANSACTIONS (BEGIN, set_config, SELECT, COMMIT each) opened at
+  // once against a much smaller pool, on the hot path of every screen that shows
+  // a photograph. It now asks once, with `id = ANY(...)`.
+  //
+  // That rewrite introduced a failure mode the per-path version could not have:
+  // the answer for path i now comes from a SET rather than from a call made for
+  // path i, so an off-by-one or a filtered-out element mis-attributes one
+  // tenant's permission to another tenant's file. These two tests are here
+  // because the existing cross-tenant tests above pass a SINGLE path and would
+  // read green against a batch that aligned its results wrongly.
+
+  test("a mixed batch answers each path on its own merits, in the order given", async () => {
+    const mine = await uploadAs(tokenA, BYTES_A, "batch-mine.jpg");
+    const theirs = await uploadAs(tokenB, BYTES_B, "batch-theirs.jpg");
+
+    // Deliberately interleaved and deliberately NOT in a helpful order: A's file
+    // sits between B's and an unparseable string, and then repeats. A batch that
+    // dropped the invalid entry before querying, or that zipped the owned set
+    // back onto the wrong indices, puts a signed url where a refusal belongs.
+    const paths = [theirs.url, mine.url, "not-an-upload-path", mine.url];
+    const { signed } = await signAs(tokenA, paths);
+
+    assert.equal(signed.length, paths.length, "every path must get exactly one answer");
+    assert.deepEqual(
+      signed.map((s) => s.path),
+      paths,
+      "the answers must come back aligned with the paths that were sent"
+    );
+
+    assert.equal(signed[0].url, null, "A must not be able to sign B's file inside a batch");
+    assert.equal(signed[0].error, "Not found.");
+    assert.equal(signed[2].url, null, "an unparseable path must not be signed");
+    assert.equal(signed[2].error, "Invalid upload path.");
+
+    // POSITIVE CONTROLS, same request, same endpoint: the two entries that ARE
+    // A's own file must each be signed, and the url must genuinely serve A's
+    // bytes — so neither refusal above can be explained by the batch refusing
+    // everything, which is the mutation that left the old single assertion green
+    // (docs/VACUITY-AUDIT.md, M7).
+    for (const index of [1, 3]) {
+      const url = signed[index].url;
+      assert.ok(
+        typeof url === "string" && url.includes("sig=") && url.includes("exp="),
+        `expected a signed url at index ${index}, got ${JSON.stringify(signed[index])}`
+      );
+      const fetched = await getMedia(url);
+      assert.equal(fetched.status, 200, `the signed url at index ${index} must serve the file`);
+      assert.deepEqual(fetched.body, BYTES_A, "a batch-signed url must serve the bytes that were uploaded");
+    }
+  });
+
+  test("the batch ownership query returns only the caller's ids, and de-duplicates", async () => {
+    const mine = await uploadAs(tokenA, BYTES_A, "predicate-mine.jpg");
+    const theirs = await uploadAs(tokenB, BYTES_B, "predicate-theirs.jpg");
+
+    // Straight at the predicate, below the route, because the route can only
+    // ever ask about ids it managed to parse out of a path — and the company
+    // check is the thing that must hold for ANY id reaching it.
+    const owned = await uploadIdsBelongingToActorCompany({ companyId: COMPANY_A }, [
+      mine.id,
+      theirs.id,
+      `absent-${runId}`,
+    ]);
+    assert.ok(owned.has(mine.id), "POSITIVE CONTROL: the caller's own upload must be returned");
+    assert.ok(!owned.has(theirs.id), "another tenant's upload id must not be returned");
+    assert.ok(!owned.has(`absent-${runId}`), "an id with no row must not be returned");
+    assert.equal(owned.size, 1, "exactly one of the three ids belongs to company A");
+
+    // And the same predicate in the other direction, so neither result is an
+    // artefact of company A simply seeing nothing.
+    const theirSide = await uploadIdsBelongingToActorCompany({ companyId: COMPANY_B }, [mine.id, theirs.id]);
+    assert.deepEqual([...theirSide], [theirs.id], "company B must see exactly its own upload");
+
+    // Fifty repeats of one path is the shape a photograph-heavy screen actually
+    // sends when several entries share an image; it must cost one row, not fifty.
+    const repeated = await uploadIdsBelongingToActorCompany(
+      { companyId: COMPANY_A },
+      Array.from({ length: 50 }, () => mine.id)
+    );
+    assert.deepEqual([...repeated], [mine.id]);
+
+    // Nothing asked, nothing queried — the route relies on this when every path
+    // it was given was unparseable.
+    assert.equal((await uploadIdsBelongingToActorCompany({ companyId: COMPANY_A }, [])).size, 0);
   });
 }

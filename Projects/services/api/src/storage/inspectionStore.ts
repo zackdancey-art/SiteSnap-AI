@@ -3,6 +3,7 @@ import { getPgPool } from "./postgres";
 import { Actor } from "./actor";
 import { canEditRow, canReadRow, editOwnershipSql, readVisibilitySql } from "./recordScope";
 import { withTenant } from "./tenant";
+import { liveOnly, softDeleteAssignment } from "./softDelete";
 import { computeInspectionContentHash, voidStaleSignaturesOnClient, voidStaleSignaturesInMemory } from "./signatureStore";
 
 export type InspectionTemplateRecord = {
@@ -107,6 +108,39 @@ export async function createTemplate(actor: Actor, name: string, items: string[]
   return { id: row.id, ownerEmail: row.owner_email, companyId: row.company_id, name: row.name, items: row.items_json, createdAt: row.created_at.toISOString() };
 }
 
+/**
+ * Whether `id` names an inspection template this actor's company has.
+ *
+ * Exists for one reason: `inspections.template_id` is
+ * `TEXT REFERENCES inspection_templates(id) ON DELETE SET NULL` (migration
+ * 009), and POST /api/inspections used to store whatever `templateId` the
+ * request carried. A value that is not a row in that table is a foreign-key
+ * violation — which means a 500 against Postgres and a cheerful 201 against the
+ * in-memory store, since the fallback store has no constraints. So the one
+ * environment where the bug is visible is the one nobody runs.
+ *
+ * Scoped by company rather than by author: an inspection template is the
+ * company's reusable checklist (RECORD_CLASS calls it `company-record`), so a
+ * crew member may start an inspection from a checklist a manager wrote. This
+ * answers "does the foreign key have something to point at", not "may you read
+ * it" — the read rule is readVisibilitySql in listTemplates, and narrowing this
+ * to the author would refuse the common case rather than the broken one.
+ *
+ * NOT RLS-forced, so the bare pool here matches the other inspection_templates
+ * queries in this file; see the note on findInspectionTemplateOwner.
+ */
+export async function inspectionTemplateExists(actor: Actor, id: string): Promise<boolean> {
+  if (!useDatabase()) {
+    const existing = memoryTemplates.get(id);
+    return Boolean(existing && existing.companyId === actor.companyId);
+  }
+  const result = await getPgPool().query(
+    `SELECT 1 FROM inspection_templates WHERE id = $1 AND company_id = $2 LIMIT 1`,
+    [id, actor.companyId]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
 export async function deleteTemplate(actor: Actor, id: string): Promise<boolean> {
   if (!useDatabase()) {
     const existing = memoryTemplates.get(id);
@@ -156,7 +190,7 @@ export async function listInspections(actor: Actor, siteId?: string): Promise<In
       .sort((a, b) => b.date.localeCompare(a.date));
   }
   const params: unknown[] = [actor.companyId];
-  const conditions = ["deleted_at IS NULL", `company_id = $1`];
+  const conditions = [liveOnly("inspections"), `company_id = $1`];
   const visibility = readVisibilitySql(actor, "inspection", params);
   if (visibility) conditions.push(visibility);
   if (siteId) { params.push(siteId); conditions.push(`site_id = $${params.length}`); }
@@ -174,7 +208,7 @@ export async function getInspection(actor: Actor, id: string): Promise<Inspectio
     return existing;
   }
   const params: unknown[] = [id, actor.companyId];
-  const conditions = ["id = $1", "company_id = $2", "deleted_at IS NULL"];
+  const conditions = ["id = $1", "company_id = $2", liveOnly("inspections")];
   const visibility = readVisibilitySql(actor, "inspection", params);
   if (visibility) conditions.push(visibility);
   const result = await withTenant(actor, (client) => client.query(
@@ -300,7 +334,7 @@ export async function updateInspection(actor: Actor, id: string, patch: Inspecti
          overall_outcome = COALESCE($12, overall_outcome),
          follow_up_required = COALESCE($13, follow_up_required),
          updated_at = NOW()
-       WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL${ownerClause} RETURNING *`,
+       WHERE id = $1 AND company_id = $2 AND ${liveOnly("inspections")}${ownerClause} RETURNING *`,
       params
     );
     if (result.rowCount === 0) return null;
@@ -319,11 +353,11 @@ export async function deleteInspection(actor: Actor, id: string): Promise<boolea
     return true;
   }
   const params: unknown[] = [id, actor.companyId];
-  const conditions = ["id = $1", "company_id = $2", "deleted_at IS NULL"];
+  const conditions = ["id = $1", "company_id = $2", liveOnly("inspections")];
   const ownership = editOwnershipSql(actor, "inspection", params);
   if (ownership) conditions.push(ownership);
   const result = await withTenant(actor, (client) => client.query(
-    `UPDATE inspections SET deleted_at = NOW() WHERE ${conditions.join(" AND ")}`, params
+    `UPDATE inspections SET ${softDeleteAssignment("inspections")} WHERE ${conditions.join(" AND ")}`, params
   ));
   return (result.rowCount ?? 0) > 0;
 }
@@ -349,7 +383,7 @@ export async function findInspectionOwner(
   }
   const result = await withTenant(actor, (client) =>
     client.query<{ owner_email: string; company_id: string }>(
-      `SELECT owner_email, company_id FROM inspections WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL LIMIT 1`,
+      `SELECT owner_email, company_id FROM inspections WHERE id = $1 AND company_id = $2 AND ${liveOnly("inspections")} LIMIT 1`,
       [id, actor.companyId]
     )
   );

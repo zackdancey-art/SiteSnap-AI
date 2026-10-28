@@ -101,6 +101,10 @@ if (!process.env.TEST_DATABASE_URL) {
       siteId, date: "2026-02-02", locationAddress: "Zone A", weather: "Fine", crewCount: "5",
       notes: "poured slab", photos: [], swmsRef: "SWMS-9", hazardNotes: "trench barriered", toolboxTalk: true,
     } as Parameters<typeof S.createEntry>[1]);
+    // createEntry refuses a binned or out-of-company site with null; this seed
+    // uses the live site created above, so a null here is a broken fixture
+    // rather than the guard, and must not read as a passing round trip.
+    assert.ok(entry, "createEntry refused the round-trip fixture's own live site");
     const rows = await S.listEntries(actor, siteId);
     const row = rows.find((e) => e.id === entry.id);
     assert.ok(row, "created entry not read back");
@@ -134,6 +138,69 @@ if (!process.env.TEST_DATABASE_URL) {
     assert.equal(row!.startTime, "07:00");
     assert.equal(row!.endTime, "15:30");
     assert.equal(row!.breakMinutes, 30);
+
+    // Migration 033's four columns. The create path deliberately does NOT name
+    // approval_status in its INSERT — the DEFAULT supplies it and RETURNING *
+    // reads it back, so the default lives in one place — which means this
+    // assertion is the only thing that would notice the column missing or the
+    // default being dropped. The other three must read back as NULL: a new
+    // timecard has not been reviewed, and a non-NULL approver on a pending row
+    // would be a record of a decision nobody made.
+    assert.equal(row!.approvalStatus, "pending", "a new timecard did not read back pending");
+    assert.equal(row!.approvedBy ?? null, null);
+    assert.equal(row!.approvedAt ?? null, null);
+    assert.equal(row!.approvalNote ?? null, null);
+  });
+
+  test("crew_timecards: setTimecardApproval and updateTimecard round-trip the approval columns", async () => {
+    // The write paths migration 033's columns exist for, driven against the
+    // real schema. A column named by the UPDATE but absent from the table makes
+    // the statement throw; a column present but never read back makes the
+    // assertion fail. The in-memory mirror in routes/crew.test.ts proves the
+    // state machine, and proves nothing about the SQL.
+    const tc = await C.createTimecard(actor, {
+      siteId, entryId: null, workerName: "Grace", date: "2026-02-03",
+      startTime: "08:00", endTime: "16:00", breakMinutes: 0,
+      hoursRegular: 8, hoursOvertime: 0, trade: "sparky", notes: "",
+    } as Parameters<typeof C.createTimecard>[1]);
+
+    const approved = await C.setTimecardApproval(actor, tc.id, "approved", "signed off");
+    assert.ok(approved.ok, `approval write failed: ${JSON.stringify(approved)}`);
+    assert.equal(approved.timecard.approvalStatus, "approved");
+    assert.equal(approved.timecard.approvedBy, actor.email, "approved_by is not the actor");
+    assert.ok(approved.timecard.approvedAt, "approved_at was not written");
+    assert.equal(approved.timecard.approvalNote, "signed off");
+
+    // Read back through the list query rather than the write's RETURNING, so a
+    // value that was computed but never committed fails here.
+    const afterApproval = (await C.listTimecards(actor, siteId)).find((t) => t.id === tc.id);
+    assert.equal(afterApproval?.approvalStatus, "approved", "the approval did not persist");
+    assert.equal(afterApproval?.approvalNote, "signed off");
+
+    // The lock, in the store that production uses. The route's 409 is built on
+    // this return value and nothing else.
+    const blocked = await C.updateTimecard(actor, tc.id, {
+      workerName: "Grace", date: "2026-02-03", hoursRegular: 12, hoursOvertime: 0,
+      breakMinutes: 0, trade: "sparky", notes: "",
+    });
+    assert.equal(blocked.ok, false, "an approved timecard was editable");
+    assert.equal(blocked.ok === false ? blocked.reason : null, "locked");
+
+    // Reopening clears the reviewer and restores the edit — both directions in
+    // one test, so neither half is vacuous.
+    const reopened = await C.setTimecardApproval(actor, tc.id, "pending");
+    assert.ok(reopened.ok, `reopen failed: ${JSON.stringify(reopened)}`);
+    assert.equal(reopened.timecard.approvedBy ?? null, null, "a reopened timecard still names an approver");
+    assert.equal(reopened.timecard.approvedAt ?? null, null);
+
+    const allowed = await C.updateTimecard(actor, tc.id, {
+      workerName: "Grace", date: "2026-02-03", hoursRegular: 10, hoursOvertime: 0,
+      breakMinutes: 0, trade: "sparky", notes: "corrected",
+    });
+    assert.ok(allowed.ok, `editing a reopened timecard failed: ${JSON.stringify(allowed)}`);
+    assert.equal(allowed.timecard.hoursRegular, 10);
+    assert.equal(allowed.timecard.notes, "corrected");
+    assert.equal(allowed.timecard.approvalStatus, "pending", "an edit changed the approval state");
   });
 
   test("material_deliveries: full-column createDelivery round-trips", async () => {
@@ -164,6 +231,101 @@ if (!process.env.TEST_DATABASE_URL) {
     const row = sigs.find((s) => s.id === sig.id);
     assert.ok(row, "created signature not read back");
     assert.equal(row!.status, "active");
+  });
+
+  /**
+   * ───────────────────────────────────────────────────────────────────────────
+   * getPortfolioCounts — AUDIT L98. The one thing the in-memory suite cannot
+   * prove, because the defect is the SQL `LIMIT`.
+   *
+   * `/projects/summary` and the portal dashboard both reported totals by
+   * loading a list and measuring it, through calls that pass no limit and so
+   * take `listSites`/`listEntries`/`listDiaries`' default `limit = 200`. The
+   * number came back plausible and wrong, and nothing reported it.
+   *
+   * WHY THIS LIVES HERE rather than in a new DB-gated suite: `applyMigrations`
+   * is currently copied into all eleven DB suites, and workstream 8 hoists
+   * those eleven into one shared helper. A twelfth copy would leave that hoist
+   * silently incomplete and its pinned count of eleven wrong, so this uses the
+   * migrated pool this file already stands up.
+   *
+   * WHY A FRESH COMPANY PER RUN: every other test in this file uses the fixed
+   * `rt-company` with `ON CONFLICT DO NOTHING`, so rows accumulate across runs
+   * against a persistent `TEST_DATABASE_URL`. An absolute count assertion on a
+   * shared company would pass once and then drift. These two companies are
+   * unique per run, so `201` and `3` are exact rather than lower bounds.
+   * ───────────────────────────────────────────────────────────────────────────
+   */
+  const ABOVE_THE_LIST_CAP = 201; // the default is 200; this must exceed it
+
+  const seedCompany = async (tag: string, entryCount: number) => {
+    const companyId = `pc-${tag}-${Date.now()}`;
+    const email = `${companyId}@test.local`;
+    const who: Actor = { email, role: "admin", companyId, companyRole: "owner" };
+    await pool.query(
+      `INSERT INTO auth_users (email, password_hash, full_name, phone, role, company_id, company_role)
+       VALUES ($1,'x','PC Owner',$2,'admin',$3,'owner')
+       ON CONFLICT (email) DO NOTHING`,
+      [email, "+65" + String(Date.now()).slice(-9), companyId]
+    );
+    const site = await S.createSite(who, {
+      name: `PC Site ${tag}`, address: "2 Count Rd", client: "PC Client",
+      startDate: "2026-01-01", status: "active",
+    } as Parameters<typeof S.createSite>[1]);
+    for (let i = 0; i < entryCount; i += 1) {
+      await S.createEntry(who, {
+        siteId: site.id, date: "2026-03-03", locationAddress: "Zone C", weather: "Fine",
+        crewCount: "2", notes: `count probe ${i}`, photos: [],
+      } as Parameters<typeof S.createEntry>[1]);
+    }
+    return { who, siteId: site.id, companyId };
+  };
+
+  test("getPortfolioCounts counts past the list's limit, and stays inside the company", async () => {
+    const a = await seedCompany("a", ABOVE_THE_LIST_CAP);
+    const b = await seedCompany("b", 3);
+
+    // The control that makes the assertion below mean something: the list
+    // really is capped, so a count that agrees with the list would be the bug.
+    // If someone "fixes" L98 by raising the limit instead of counting in SQL,
+    // this line fails and says so.
+    const listed = await S.listEntries(a.who);
+    assert.equal(listed.length, 200, "listEntries' default cap is no longer 200 — L98's premise changed");
+
+    const countsA = await S.getPortfolioCounts(a.who);
+    assert.equal(
+      countsA.entries, ABOVE_THE_LIST_CAP,
+      `portfolio count ${countsA.entries} — a count that stops at the list's limit is the L98 defect`
+    );
+
+    // Tenant isolation, both directions, same endpoint. A negative alone would
+    // pass equally well against a function that counts nothing at all.
+    const countsB = await S.getPortfolioCounts(b.who);
+    assert.equal(countsB.entries, 3, "B must count its OWN rows (positive control)");
+    assert.notEqual(countsB.entries, ABOVE_THE_LIST_CAP + 3, "B must not count A's rows");
+    assert.equal(countsA.entries, ABOVE_THE_LIST_CAP, "A must not count B's rows");
+
+    // One site each, created active, so the status breakdown is checkable
+    // against a known shape rather than against itself.
+    assert.equal(countsA.sites, 1);
+    assert.equal(countsA.activeSites, 1);
+    assert.equal(countsA.completedSites, 0);
+    assert.equal(countsA.onHoldSites, 0);
+  });
+
+  test("getPortfolioCounts' diary breakdown splits approved from draft", async () => {
+    const c = await seedCompany("c", 0);
+    for (const status of ["approved", "approved", "draft"] as const) {
+      await S.createDiary(c.who, {
+        siteId: c.siteId, status, summary: "s", reportPeriod: "daily", fullReport: "f",
+        safetyChecklist: [], sections: [],
+      } as Parameters<typeof S.createDiary>[1]);
+    }
+    const counts = await S.getPortfolioCounts(c.who);
+    assert.equal(counts.diaries, 3);
+    assert.equal(counts.approvedDiaries, 2);
+    assert.equal(counts.draftDiaries, 1, "draft is derived by subtraction — DiaryStatus is a closed two-value union");
+    assert.equal(counts.entries, 0, "a company with no entries counts zero, not the other companies' rows");
   });
 
   test("auth_users.settings: personal settings round-trip + partial JSONB merge (migration 028)", async () => {

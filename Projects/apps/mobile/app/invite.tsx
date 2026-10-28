@@ -4,7 +4,7 @@ import { useLocalSearchParams, router } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useData } from "@/lib/data-context";
-import { useAuth } from "@/lib/auth-context";
+import { useAuth, SIGN_OUT_SCOPE_FACT } from "@/lib/auth-context";
 import { describeInviteRefusal } from "@/lib/invite-refusal";
 import Colors from "@/constants/colors";
 
@@ -125,6 +125,17 @@ export default function InviteScreen() {
               <Text style={styles.buttonText}>Sign out and accept</Text>
             </Pressable>
           ) : null}
+          {/*
+            Stated rather than asked. This is a dead-end refusal screen and the
+            button is the way out of it, so a confirmation dialog would put a
+            second obstacle in a recovery path; but the scope is wider than the
+            label implies, and the person signing out of the wrong account may
+            well have this account open on a tablet in the shed.
+            HALF-BUILT-MECHANISMS F5.
+          */}
+          {state.invitedEmail ? (
+            <Text style={styles.scopeNote}>{SIGN_OUT_SCOPE_FACT}</Text>
+          ) : null}
           <Pressable
             style={({ pressed }) => [styles.button, styles.buttonSecondary, pressed && { opacity: 0.85 }]}
             onPress={() => router.replace("/(tabs)/")}
@@ -162,6 +173,15 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_700Bold",
     color: Colors.text,
     textAlign: "center",
+  },
+  scopeNote: {
+    fontSize: 13,
+    fontFamily: "Inter_400Regular",
+    color: Colors.textSecondary,
+    textAlign: "center",
+    lineHeight: 18,
+    paddingHorizontal: 8,
+    marginTop: -4,
   },
   subtitle: {
     fontSize: 15,
