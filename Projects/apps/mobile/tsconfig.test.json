@@ -77,6 +77,10 @@
     "lib/whs-checklists.ts",
     "lib/whs-checklists.test.ts",
     "lib/report-window.ts",
-    "lib/report-window.test.ts"
+    "lib/report-window.test.ts",
+    "lib/native-permission-audit.ts",
+    "lib/native-permission-audit.test.ts",
+    "lib/consent-summary.ts",
+    "lib/consent-summary.test.ts"
   ]
 }
