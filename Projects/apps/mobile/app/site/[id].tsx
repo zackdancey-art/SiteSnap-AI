@@ -16,11 +16,19 @@ import { router, useLocalSearchParams } from "expo-router";
 import { useData } from "@/lib/data-context";
 import { useAuth } from "@/lib/auth-context";
 import Colors from "@/constants/colors";
-import { canDeleteSite, canInvite, canManageSiteMembers, describeFailure } from "@/lib/permissions";
+import {
+  canDeleteSite,
+  canFileSiteUnderClient,
+  canInvite,
+  canManageSiteMembers,
+  describeFailure,
+} from "@/lib/permissions";
+import { ClientPicker } from "@/components/ClientPicker";
 import { DailyEntry, SiteMember } from "@/lib/types";
 import { authedFetch } from "@/lib/authed-fetch";
 import { isSessionExpired } from "@/lib/session";
 import { BackButton } from "@/components/BackButton";
+import { EntrySyncBadge } from "@/components/EntrySyncBadge";
 
 function EntryCard({ entry }: { entry: DailyEntry }) {
   const dateObj = new Date(entry.date + "T00:00:00");
@@ -61,6 +69,9 @@ function EntryCard({ entry }: { entry: DailyEntry }) {
           )}
         </View>
         <Text style={styles.entryNotes} numberOfLines={2}>{entry.notes}</Text>
+        {/* AUDIT L37: whether THIS entry reached the server. Renders nothing
+            when it has, which is almost always. */}
+        <EntrySyncBadge entryId={entry.id} />
         {entry.photos.length > 0 && (
           <View style={styles.photoCount}>
             <Ionicons name="camera-outline" size={13} color={Colors.textTertiary} />
@@ -93,7 +104,8 @@ const PROGRESS_STEPS = [0, 25, 50, 75, 100];
 export default function SiteDetailScreen() {
   const insets = useSafeAreaInsets();
   const { id } = useLocalSearchParams<{ id?: string }>();
-  const { getSite, getSiteEntries, deleteSite, getSiteMembers, removeSiteMember } = useData();
+  const { getSite, getSiteEntries, deleteSite, getSiteMembers, removeSiteMember, clients, fileSite } =
+    useData();
   const { user } = useAuth();
 
   const site = getSite(id);
@@ -102,6 +114,8 @@ export default function SiteDetailScreen() {
   const [search, setSearch] = useState("");
   const [members, setMembers] = useState<SiteMember[]>([]);
   const [membersLoaded, setMembersLoaded] = useState(false);
+  const [showClientPicker, setShowClientPicker] = useState(false);
+  const [filing, setFiling] = useState(false);
 
   const entries = useMemo(() => {
     if (!search.trim()) return allEntries;
@@ -120,6 +134,41 @@ export default function SiteDetailScreen() {
   const canManage = canInvite(user?.companyRole);
   const canRemoveSite = canDeleteSite(user?.companyRole);
   const canRemoveMembers = canManageSiteMembers(user?.companyRole);
+  /**
+   * Its own predicate, not reused from `canManage` above.
+   *
+   * They happen to agree today — both are manager-and-above — but they answer
+   * to different routes on different routers: canInvite to the invitations
+   * router, this to PATCH /projects/sites/:id. Collapsing them is how the
+   * delete control above came to consult no permission at all.
+   */
+  const canFile = canFileSiteUnderClient(user?.companyRole);
+
+  /**
+   * Filing requires connectivity, like the other three client calls, and
+   * unlike every field-capture action on this screen.
+   *
+   * The offline queue's op types are a closed set of five (lib/offline-queue.ts)
+   * and filing is office work rather than something done standing on the site,
+   * so a failure here surfaces as a refusal rather than a pending op. Stated
+   * in the PR body as a decision, not an omission.
+   */
+  const handleFile = async (nextClientId: string | null) => {
+    setShowClientPicker(false);
+    if (!site || nextClientId === (site.clientId ?? null)) return;
+    setFiling(true);
+    try {
+      await fileSite(site.id, nextClientId);
+    } catch (err) {
+      if (isSessionExpired(err)) return;
+      Alert.alert(
+        "Could not change the client",
+        describeFailure(err, "Could not change the client for this site.")
+      );
+    } finally {
+      setFiling(false);
+    }
+  };
 
   useEffect(() => {
     if (!id) return;
@@ -212,10 +261,27 @@ export default function SiteDetailScreen() {
       void doDelete();
       return;
     }
-    Alert.alert("Delete Site", `Delete "${site.name}" and all its entries?`, [
-      { text: "Cancel", style: "cancel" },
-      { text: "Delete", style: "destructive", onPress: () => void doDelete() },
-    ]);
+    // The old copy read `Delete "X" and all its entries?` and was true when it
+    // was written: the route hard-deleted, and nine tables cascade off
+    // project_sites, so the entries really did go. Phase 6 bins the site
+    // instead, and leaving that sentence up would be the AUDIT L73 habit in its
+    // other direction -- telling somebody their records were destroyed when
+    // they were not, which is how a recoverable site never gets recovered.
+    //
+    // It states no retention period. The number lives in one place
+    // (BIN_RETENTION_DAYS, services/api/src/storage/softDelete.ts) and this
+    // dialogue runs BEFORE the request that would report it, so a figure here
+    // could only be a second copy that drifts. The bin screen shows the
+    // countdown, from the server.
+    Alert.alert(
+      "Delete Site",
+      `Move "${site.name}" to the bin? Its diary entries and records are kept, and ` +
+        `you can restore the site from Settings › Deleted Sites.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Delete", style: "destructive", onPress: () => void doDelete() },
+      ]
+    );
   };
 
   const statusColor =
@@ -252,10 +318,42 @@ export default function SiteDetailScreen() {
 
         <Text style={styles.siteName}>{site.name}</Text>
         <View style={styles.headerDetails}>
-          <View style={styles.headerDetail}>
-            <Ionicons name="person-outline" size={14} color="rgba(255,255,255,0.6)" />
-            <Text style={styles.headerDetailText}>{site.client}</Text>
-          </View>
+          {/* The client row IS the filing control for a manager or owner, and
+              plain text for everyone else — not a disabled version of the
+              control, because a greyed-out row invites a tap and then explains
+              nothing. The crew member reads who the job is for; they do not
+              get a thing that looks tappable and refuses.
+
+              What is shown is the canonical client NAME when the site is
+              filed, falling back to its own `client` label when it is not.
+              Those differ for any site filed before its client was renamed:
+              nothing backfills the label, and the name is the current truth. */}
+          {canFile ? (
+            <Pressable
+              style={({ pressed }) => [styles.headerDetail, pressed && { opacity: 0.7 }]}
+              onPress={() => setShowClientPicker(true)}
+              disabled={filing}
+              hitSlop={8}
+              testID="site-client-filing"
+            >
+              <Ionicons name="person-outline" size={14} color="rgba(255,255,255,0.6)" />
+              <Text style={styles.headerDetailText}>
+                {filing
+                  ? "Saving…"
+                  : (site.clientId ? clients.find((c) => c.id === site.clientId)?.name : null) ??
+                    site.client}
+              </Text>
+              <Ionicons name="chevron-down" size={13} color="rgba(255,255,255,0.6)" />
+            </Pressable>
+          ) : (
+            <View style={styles.headerDetail}>
+              <Ionicons name="person-outline" size={14} color="rgba(255,255,255,0.6)" />
+              <Text style={styles.headerDetailText}>
+                {(site.clientId ? clients.find((c) => c.id === site.clientId)?.name : null) ??
+                  site.client}
+              </Text>
+            </View>
+          )}
           <View style={styles.headerDetail}>
             <Ionicons name="location-outline" size={14} color="rgba(255,255,255,0.6)" />
             <Text style={styles.headerDetailText}>{site.address}</Text>
@@ -428,6 +526,21 @@ export default function SiteDetailScreen() {
           </View>
         }
       />
+
+      {canFile && (
+        <ClientPicker
+          visible={showClientPicker}
+          clients={clients}
+          selectedClientId={site.clientId ?? null}
+          onSelect={handleFile}
+          onClose={() => setShowClientPicker(false)}
+          canManage={canFile}
+          onManage={() => {
+            setShowClientPicker(false);
+            router.push("/clients");
+          }}
+        />
+      )}
     </View>
   );
 }

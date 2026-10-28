@@ -2,8 +2,72 @@ import type { DiaryGeneration } from "./provenance";
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 export type User = { email: string; name: string; role: string; companyId?: string; companyRole?: string };
-export type Site = { id: string; name: string; client: string; address: string; status: string; startDate?: string };
-export type EntryPhoto = { uri: string; caption?: string };
+/**
+ * `client` is free text and `clientId` is the filing; both are real and they
+ * are not the same thing. Nothing backfills `client` on a pre-032 row, filing
+ * overwrites it with the canonical client name, and unfiling keeps it — so a
+ * site can carry a label whose client no longer exists, or a stale label for a
+ * client since renamed. The clients list is the current truth; the label is
+ * what the site itself remembers. `undefined` and `null` both mean unfiled.
+ */
+export type Site = {
+  id: string;
+  name: string;
+  client: string;
+  clientId?: string | null;
+  address: string;
+  status: string;
+  startDate?: string;
+};
+/**
+ * One photograph on a diary entry, as the API already sends it.
+ *
+ * NO endpoint changed to provide any of this. `project_entries.photos_json` is
+ * JSONB and the store treats it as opaque — `photos: Array<Record<string,
+ * unknown>>` at `services/api/src/storage/projectsStore.ts:49`, written with
+ * `JSON.stringify(entry.photos)` at `:533` and read straight back out as
+ * `photos: row.photos_json` at `:319`. There is no validation, no allowlist and
+ * no stripping anywhere on that path, so every field the mobile client writes
+ * onto a photograph arrives here intact. This type was simply narrower than the
+ * payload, so the fields arrived and were discarded unread.
+ *
+ * Every field below is optional, and that is a statement about the data rather
+ * than about the server: the writer is a client, older rows predate most of
+ * these keys, and an entry queued offline can reach the server before some of
+ * them are known. Absence is therefore a real state that the rules in
+ * `photo-capture-time.ts` and `photo-provenance.ts` are built to report
+ * honestly, not a gap to fill in with a plausible stand-in.
+ *
+ * Fields mobile also stores and this deliberately omits: `base64`, `mimeType`,
+ * `storagePath`, `storageKey` and `annotationVector`. The portal has no use for
+ * any of them — it signs by `uri` and does not re-render strokes — and a type
+ * that claims a field nothing reads is an invitation to render it.
+ */
+export type EntryPhoto = {
+  uri: string;
+  caption?: string;
+  /**
+   * The photograph's own identity, which `derivedFromId` points at. Optional
+   * because a row written before ids were assigned has none; a viewer that
+   * needs an identity falls back to `uri`, which is already this surface's key
+   * for a photograph.
+   */
+  id?: string;
+  /** When the RECORD was created. Not when the photograph was taken. */
+  timestamp?: string;
+  /** When the photograph was taken, if that was ever established. */
+  capturedAt?: string;
+  /** How `capturedAt` was established. Without this, `capturedAt` is not a capture time. */
+  captureTimeSource?: "camera" | "exif" | "unknown";
+  latitude?: number;
+  longitude?: number;
+  /** `annotated` means this is a derived copy; the original is still stored separately. */
+  kind?: "original" | "annotated";
+  /** On an `annotated` copy, the `id` of the original it was drawn over. */
+  derivedFromId?: string;
+  /** On an `annotated` copy, the account that drew it. Self-asserted by the client. */
+  annotatedBy?: string;
+};
 /**
  * A diary entry as `/api/projects/bootstrap` already sends it.
  *
@@ -146,7 +210,23 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       window.location.href = "/";
       throw new Error("Unauthorized");
     }
-    throw new Error(parsed.error || text || `Request failed (${res.status})`);
+    /**
+     * The STATUS and the code ride out on the error, not just the prose.
+     *
+     * This was a bare `new Error(message)`, which left a caller that needs to
+     * tell one refusal from another with nothing to branch on but the wording —
+     * and app/invite.tsx did exactly that, matching on tokens no response body
+     * ever contained, so it picked its message by accident. The clients page
+     * needs the 409 specifically (a duplicate client name), and asking for it
+     * by status is the only way that stays correct when the wording changes.
+     */
+    const err = new Error(parsed.error || text || `Request failed (${res.status})`) as Error & {
+      status?: number;
+      code?: string;
+    };
+    err.status = res.status;
+    if (parsed.code) err.code = parsed.code;
+    throw err;
   }
   return res.json() as Promise<T>;
 }
@@ -190,6 +270,15 @@ async function publicRequest<T>(method: string, path: string, body?: unknown): P
  */
 export async function registerStart(payload: {
   email: string; phone: string; fullName: string; password: string;
+  // Terms and privacy consent. REQUIRED, not optional, and the reason is the
+  // same one authStore.upsertPendingRegistration gives for its own required
+  // parameter: an optional field lets a future call site drop somebody's
+  // consent by forgetting an argument, and the failure would be a missing legal
+  // record rather than a type error. The API's own check treats a body with
+  // SOME of these fields as a 400 (utils/signupConsent.ts), so a partial
+  // payload cannot get through here either.
+  acceptedTerms: true; acceptedPrivacy: true;
+  termsVersion: string; privacyVersion: string;
 }): Promise<{ devCodes?: { emailCode: string } }> {
   return publicRequest("POST", "/api/auth/register", payload);
 }
@@ -277,15 +366,46 @@ export async function resetPassword(token: string, newPassword: string): Promise
   await request<{ ok: boolean }>("POST", "/api/auth/reset-password", { token, newPassword });
 }
 
+/**
+ * What a sign-out now does, in one place so three call sites cannot disagree.
+ *
+ * HALF-BUILT-MECHANISMS F5: `/auth/logout` used to clear the cookie and revoke
+ * nothing. It now increments the account's token generation, which is the only
+ * revocation mechanism this product has and is per ACCOUNT rather than per
+ * session — so signing out here also signs out the phone. That is wider than
+ * anybody would assume from a button labelled "Sign Out", so it is said out
+ * loud before it happens rather than discovered on a site.
+ */
+export const SIGN_OUT_SCOPE_NOTICE =
+  "This signs you out on every device using this account. Continue?";
+
 export async function logout() {
   try { await request<{ ok: boolean }>("POST", "/api/auth/logout"); } catch { /* best-effort */ }
   clearLocalSession();
 }
 
+/**
+ * A crew timecard, with the four approval columns the API has sent since
+ * migration 033.
+ *
+ * `approvalStatus` is typed as the string it arrives as and NOT as
+ * `TimecardApprovalStatus`. The server is free to learn a fourth state before
+ * this portal is redeployed, and typing the field as the union would let every
+ * reader assume a value the wire cannot promise. `normaliseApprovalStatus` in
+ * `lib/timecard-approval.ts` is the only thing that should read it.
+ *
+ * All four are optional because the list endpoint is also served by an older
+ * API during a deploy: a card with no approval fields is a pending card, which
+ * is what the normaliser answers for `undefined`.
+ */
 export type Timecard = {
   id: string; workerName: string; date: string; trade: string;
   startTime?: string; endTime?: string; breakMinutes?: number;
   hoursRegular: number; hoursOvertime: number; notes: string;
+  approvalStatus?: string | null;
+  approvedBy?: string | null;
+  approvedAt?: string | null;
+  approvalNote?: string | null;
 };
 export type Incident = {
   id: string; siteId: string; date: string; severity: string;
@@ -306,6 +426,45 @@ export async function fetchTimecards(siteId: string): Promise<Timecard[]> {
   return data.timecards;
 }
 
+/**
+ * Approve a timecard, send it back for correction, or reopen an approved one.
+ *
+ * THE NOTE IS SENT FROM HERE AND NOT FROM MOBILE, ON PURPOSE
+ *
+ * The API takes an optional `note` and the mobile screen never sends one — a
+ * confirmation dialog on a phone has nowhere to type a reason, and it tells the
+ * person so rather than pretending. The portal has a text field, so a send-back
+ * from here carries why. That is the asymmetry working as intended: the
+ * correction reason is the one thing a worker needs to act on, and it is written
+ * where somebody has a keyboard.
+ *
+ * An EMPTY note is omitted rather than sent as "". The store treats a supplied
+ * note as an overwrite and an absent one as "keep what is stored", so sending
+ * "" when the manager typed nothing would erase the reason a card was sent back
+ * at the moment it is approved — destroying the only record of the correction.
+ * That is `setTimecardApproval`'s documented behaviour in crewStore.ts, not an
+ * inference, and this is the call that depends on it.
+ *
+ * `status` is sent as a plain string: the union lives in
+ * `lib/timecard-approval.ts`, which is a UI module, and `lib/api.ts` does not
+ * import from the UI layer anywhere else. The route validates it with a Zod
+ * enum and 400s anything else, so a typo here fails loudly rather than writing
+ * a state nothing recognises.
+ */
+export async function setTimecardApproval(
+  timecardId: string,
+  status: string,
+  note?: string
+): Promise<Timecard> {
+  const trimmed = note?.trim();
+  const data = await request<{ timecard: Timecard }>(
+    "POST",
+    `/api/crew/timecards/${timecardId}/approval`,
+    trimmed ? { status, note: trimmed } : { status }
+  );
+  return data.timecard;
+}
+
 export async function fetchIncidents(siteId: string): Promise<Incident[]> {
   const data = await request<{ incidents: Incident[] }>("GET", `/api/incidents?siteId=${siteId}`);
   return data.incidents;
@@ -324,6 +483,44 @@ export async function fetchDeliveries(siteId: string): Promise<Delivery[]> {
 export async function approveDiary(diaryId: string): Promise<Diary> {
   const data = await request<{ diary: Diary }>("PATCH", `/api/projects/diaries/${diaryId}`, { status: "approved" });
   return data.diary;
+}
+
+/**
+ * Replace the photographs array on one diary entry.
+ *
+ * This is the save path for a portal annotation, and it uses an endpoint that
+ * already existed — `PATCH /api/projects/entries/:id`, defined at
+ * services/api/src/routes/projects.ts:243. NO ROUTE WAS ADDED OR WIDENED for
+ * annotation, and in particular the `Cross-Origin-Resource-Policy: same-site`
+ * scope on the media route (routes/uploads.ts:160-215) is untouched: the portal
+ * draws a vector overlay in the DOM and stores coordinates, so it never needs to
+ * read the image's pixels back and never needs a CORS-enabled image load.
+ *
+ * Why the whole array rather than one photograph: `photos` on that route is
+ * `z.array(z.record(z.unknown()))` (projects.ts:56-73) and the store writes it
+ * with `JSON.stringify` as opaque JSONB, so there is no per-photograph
+ * addressing to use. The caller therefore sends the complete set, which is
+ * exactly what `buildAnnotationDerivative` returns — original included.
+ *
+ * THE RACE THIS CANNOT WIN, stated rather than hidden: a whole-array write is
+ * last-write-wins. If someone annotates on mobile while someone annotates the
+ * same entry on the portal, the second save drops the first annotation. The
+ * endpoint offers no version or ETag to send, so there is nothing to build on
+ * here; the honest mitigation is that the caller re-reads the entry immediately
+ * after saving, so the losing client at least sees the true stored set rather
+ * than its own optimistic copy. A real fix is a server-side append, and it is
+ * flagged rather than improvised.
+ */
+export async function updateEntryPhotos(
+  entryId: string,
+  photos: EntryPhoto[]
+): Promise<Entry> {
+  const data = await request<{ entry: Entry }>(
+    "PATCH",
+    `/api/projects/entries/${entryId}`,
+    { photos }
+  );
+  return data.entry;
 }
 
 /**
@@ -366,12 +563,72 @@ export async function approveDiary(diaryId: string): Promise<Diary> {
  * `generation` rides along in the response so the preview and the exports can
  * mark the diary honestly even before it is persisted.
  */
-export async function generateDiary(payload: { siteId: string; period: string }): Promise<Diary> {
-  const data = await request<{ success: boolean; diary: Diary; generation?: DiaryGeneration | null }>("POST", `/api/generate-diary`, {
+/**
+ * The dates a generated report covers, and what the server left out of it.
+ *
+ * Returned on every response since the API half of AUDIT L92, and read here so
+ * the portal can state the window instead of a period word. `mode` says whether
+ * the server used the range it was given or anchored on the latest entry it
+ * could see — worth showing, because an anchored window is dates the user did
+ * not choose.
+ */
+export type ReportWindowResult = {
+  from: string;
+  to: string;
+  period?: string;
+  mode?: "explicit" | "anchored";
+  anchoredOn?: string;
+};
+
+export type GeneratedDiaryResult = {
+  diary: Diary;
+  reportWindow: ReportWindowResult | null;
+  /** Entries the server could not place in any window, for having no usable date. */
+  undatedEntries: number;
+  /** Entries whose author could not be named within the caller's company (L96). */
+  unattributedEntries: number;
+  /** True when the report hit the server's entry ceiling and is not the whole window. */
+  truncatedAtCeiling: boolean;
+};
+
+/**
+ * `from` and `to` are optional and must be sent TOGETHER or not at all — the
+ * API refuses a half-range rather than guessing which of the two readings of a
+ * lone `from` was meant, and the portal does not second-guess that.
+ *
+ * Omitting both is the pre-L92 behaviour: the server anchors the window on the
+ * latest entry it can see. That is still what this portal sends when the user
+ * has not chosen dates, so the API shipping ahead of this bundle changes
+ * nothing for anyone.
+ */
+export async function generateDiary(payload: {
+  siteId: string;
+  period: string;
+  from?: string;
+  to?: string;
+}): Promise<GeneratedDiaryResult> {
+  const range = payload.from && payload.to ? { from: payload.from, to: payload.to } : {};
+  const data = await request<{
+    success: boolean;
+    diary: Diary;
+    generation?: DiaryGeneration | null;
+    reportWindow?: ReportWindowResult;
+    undatedEntries?: number;
+    unattributedEntries?: number;
+    truncatedAtCeiling?: boolean;
+  }>("POST", `/api/generate-diary`, {
     siteId: payload.siteId,
     period: payload.period,
+    ...range,
   });
-  return { ...data.diary, generation: data.generation ?? null };
+  return {
+    diary: { ...data.diary, generation: data.generation ?? null },
+    reportWindow: data.reportWindow ?? null,
+    undatedEntries: typeof data.undatedEntries === "number" ? data.undatedEntries : 0,
+    unattributedEntries:
+      typeof data.unattributedEntries === "number" ? data.unattributedEntries : 0,
+    truncatedAtCeiling: data.truncatedAtCeiling === true,
+  };
 }
 
 /**
@@ -473,4 +730,92 @@ export async function updateMemberRole(email: string, companyRole: string): Prom
 
 export async function removeCompanyMember(email: string): Promise<void> {
   await request<unknown>("DELETE", `/api/company/members/${encodeURIComponent(email)}`);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+//  CLIENTS. FILING, NOT AN ACCESS BOUNDARY.
+// ───────────────────────────────────────────────────────────────────────────
+//
+// A client groups sites for filing and reporting. It is deliberately NOT a
+// permission scope: recordScope.ts on the API has no `client` record kind, and
+// nothing anywhere decides who may read a site by looking at its client. Two
+// levels only — clients hold sites, sites hold everything else.
+//
+// GET is behind identity rather than rank, because the grouped sites list takes
+// its headings from it. The three writes are requireAtLeast("manager").
+
+export type Client = {
+  id: string;
+  name: string;
+  contactName: string;
+  contactEmail: string;
+  contactPhone: string;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+  /** Sites currently filed under this client. Server-computed; never sent. */
+  siteCount: number;
+};
+
+/** The five writable fields. Spelled out rather than derived from `Client`, so
+ *  `siteCount` cannot be written from the browser even by accident. */
+export type ClientInput = {
+  name: string;
+  contactName: string;
+  contactEmail: string;
+  contactPhone: string;
+  notes: string;
+};
+
+export async function listClients(): Promise<Client[]> {
+  const data = await request<{ clients: Client[] }>("GET", "/api/clients");
+  return data.clients;
+}
+
+export async function createClient(input: ClientInput): Promise<Client> {
+  const data = await request<{ client: Client }>("POST", "/api/clients", input);
+  return data.client;
+}
+
+/**
+ * PATCH does NOT return siteCount — the route answers `{ client }` with the
+ * record only. The caller carries the previous count over; an `undefined`
+ * there is what would make the delete confirmation misstate how many sites
+ * are about to be unfiled.
+ */
+export async function updateClient(
+  id: string,
+  patch: Partial<ClientInput>
+): Promise<Omit<Client, "siteCount">> {
+  const data = await request<{ client: Omit<Client, "siteCount"> }>(
+    "PATCH",
+    `/api/clients/${id}`,
+    patch
+  );
+  return data.client;
+}
+
+/**
+ * Deleting a client UNFILES its sites and deletes none of them. Returns how
+ * many were unfiled, which is the server's count rather than the caller's
+ * prediction — they disagree whenever another session filed a site in between.
+ */
+export async function deleteClient(id: string): Promise<number> {
+  const data = await request<{ ok: boolean; unfiledSites: number }>(
+    "DELETE",
+    `/api/clients/${id}`
+  );
+  return data.unfiledSites;
+}
+
+/** File a site under a client, or pass null to unfile it. Returns the site as
+ *  the server now has it, because filing rewrites its `client` label. */
+export async function fileSiteUnderClient(
+  siteId: string,
+  clientId: string | null
+): Promise<Site> {
+  const data = await request<{ site: Site }>("PATCH", `/api/projects/sites/${siteId}`, {
+    clientId,
+  });
+  return data.site;
 }

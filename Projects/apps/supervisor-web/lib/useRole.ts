@@ -129,6 +129,102 @@ export function canApproveDiary(companyRole: string | null | undefined): boolean
 }
 
 /**
+ * Whether this role may add, rename or delete a client.
+ *
+ * Manager and owner, mirroring `requireAtLeast("manager")` on the three write
+ * routes. Written as the allowed ranks rather than as "not crew" because a
+ * VIEWER is refused here too — unlike canSeeSupervisorDashboard and
+ * canReadCompanyProfile above, whose routes are viewer+.
+ *
+ * READING THE CLIENT LIST IS NOT GATED, AND MUST NOT BE
+ *
+ * There is deliberately no `canReadClients` beside this. GET /clients is
+ * behind identity rather than rank because the sites list takes its group
+ * headings from it, so a crew member who could not read it would see a list
+ * of sites filed under nothing. The clients page is theirs to read; the three
+ * controls on it are not.
+ *
+ * AND IT IS NOT AN ACCESS BOUNDARY EITHER
+ *
+ * A client groups sites for filing. Nothing decides who may read a site by
+ * looking at its client — recordScope.ts on the API has no `client` record
+ * kind, on purpose. So this predicate is about who may edit the filing
+ * cabinet, never about who can see what is in it.
+ *
+ * AN ABSENT ROLE IS REFUSED HERE, UNLIKE THE THREE PREDICATES ABOVE
+ *
+ * This file already holds both conventions, and the difference is not an
+ * oversight in either place. canSeeSupervisorDashboard, canReadCompanyProfile
+ * and canApproveDiary read the RAW value and let an absent role through, so a
+ * manager whose saved session predates the field does not silently lose a
+ * screen. `isManager` and `isAtLeast` in useRole() below read the DEFAULTED
+ * value and refuse it.
+ *
+ * These follow `isManager`, because withholding a button and withholding a
+ * screen are not the same mistake. The failure when this is wrong is that a
+ * manager with an old session sees the clients list without the three write
+ * controls — annoying, visible, and fixed by signing out and in. The failure
+ * in the other direction is a button that 403s on a page whose other buttons
+ * work, which reads as the product being broken.
+ */
+const CLIENT_MANAGERS = ["manager", "owner"];
+
+export function canManageClients(companyRole: string | null | undefined): boolean {
+  return CLIENT_MANAGERS.includes(companyRole ?? "");
+}
+
+/**
+ * Whether this role may file a site under a client, or unfile it.
+ *
+ * Its own predicate rather than a second caller of canManageClients, for the
+ * same reason the mobile half keeps them apart: they agree today but answer to
+ * different routes on different routers — this one to PATCH
+ * /projects/sites/:id, the other to the clients router. Collapsing two
+ * permissions that happen to match is how one of them later moves and the
+ * other silently follows it.
+ */
+export function canFileSiteUnderClient(companyRole: string | null | undefined): boolean {
+  return CLIENT_MANAGERS.includes(companyRole ?? "");
+}
+
+/**
+ * Whether this role may approve, send back, or reopen a crew timecard.
+ *
+ * The same two refused roles as diary approval, and for a stronger reason than
+ * tidiness: `POST /crew/timecards/:id/approval` carries `requireAtLeast(
+ * "manager")`, so crew (rank 0) and viewer (rank 1) are both refused at the API.
+ * Written as the refused roles by name rather than as a rank comparison, like
+ * the rest of this file, so an unrecognised role is not silently demoted and the
+ * API stays the authority on it.
+ *
+ * WHY THE PORTAL ASKS AT ALL, WHEN THE API ALREADY REFUSES
+ *
+ * Because of what a crew member would otherwise see. The approval controls are
+ * the only thing on the timesheets tab that writes, and a crew member's own list
+ * is narrowed to their own cards by the API, so offering them Approve would be
+ * offering them self-approval of their own hours — the exact defect the rank gate
+ * on that route exists to prevent — and then refusing it with a 403. Not drawing
+ * the button says the true thing first.
+ *
+ * It is NOT the only thing standing between a crew member and that write. The
+ * route refuses them independently, which is the point of doing both halves
+ * (CLAUDE.md §3). This half decides what is drawn; that half decides what
+ * happens.
+ *
+ * Mobile's `canApproveTimesheet` (apps/mobile/lib/permissions.ts) is written as
+ * manager+ rather than as a refused list, and answers the same for all four
+ * known roles. The two differ only on a role neither recognises — mobile refuses
+ * it, this allows it — and that is the same pre-existing asymmetry already
+ * recorded on canSeeSupervisorDashboard above, kept rather than unified in
+ * passing.
+ */
+const REFUSED_TIMESHEET_APPROVAL = ["crew", "viewer"];
+
+export function canApproveTimesheet(companyRole: string | null | undefined): boolean {
+  return !REFUSED_TIMESHEET_APPROVAL.includes(companyRole ?? "");
+}
+
+/**
  * Where a signed-in person lands when they asked for no particular screen.
  *
  * The sign-in page sent everybody to /dashboard. For crew that is now the
@@ -164,6 +260,9 @@ export function useRole() {
     isUnknownRole: isUnknownRole(user?.companyRole),
     canReadCompanyProfile: canReadCompanyProfile(user?.companyRole),
     canApproveDiary: canApproveDiary(user?.companyRole),
+    canManageClients: canManageClients(user?.companyRole),
+    canFileSiteUnderClient: canFileSiteUnderClient(user?.companyRole),
+    canApproveTimesheet: canApproveTimesheet(user?.companyRole),
     isCrew: isCrew(user?.companyRole),
   };
 }

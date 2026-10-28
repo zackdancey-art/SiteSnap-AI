@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import path from "path";
 import { getPgPool } from "./postgres";
 import { FileBackedStore } from "./fileStore";
@@ -36,7 +37,55 @@ export type PendingRegistration = {
   smsSentAt: string | null;
   expiresAt: string;
   attempts: number;
+  /**
+   * Consent given at stage 1, carried here until the account exists at stage 3.
+   * All three NULL together, and NULL means "this signup predates the consent
+   * control" rather than "refused" -- a refusal cannot reach the API, because
+   * both clients disable the button. Migration 035 says why that is nullable.
+   */
+  termsVersion: string | null;
+  privacyVersion: string | null;
+  consentAcceptedAt: string | null;
 };
+
+/** One acceptance of one legal document by one person. Append-only. */
+export type ConsentRecord = {
+  id: string;
+  userEmail: string;
+  document: ConsentDocument;
+  /** The "Last updated: ..." line of the text that was actually rendered. */
+  version: string;
+  acceptedAt: string;
+  recordedAt: string;
+  source: string;
+};
+
+/**
+ * The documents consent is recorded for.
+ *
+ * Mirrored by the CHECK constraint in migration 035, deliberately as a
+ * `const` array rather than a bare union so the route can validate an incoming
+ * value against the same list the database enforces instead of a second copy
+ * of the vocabulary written out by hand.
+ */
+export const CONSENT_DOCUMENTS = ["terms", "privacy"] as const;
+
+/**
+ * The consent ledger's table name, in one place.
+ *
+ * Interpolated into this module's SQL and imported by the DB-gated test, so the
+ * test cannot assert against a table the store has stopped writing to. The
+ * standing rule it follows -- derive table and column names rather than
+ * hand-writing them in a predicate -- was bought with a `deleted_at` literal
+ * on a table that had no such column, which meant site progress had never once
+ * worked in production and every query returned cleanly.
+ *
+ * Interpolation is safe here in the only sense that matters: this is a module
+ * constant, not a value from a request. Every value in these statements is a
+ * bound parameter.
+ */
+export const USER_CONSENTS_TABLE = "user_consents";
+export type ConsentDocument = (typeof CONSENT_DOCUMENTS)[number];
 
 export type PasswordResetRecord = {
   token: string;
@@ -48,11 +97,16 @@ type AuthMemoryJson = {
   users: AuthUser[];
   pending: PendingRegistration[];
   resetTokens: PasswordResetRecord[];
+  consents: ConsentRecord[];
 };
 
 const memoryUsers = new Map<string, AuthUser>();
 const memoryPending = new Map<string, PendingRegistration>();
 const memoryResetTokens = new Map<string, PasswordResetRecord>();
+// Consent ledger (migration 035), keyed by its own id rather than by email:
+// one person has many rows, one per document per acceptance, and nothing here
+// ever replaces one.
+const memoryConsents = new Map<string, ConsentRecord>();
 // Per-user personal settings bag (migration 028), keyed by email. Kept separate
 // from AuthUser so the general user object/columns are untouched.
 const memorySettings = new Map<string, Record<string, unknown>>();
@@ -77,11 +131,15 @@ const store = new FileBackedStore<Partial<AuthMemoryJson>>(
     for (const token of Array.isArray(parsed.resetTokens) ? parsed.resetTokens : []) {
       memoryResetTokens.set(token.token, token);
     }
+    for (const consent of Array.isArray(parsed.consents) ? parsed.consents : []) {
+      memoryConsents.set(consent.id, consent);
+    }
   },
   () => ({
     users: Array.from(memoryUsers.values()),
     pending: Array.from(memoryPending.values()),
     resetTokens: Array.from(memoryResetTokens.values()),
+    consents: Array.from(memoryConsents.values()),
   })
 );
 
@@ -201,6 +259,9 @@ function mapPending(row: {
   sms_sent_at: Date | null;
   expires_at: Date;
   attempts: number;
+  terms_version: string | null;
+  privacy_version: string | null;
+  consent_accepted_at: Date | null;
 }): PendingRegistration {
   return {
     email: row.email,
@@ -212,6 +273,9 @@ function mapPending(row: {
     smsSentAt: row.sms_sent_at ? row.sms_sent_at.toISOString() : null,
     expiresAt: row.expires_at.toISOString(),
     attempts: row.attempts,
+    termsVersion: row.terms_version,
+    privacyVersion: row.privacy_version,
+    consentAcceptedAt: row.consent_accepted_at ? row.consent_accepted_at.toISOString() : null,
   };
 }
 
@@ -535,12 +599,30 @@ export async function createUser(
  * inherit a previously verified state, or an attacker could re-point a verified
  * pending signup at a new phone number and get a free SMS.
  */
+/**
+ * Consent as it arrives at stage 1 of signup, or null when the client did not
+ * send any. The timestamp is the server's, assigned by the route.
+ */
+export type SignupConsent = {
+  termsVersion: string;
+  privacyVersion: string;
+  acceptedAt: Date;
+};
+
+/**
+ * `consent` is REQUIRED rather than optional, with the single caller passing an
+ * explicit null when nothing arrived. An optional parameter would let a future
+ * call site drop a user's consent by forgetting an argument, and the failure
+ * would be a missing legal record rather than a type error -- which is the
+ * category of defect this workstream exists to stop.
+ */
 export async function upsertPendingRegistration(
   email: string,
   passwordHash: string,
   phone: string,
   emailCode: string,
-  expiresAt: Date
+  expiresAt: Date,
+  consent: SignupConsent | null
 ) {
   if (!useDatabase()) {
     await ensureMemoryLoaded();
@@ -554,16 +636,23 @@ export async function upsertPendingRegistration(
       smsSentAt: null,
       expiresAt: expiresAt.toISOString(),
       attempts: 0,
+      termsVersion: consent ? consent.termsVersion : null,
+      privacyVersion: consent ? consent.privacyVersion : null,
+      consentAcceptedAt: consent ? consent.acceptedAt.toISOString() : null,
     });
     await persistMemory();
     return;
   }
 
+  // Bare pool, no withTenant(): auth_pending_registrations has no company_id
+  // and no row level security, as migration 029 records. See the note on
+  // user_consents below, which is in the same position for the same reason.
   await getPgPool().query(
     `
     INSERT INTO auth_pending_registrations
-      (email, password_hash, phone, email_code, sms_code, email_verified_at, sms_sent_at, expires_at, attempts)
-    VALUES ($1, $2, $3, $4, NULL, NULL, NULL, $5, 0)
+      (email, password_hash, phone, email_code, sms_code, email_verified_at, sms_sent_at, expires_at, attempts,
+       terms_version, privacy_version, consent_accepted_at)
+    VALUES ($1, $2, $3, $4, NULL, NULL, NULL, $5, 0, $6, $7, $8)
     ON CONFLICT (email)
     DO UPDATE SET
       password_hash     = EXCLUDED.password_hash,
@@ -573,9 +662,25 @@ export async function upsertPendingRegistration(
       email_verified_at = NULL,
       sms_sent_at       = NULL,
       expires_at        = EXCLUDED.expires_at,
-      attempts          = 0
+      attempts          = 0,
+      -- Overwritten, not merged. A restarted signup is a fresh act of consent:
+      -- carrying the previous attempt's values forward with COALESCE would
+      -- record an agreement the person did not give on this attempt, and
+      -- carrying its timestamp forward would date it wrongly.
+      terms_version       = EXCLUDED.terms_version,
+      privacy_version     = EXCLUDED.privacy_version,
+      consent_accepted_at = EXCLUDED.consent_accepted_at
   `,
-    [email, passwordHash, phone, emailCode, expiresAt.toISOString()]
+    [
+      email,
+      passwordHash,
+      phone,
+      emailCode,
+      expiresAt.toISOString(),
+      consent ? consent.termsVersion : null,
+      consent ? consent.privacyVersion : null,
+      consent ? consent.acceptedAt.toISOString() : null,
+    ]
   );
 }
 
@@ -658,10 +763,14 @@ export async function getPendingRegistration(email: string): Promise<PendingRegi
     sms_sent_at: Date | null;
     expires_at: Date;
     attempts: number;
+    terms_version: string | null;
+    privacy_version: string | null;
+    consent_accepted_at: Date | null;
   }>(
     `
     SELECT email, password_hash, phone, email_code, sms_code,
-           email_verified_at, sms_sent_at, expires_at, attempts
+           email_verified_at, sms_sent_at, expires_at, attempts,
+           terms_version, privacy_version, consent_accepted_at
     FROM auth_pending_registrations
     WHERE email = $1
     LIMIT 1
@@ -710,6 +819,125 @@ export async function deletePendingRegistration(email: string) {
     return;
   }
   await getPgPool().query(`DELETE FROM auth_pending_registrations WHERE email = $1`, [email]);
+}
+
+/**
+ * Record one person's acceptance of BOTH legal documents, as one act.
+ *
+ * Both rows or neither, and the reason is the shape of the mistake it prevents
+ * rather than database purity: a route that recorded the terms and then the
+ * privacy policy in two calls can record the first and fail the second, leaving
+ * a user who agreed to both with evidence of agreeing to one. On Postgres that
+ * is a single multi-row INSERT, atomic by definition; in memory both Map writes
+ * happen before the single persist.
+ *
+ * Bare pool, no withTenant(). user_consents has no company_id and no row level
+ * security, deliberately -- migration 035 writes out why at length, including
+ * the trap it avoids: an invited signup's company_id is "" at the moment this
+ * is called, so an RLS-forced column here would have made every invited user's
+ * consent invisible to their actual employer, silently and with no error. The
+ * price is that scoping is the caller's job, and the one route that reads this
+ * scopes by req.user.email.
+ */
+export async function recordSignupConsent(
+  userEmail: string,
+  consent: SignupConsent,
+  source: string
+): Promise<ConsentRecord[]> {
+  const acceptedAt = consent.acceptedAt.toISOString();
+  // Built from CONSENT_DOCUMENTS so the set recorded here cannot fall behind
+  // the set the CHECK constraint permits; adding a third document is a
+  // migration plus a version on the request, not an edit to this function.
+  const versions: Record<ConsentDocument, string> = {
+    terms: consent.termsVersion,
+    privacy: consent.privacyVersion,
+  };
+  const rows: ConsentRecord[] = CONSENT_DOCUMENTS.map((document) => ({
+    id: crypto.randomUUID(),
+    userEmail,
+    document,
+    version: versions[document],
+    acceptedAt,
+    recordedAt: new Date().toISOString(),
+    source,
+  }));
+
+  if (!useDatabase()) {
+    await ensureMemoryLoaded();
+    for (const row of rows) memoryConsents.set(row.id, row);
+    await persistMemory();
+    return rows;
+  }
+
+  const values: unknown[] = [];
+  const placeholders = rows.map((row, index) => {
+    const base = index * 6;
+    values.push(row.id, row.userEmail, row.document, row.version, row.acceptedAt, row.source);
+    return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`;
+  });
+
+  const result = await getPgPool().query<ConsentRow>(
+    `
+    INSERT INTO ${USER_CONSENTS_TABLE} (id, user_email, document, version, accepted_at, source)
+    VALUES ${placeholders.join(", ")}
+    RETURNING id, user_email, document, version, accepted_at, recorded_at, source
+  `,
+    values
+  );
+  return result.rows.map(mapConsent);
+}
+
+type ConsentRow = {
+  id: string;
+  user_email: string;
+  document: string;
+  version: string;
+  accepted_at: Date;
+  recorded_at: Date;
+  source: string;
+};
+
+function mapConsent(row: ConsentRow): ConsentRecord {
+  return {
+    id: row.id,
+    userEmail: row.user_email,
+    // Narrowed by the CHECK constraint in migration 035 rather than here: a
+    // value the constraint rejects cannot be in the table to be read back.
+    document: row.document as ConsentDocument,
+    version: row.version,
+    acceptedAt: row.accepted_at.toISOString(),
+    recordedAt: row.recorded_at.toISOString(),
+    source: row.source,
+  };
+}
+
+/**
+ * Every consent one person has given, most recent first.
+ *
+ * Scoped by email and ONLY by email. There is no company parameter and no
+ * caller-supplied filter: the single route calling this passes the
+ * authenticated caller's own address from the verified token, so there is no
+ * argument an attacker could substitute to read somebody else's row. That is
+ * the whole of the isolation for this table, which is why it is said twice.
+ */
+export async function listConsents(userEmail: string): Promise<ConsentRecord[]> {
+  if (!useDatabase()) {
+    await ensureMemoryLoaded();
+    return Array.from(memoryConsents.values())
+      .filter((row) => row.userEmail === userEmail)
+      .sort((a, b) => b.acceptedAt.localeCompare(a.acceptedAt));
+  }
+
+  const result = await getPgPool().query<ConsentRow>(
+    `
+    SELECT id, user_email, document, version, accepted_at, recorded_at, source
+    FROM ${USER_CONSENTS_TABLE}
+    WHERE user_email = $1
+    ORDER BY accepted_at DESC, document ASC
+  `,
+    [userEmail]
+  );
+  return result.rows.map(mapConsent);
 }
 
 export async function createPasswordResetToken(token: string, email: string, expiresAt: Date) {
@@ -1110,6 +1338,7 @@ export async function resetAuthStoreForTests() {
   if (useDatabase()) {
     await getPgPool().query(`DELETE FROM auth_password_reset_tokens`);
     await getPgPool().query(`DELETE FROM auth_pending_registrations`);
+    await getPgPool().query(`DELETE FROM ${USER_CONSENTS_TABLE}`);
     await getPgPool().query(`DELETE FROM auth_users`);
     await getPgPool().query(`DELETE FROM companies`);
     return;
@@ -1118,6 +1347,7 @@ export async function resetAuthStoreForTests() {
   memorySettings.clear();
   memoryPending.clear();
   memoryResetTokens.clear();
+  memoryConsents.clear();
   memoryCompanies.clear();
   store.resetForTests();
 }

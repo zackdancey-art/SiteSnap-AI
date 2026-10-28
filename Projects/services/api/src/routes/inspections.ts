@@ -4,7 +4,7 @@ import { z } from "zod";
 import { FIELD_ACCESS, AuthenticatedRequest } from "../middleware/auth";
 import { requireOwnRecord } from "../middleware/recordOwnership";
 import {
-  listTemplates, createTemplate, deleteTemplate,
+  listTemplates, createTemplate, deleteTemplate, inspectionTemplateExists,
   listInspections, createInspection, updateInspection, deleteInspection, getInspection,
 } from "../storage/inspectionStore";
 import {
@@ -152,10 +152,25 @@ inspectionsRouter.post("/inspections", async (req, res) => {
     if (!parsed.success) {
       return res.status(400).json({ error: "Invalid inspection payload.", details: parsed.error.flatten() });
     }
-    const inspection = await createInspection(getActor(req), {
-      ...parsed.data,
-      templateId: parsed.data.templateId ?? null,
-    });
+    // `inspections.template_id` is a foreign key into `inspection_templates`
+    // (migration 009), and this route used to store whatever it was handed. An
+    // id that is not a row there is a constraint violation — a 500 against
+    // Postgres and a 201 against the in-memory store, which has no constraints,
+    // so the only environment that reports it is the one nobody runs locally.
+    //
+    // It became reachable when the mobile picker gained the built-in WHS
+    // checklists, which are compiled into this service and are rows in no
+    // table. The client converts a built-in selection to null before sending
+    // (apps/mobile/lib/whs-checklists.ts, templateIdForCreate); this is the
+    // half that does not depend on the client getting it right.
+    const templateId = parsed.data.templateId ?? null;
+    if (templateId && !(await inspectionTemplateExists(getActor(req), templateId))) {
+      return res.status(400).json({
+        error: "That inspection template no longer exists. Choose another, or create the inspection without one.",
+        code: "unknown_inspection_template",
+      });
+    }
+    const inspection = await createInspection(getActor(req), { ...parsed.data, templateId });
     return res.status(201).json({ inspection });
   } catch (err) {
     console.error("[inspections] create failed", err);

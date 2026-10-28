@@ -1,14 +1,18 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
-import { asyncStorageGetItemCount, resetAsyncStorageForTests } from "./test-setup";
+import { asyncStorageGetItemCount, memoryAsyncStorage, resetAsyncStorageForTests } from "./test-setup";
 import {
+  deletePhotoPayloads,
   hydratePhotos,
   hydratePhotosFromMap,
   readPhotoPayloadMap,
   savePhotoPayloads,
+  PHOTO_PAYLOADS_KEY,
   type PhotoPayloadMap,
 } from "./photo-payload-store";
+import { clearQueue, enqueue } from "./offline-queue";
+import { DEFAULT_RETENTION_DAYS } from "./photo-payload-retention";
 import type { Photo } from "./types";
 
 /**
@@ -43,9 +47,29 @@ const photo = (id: string, over: Partial<Photo> = {}): Photo => ({
   ...over,
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   resetAsyncStorageForTests();
+  // The payload store now consults the offline queue to find out what must not
+  // be evicted, so queue state leaking between tests would make one test's
+  // pinned photograph another test's unexplained survivor.
+  await clearQueue();
 });
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Writes the payload map directly, bypassing `savePhotoPayloads`.
+ *
+ * Needed because the two states the retention cap exists for — a payload saved
+ * weeks ago, and a payload written by a build that had no clock — cannot be
+ * produced through the store's own writer: it stamps everything it touches with
+ * the current time. Addressed through the exported key, not a copy of it.
+ */
+async function seedPayloadMap(map: PhotoPayloadMap): Promise<void> {
+  await memoryAsyncStorage.setItem(PHOTO_PAYLOADS_KEY, JSON.stringify(map));
+}
+
+const daysAgo = (days: number) => new Date(Date.now() - days * DAY_MS).toISOString();
 
 test("hydratePhotosFromMap re-attaches base64 and mimeType held in the map", () => {
   const map: PhotoPayloadMap = {
@@ -114,4 +138,113 @@ test("hydrating many arrays costs ONE storage read in the batch form and N in th
     await hydratePhotos(photos);
   }
   assert.equal(asyncStorageGetItemCount() - beforeLoop, resultPhotos.length);
+});
+
+/**
+ * ─── The retention cap, AUDIT L6 ─────────────────────────────────────────────
+ *
+ * Everything above this line is about the COST of reading the map. Everything
+ * below is about the map not growing without bound in the first place, and
+ * about the one way that fix can be catastrophic: evicting a photograph the
+ * server never received.
+ */
+
+test("a saved payload is dated, so the cap has a clock to age it against", async () => {
+  const plan = await savePhotoPayloads([photo("a", { base64: "AAAA" })]);
+
+  const map = await readPhotoPayloadMap();
+  assert.equal(map.a?.base64, "AAAA");
+  assert.ok(map.a?.savedAt, "a payload was written with no savedAt — nothing can ever age it out");
+  assert.ok(Date.now() - Date.parse(map.a!.savedAt!) < 60_000);
+  // The plan is the store's own account of what it did, and the per-entry sync
+  // indicator reads `pinnedBytes` from it. Nothing is queued here, so none of
+  // this payload is unsent-but-pinned-by-the-queue; it is pinned only because
+  // this very call wrote it.
+  assert.equal(plan.evict.length, 0);
+  assert.equal(plan.keptBytes, 4);
+});
+
+test("a payload past the window is dropped by the next save, and the new one is kept", async () => {
+  await seedPayloadMap({
+    stale: { base64: "STALE-BYTES", savedAt: daysAgo(DEFAULT_RETENTION_DAYS + 2) },
+    recent: { base64: "RECENT-BYTES", savedAt: daysAgo(1) },
+  });
+
+  await savePhotoPayloads([photo("fresh", { base64: "FRESH" })]);
+
+  const map = await readPhotoPayloadMap();
+  assert.equal(map.stale, undefined, "the stale payload is still on the device — L6 is not fixed");
+  // Two positive controls on the same map: the cap must not be a map-clearer.
+  assert.equal(map.recent?.base64, "RECENT-BYTES");
+  assert.equal(map.fresh?.base64, "FRESH");
+});
+
+test("a photograph still in the offline queue survives a pass that drops its twin", async () => {
+  // THE assertion this whole module exists to make safe. The two payloads are
+  // identical in age, size and content; the only difference is that one is
+  // referenced by a queued op. A planner that ignores the queue deletes the
+  // only copy of a site photograph that was never uploaded.
+  const stamp = daysAgo(DEFAULT_RETENTION_DAYS * 2);
+  await seedPayloadMap({
+    queued: { base64: "UNSENT", savedAt: stamp },
+    sent: { base64: "UNSENT", savedAt: stamp },
+  });
+  await enqueue({ type: "addEntry", payload: { id: "e1", photos: [{ id: "queued" }] } });
+
+  await savePhotoPayloads([photo("fresh", { base64: "FRESH" })]);
+
+  const map = await readPhotoPayloadMap();
+  assert.equal(
+    map.queued?.base64,
+    "UNSENT",
+    "a photograph still waiting to be uploaded was evicted — it exists nowhere else"
+  );
+  assert.equal(map.sent, undefined, "the unqueued twin survived, so nothing was aged out at all");
+});
+
+test("the photographs a save is writing count as unsent before they are enqueued", async () => {
+  // The offline path is `savePhotoPayloads(...)` and THEN `enqueue(...)`
+  // (data-context.tsx), so between those two lines a photograph is in the map
+  // and in no queued op. If the pass trusted only the queue it would be free
+  // to drop the bytes it was just handed.
+  const plan = await savePhotoPayloads([photo("just-saved", { base64: "1234567890" })]);
+  assert.equal(plan.pinnedBytes, 10, "a photograph being written right now was not treated as unsent");
+
+  // Positive control, same endpoint: a payload already in the map and in no
+  // queued op is NOT pinned, so the assertion above is about `just-saved`
+  // specifically and not about the planner pinning everything it sees.
+  await seedPayloadMap({ older: { base64: "1234567890", savedAt: daysAgo(1) } });
+  const second = await savePhotoPayloads([photo("newer", { base64: "12345" })]);
+  assert.equal(second.pinnedBytes, 5);
+  assert.equal(second.keptBytes, 15);
+});
+
+test("an undated payload from an older build is kept and dated rather than deleted", async () => {
+  await seedPayloadMap({ legacy: { base64: "LEGACY-BYTES" } });
+
+  await savePhotoPayloads([photo("fresh", { base64: "FRESH" })]);
+
+  const map = await readPhotoPayloadMap();
+  assert.equal(map.legacy?.base64, "LEGACY-BYTES", "the pre-upgrade backlog was deleted on first launch");
+  assert.ok(map.legacy?.savedAt, "the legacy payload was kept but not dated, so it can never age out");
+  assert.equal(map.fresh?.base64, "FRESH");
+});
+
+test("releasing a synced photograph also ages out the backlog around it", async () => {
+  // The second enforcement point. A phone that has stopped capturing never
+  // calls the save path again, so without this the cap would not reach a
+  // device that is only draining.
+  await seedPayloadMap({
+    released: { base64: "ON-THE-SERVER-NOW", savedAt: daysAgo(1) },
+    stale: { base64: "STALE-BYTES", savedAt: daysAgo(DEFAULT_RETENTION_DAYS + 2) },
+    recent: { base64: "RECENT-BYTES", savedAt: daysAgo(2) },
+  });
+
+  const plan = await deletePhotoPayloads(["released"]);
+
+  const map = await readPhotoPayloadMap();
+  assert.equal(map.released, undefined);
+  assert.deepEqual(plan?.evict, ["stale"]);
+  assert.equal(map.stale, undefined);
+  assert.equal(map.recent?.base64, "RECENT-BYTES");
 });

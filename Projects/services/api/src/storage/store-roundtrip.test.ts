@@ -129,6 +129,10 @@ if (!process.env.TEST_DATABASE_URL) {
       siteId, date: "2026-02-02", locationAddress: "Zone A", weather: "Fine", crewCount: "5",
       notes: "poured slab", photos: [], swmsRef: "SWMS-9", hazardNotes: "trench barriered", toolboxTalk: true,
     } as Parameters<typeof S.createEntry>[1]);
+    // createEntry refuses a binned or out-of-company site with null; this seed
+    // uses the live site created above, so a null here is a broken fixture
+    // rather than the guard, and must not read as a passing round trip.
+    assert.ok(entry, "createEntry refused the round-trip fixture's own live site");
     const rows = await S.listEntries(actor, siteId);
     const row = rows.find((e) => e.id === entry.id);
     assert.ok(row, "created entry not read back");
@@ -162,6 +166,69 @@ if (!process.env.TEST_DATABASE_URL) {
     assert.equal(row!.startTime, "07:00");
     assert.equal(row!.endTime, "15:30");
     assert.equal(row!.breakMinutes, 30);
+
+    // Migration 033's four columns. The create path deliberately does NOT name
+    // approval_status in its INSERT — the DEFAULT supplies it and RETURNING *
+    // reads it back, so the default lives in one place — which means this
+    // assertion is the only thing that would notice the column missing or the
+    // default being dropped. The other three must read back as NULL: a new
+    // timecard has not been reviewed, and a non-NULL approver on a pending row
+    // would be a record of a decision nobody made.
+    assert.equal(row!.approvalStatus, "pending", "a new timecard did not read back pending");
+    assert.equal(row!.approvedBy ?? null, null);
+    assert.equal(row!.approvedAt ?? null, null);
+    assert.equal(row!.approvalNote ?? null, null);
+  });
+
+  test("crew_timecards: setTimecardApproval and updateTimecard round-trip the approval columns", async () => {
+    // The write paths migration 033's columns exist for, driven against the
+    // real schema. A column named by the UPDATE but absent from the table makes
+    // the statement throw; a column present but never read back makes the
+    // assertion fail. The in-memory mirror in routes/crew.test.ts proves the
+    // state machine, and proves nothing about the SQL.
+    const tc = await C.createTimecard(actor, {
+      siteId, entryId: null, workerName: "Grace", date: "2026-02-03",
+      startTime: "08:00", endTime: "16:00", breakMinutes: 0,
+      hoursRegular: 8, hoursOvertime: 0, trade: "sparky", notes: "",
+    } as Parameters<typeof C.createTimecard>[1]);
+
+    const approved = await C.setTimecardApproval(actor, tc.id, "approved", "signed off");
+    assert.ok(approved.ok, `approval write failed: ${JSON.stringify(approved)}`);
+    assert.equal(approved.timecard.approvalStatus, "approved");
+    assert.equal(approved.timecard.approvedBy, actor.email, "approved_by is not the actor");
+    assert.ok(approved.timecard.approvedAt, "approved_at was not written");
+    assert.equal(approved.timecard.approvalNote, "signed off");
+
+    // Read back through the list query rather than the write's RETURNING, so a
+    // value that was computed but never committed fails here.
+    const afterApproval = (await C.listTimecards(actor, siteId)).find((t) => t.id === tc.id);
+    assert.equal(afterApproval?.approvalStatus, "approved", "the approval did not persist");
+    assert.equal(afterApproval?.approvalNote, "signed off");
+
+    // The lock, in the store that production uses. The route's 409 is built on
+    // this return value and nothing else.
+    const blocked = await C.updateTimecard(actor, tc.id, {
+      workerName: "Grace", date: "2026-02-03", hoursRegular: 12, hoursOvertime: 0,
+      breakMinutes: 0, trade: "sparky", notes: "",
+    });
+    assert.equal(blocked.ok, false, "an approved timecard was editable");
+    assert.equal(blocked.ok === false ? blocked.reason : null, "locked");
+
+    // Reopening clears the reviewer and restores the edit — both directions in
+    // one test, so neither half is vacuous.
+    const reopened = await C.setTimecardApproval(actor, tc.id, "pending");
+    assert.ok(reopened.ok, `reopen failed: ${JSON.stringify(reopened)}`);
+    assert.equal(reopened.timecard.approvedBy ?? null, null, "a reopened timecard still names an approver");
+    assert.equal(reopened.timecard.approvedAt ?? null, null);
+
+    const allowed = await C.updateTimecard(actor, tc.id, {
+      workerName: "Grace", date: "2026-02-03", hoursRegular: 10, hoursOvertime: 0,
+      breakMinutes: 0, trade: "sparky", notes: "corrected",
+    });
+    assert.ok(allowed.ok, `editing a reopened timecard failed: ${JSON.stringify(allowed)}`);
+    assert.equal(allowed.timecard.hoursRegular, 10);
+    assert.equal(allowed.timecard.notes, "corrected");
+    assert.equal(allowed.timecard.approvalStatus, "pending", "an edit changed the approval state");
   });
 
   test("material_deliveries: full-column createDelivery round-trips", async () => {

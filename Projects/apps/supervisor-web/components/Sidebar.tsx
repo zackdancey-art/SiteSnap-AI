@@ -3,7 +3,7 @@
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
-import { logout } from "@/lib/api";
+import { logout, SIGN_OUT_SCOPE_NOTICE } from "@/lib/api";
 import { useRole } from "@/lib/useRole";
 
 /**
@@ -34,6 +34,13 @@ import { useRole } from "@/lib/useRole";
 const NAV = [
   { href: "/dashboard", label: "Dashboard", icon: GridIcon, managerOnly: true },
   { href: "/sites",     label: "Sites",     icon: BuildingIcon },
+  // Visible to crew, stated rather than omitted. GET /clients is behind
+  // identity and not rank, because the grouped sites list takes its headings
+  // from it; what crew do not get on that page is the add, edit and delete
+  // controls, which `canManageClients` draws and the API enforces at
+  // manager+. Hiding the whole page to withhold three buttons is the
+  // overreach AUDIT L79 was about.
+  { href: "/clients",   label: "Clients",   icon: BriefcaseIcon, hiddenFromCrew: false },
   { href: "/locations", label: "Live Map",  icon: MapPinIcon },
   { href: "/reports",   label: "Reports",   icon: ReportIcon },
   { href: "/activity",  label: "Activity",  icon: ActivityIcon },
@@ -57,6 +64,7 @@ export default function Sidebar({ userName }: { userName: string }) {
   });
 
   const handleLogout = async () => {
+    if (!confirm(SIGN_OUT_SCOPE_NOTICE)) return;
     await logout();
     router.replace("/");
   };
@@ -107,6 +115,14 @@ function MapPinIcon() {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
       <circle cx="12" cy="10" r="3"/>
+    </svg>
+  );
+}
+
+function BriefcaseIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>
     </svg>
   );
 }

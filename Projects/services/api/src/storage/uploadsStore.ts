@@ -48,16 +48,37 @@ export async function recordUpload(actor: Actor, id: string, filename: string): 
   );
 }
 
-/** True iff the upload was recorded as belonging to the actor's company. */
-export async function uploadBelongsToActorCompany(
+/**
+ * Which of these upload ids belong to the actor's company — ONE query.
+ *
+ * WHY THE BATCH FORM IS THE PRIMARY ONE
+ *
+ * `POST /uploads/sign` accepts up to fifty paths and used to call the
+ * single-id check once per path inside a `Promise.all`. That is not fifty
+ * queries; `withTenant` opens a TRANSACTION per call, so it is fifty
+ * transactions — a BEGIN, a `set_config`, the SELECT and a COMMIT each, four
+ * round trips apiece — and all fifty are started at once against a pool with
+ * far fewer connections than that. The signing call is on the path of every
+ * screen that shows a photograph, so it is the hot one. AUDIT L6's workstream
+ * notes carry this as the N+1.
+ *
+ * The scoping is unchanged and deliberately still explicit: `company_id = $2`
+ * in the predicate, with RLS behind it rather than instead of it, for all the
+ * reasons written out at the query itself. A returned set contains an
+ * id ONLY if a row with that id and that company exists, so an id the caller
+ * does not own is absent exactly as the single-id check returned false.
+ *
+ * Ids are de-duplicated and blanks dropped before the query, so a caller
+ * repeating a path fifty times costs one row, not fifty.
+ */
+export async function uploadIdsBelongingToActorCompany(
   actor: Pick<Actor, "companyId">,
-  id: string
-): Promise<boolean> {
-  const uploadId = String(id || "").trim();
-  if (!uploadId) return false;
+  ids: readonly string[]
+): Promise<Set<string>> {
+  const wanted = [...new Set(ids.map((id) => String(id || "").trim()).filter(Boolean))];
+  if (wanted.length === 0) return new Set<string>();
   if (!useDatabase()) {
-    const meta = memoryUploads.get(uploadId);
-    return Boolean(meta && meta.companyId === actor.companyId);
+    return new Set(wanted.filter((id) => memoryUploads.get(id)?.companyId === actor.companyId));
   }
   // The company predicate is written out explicitly, and RLS (migration 023) is
   // the second layer rather than the only one.
@@ -67,11 +88,11 @@ export async function uploadBelongsToActorCompany(
   // not that RLS is weak. It is that RLS is a property of the DATABASE ROLE,
   // not of this code: it is bypassed outright for a superuser or any role with
   // BYPASSRLS, and FORCE removes only the table owner's ordinary exemption. On
-  // such a connection this function returns true for ANOTHER tenant's upload
-  // id, and routes/uploads.ts then both streams that file and mints a signed
-  // URL for it — reproduced against a Postgres whose role has BYPASSRLS, which
-  // is what CI's own postgres:16 user is, and what H1's notes record Neon's
-  // owner role as.
+  // such a connection this function returns another tenant's upload ids, and
+  // routes/uploads.ts then both streams those files and mints signed URLs for
+  // them — reproduced against a Postgres whose role has BYPASSRLS, which is
+  // what CI's own postgres:16 user is, and what H1's notes record Neon's owner
+  // role as.
   //
   // THE RULE: tenant isolation must not depend on a database role attribute.
   // A role attribute can change with no code change, no failing test and no log
@@ -89,13 +110,30 @@ export async function uploadBelongsToActorCompany(
   // `WHERE company_id = ...`; this was the one place where RLS was the sole
   // mechanism.
   const result = await withTenant(actor, (client) =>
-    client.query(`SELECT 1 FROM uploads WHERE id = $1 AND company_id = $2 LIMIT 1`, [
-      uploadId,
-      actor.companyId,
-    ])
+    client.query<{ id: string }>(
+      `SELECT id FROM uploads WHERE id = ANY($1::text[]) AND company_id = $2`,
+      [wanted, actor.companyId]
+    )
   );
-  return (result.rowCount ?? 0) > 0;
+  return new Set(result.rows.map((row) => row.id));
 }
+
+/**
+ * True iff the upload was recorded as belonging to the actor's company.
+ *
+ * Delegates to the batch form rather than carrying a second copy of the
+ * predicate. Two hand-written company checks on the same table are two things
+ * to keep in step, and the one that gets forgotten is the one that matters.
+ */
+export async function uploadBelongsToActorCompany(
+  actor: Pick<Actor, "companyId">,
+  id: string
+): Promise<boolean> {
+  const uploadId = String(id || "").trim();
+  if (!uploadId) return false;
+  return (await uploadIdsBelongingToActorCompany(actor, [uploadId])).has(uploadId);
+}
+
 
 export function resetUploadsStoreForTests() {
   memoryUploads.clear();
