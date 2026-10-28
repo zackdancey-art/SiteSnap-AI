@@ -76,7 +76,7 @@ const UPDATES_ENABLED = APP_ENV === "production" || APP_ENV === "preview";
  * Restoring any of this needs a NATIVE REBUILD. None of it takes effect through
  * `eas update`.
  *
- * Guarded by lib/app-config-permissions.test.ts, which asserts over this file's
+ * Guarded by lib/native-permission-audit.test.ts, which asserts over this file's
  * source with comments stripped first -- so the block above cannot satisfy it.
  */
 
