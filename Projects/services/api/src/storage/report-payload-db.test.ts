@@ -40,10 +40,11 @@
  * RED ON REVERT. Change `listCompanyMembers`' predicate to drop the company
  * clause and tests 1 and 2 go red together — A starts naming B's member.
  * Replace `resolveAuthorName`'s lookup with the email itself and test 1 goes
- * red on the `/@/` assertion. Remove the `DATABASE_URL` assignment in `before`
- * and tests 1 and 2 go red together with `undefined` in place of both names,
- * because `authStore` then answers from an empty in-memory map instead of from
- * Postgres — see the comment on that line, and AUDIT L109. Forward
+ * red on the `/@/` assertion. Remove the `DATABASE_URL` assignment at the top
+ * of the gated block and tests 1 and 2 go red together with `undefined` in
+ * place of both names, because `authStore` then answers from an empty
+ * in-memory map instead of from Postgres — see the comment on that line, and
+ * AUDIT L109. Forward
  * `entry.toolboxTalk` in place of `toolboxTalkFromStoredRow` and test 4 goes
  * red on the default row.
  *
@@ -75,6 +76,22 @@ import {
 if (!process.env.TEST_DATABASE_URL) {
   test("report payload completeness (skipped: set TEST_DATABASE_URL)", { skip: true }, () => {});
 } else {
+  // SELECT THE POSTGRES AUTH STORE, the way every other DB-gated suite in this
+  // repo does (`routes/auth-401-codes-db.test.ts`, `clients-db`, `crew-*-db`,
+  // `inspection-template-id-db`, `invite-accept-identity-db`,
+  // `sessions-and-tokens-db`, `uploads-media-isolation`). `authStore` is not
+  // test-aware — `useDatabase()` reads only `DATABASE_URL`, which
+  // `test-setup.ts` blanks for every test — so without this line
+  // `listCompanyMembers` answers from an empty in-process `memoryUsers` map
+  // while the fixture below writes its member rows to Postgres. Every
+  // attribution then resolves to `undefined` and the SELECT never runs. This
+  // file is the ninth DB suite and the first to omit the line; nothing checks
+  // for it, which is AUDIT L109.
+  //
+  // It cannot reach production: getPgPool() refuses to read DATABASE_URL when
+  // NODE_ENV === "test", and node:test gives each file its own process.
+  process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
+
   // Same minimal migration runner as the other DB suites.
   const MIGRATIONS_DIR = path.join(process.cwd(), "src", "storage", "migrations");
 
@@ -122,12 +139,7 @@ if (!process.env.TEST_DATABASE_URL) {
   const PRIYA = "Priya Raman";
   const BRUNO = "Bruno Vitale";
 
-  // Non-empty by construction: we are inside the `else` of the
-  // TEST_DATABASE_URL gate above. `?? ""` is for the type, not the value.
-  const TEST_DB_URL = process.env.TEST_DATABASE_URL ?? "";
-
   let pool: Pool;
-  let previousDatabaseUrl: string | undefined;
   let dana: Actor;
   let priya: Actor;
   // No actor for company B. The only thing B contributes is a member row with a
@@ -145,48 +157,6 @@ if (!process.env.TEST_DATABASE_URL) {
   });
 
   before(async () => {
-    // WHY THIS FILE SETS `DATABASE_URL`, AND WHY DOING SO CANNOT REACH
-    // PRODUCTION.
-    //
-    // Test 1 and test 2 both resolve a name through `listCompanyMembers`, and
-    // on the first Postgres run of this suite both came back `undefined` — not
-    // a wrong name, nothing at all. The reason is one line in another file:
-    //
-    //   authStore.ts    function useDatabase() {
-    //                     return Boolean(process.env.DATABASE_URL && ...);
-    //                   }
-    //
-    // `authStore.useDatabase()` is NOT test-aware, unlike `projectsStore`'s
-    // (`projectsStore.ts`, which checks `TEST_DATABASE_URL` under
-    // `NODE_ENV=test` for exactly this reason). `test-setup.ts` blanks
-    // `DATABASE_URL` for every test — deliberately, so no suite can reach the
-    // production database — so under `test:db` this store takes its IN-MEMORY
-    // branch and reads `memoryUsers`, which is empty in this process because
-    // the fixture below writes its member rows to Postgres with raw SQL.
-    // `listCompanyMembers` returned `[]`, the index was empty, and every
-    // lookup missed. The SELECT never ran. It is not a missing column:
-    // `USER_COLUMNS` includes `full_name` and `mapUser` maps it.
-    //
-    // So this assignment is what makes the store under test actually be the
-    // store this file claims to test. It is scoped to this file: `node --test`
-    // runs each test file in its own child process, so the mutation cannot
-    // leak into the in-memory suites that depend on the blanked value.
-    //
-    // It cannot point anywhere but the test database. `postgres.ts` refuses to
-    // read `DATABASE_URL` at all under `NODE_ENV=test` — it builds its pool
-    // from `TEST_DATABASE_URL` and throws "Tests must never connect to the
-    // production DATABASE_URL" when that is unset. The value assigned here is
-    // `TEST_DATABASE_URL` regardless, so both the flag and the connection
-    // name the same database.
-    //
-    // THE GENERAL CASE IS NOT FIXED HERE, ON PURPOSE. Eight route DB suites
-    // import `createUser`/`deleteUserAccount` from this store and have been
-    // running auth in memory under `test:db` all along, which also makes their
-    // Postgres-side cleanup a no-op. Making `useDatabase()` test-aware flips
-    // all eight at once. That is AUDIT L109 and its own change.
-    previousDatabaseUrl = process.env.DATABASE_URL;
-    process.env.DATABASE_URL = TEST_DB_URL;
-
     pool = getPgPool();
     await applyMigrations(pool);
 
@@ -247,11 +217,6 @@ if (!process.env.TEST_DATABASE_URL) {
   });
 
   after(async () => {
-    // Assign, never `delete`: `server.ts` calls `dotenv.config()` on import and
-    // dotenv repopulates an ABSENT key while leaving an empty one alone
-    // (CLAUDE.md §6). The harness blanks this variable, so "" is its real
-    // prior value in a normal run.
-    process.env.DATABASE_URL = previousDatabaseUrl ?? "";
     await pool.end();
   });
 
