@@ -3318,8 +3318,29 @@ is a plain INSERT. *Triggers:* none on `auth_users` (the only triggers are on
 amplified out of sight. *Migrations:* `016` writes `company_id` four times and does not evict; it
 runs in-process at `server.ts:205`, before `initAuthSchema()`, `createApp()` and `app.listen`, so
 within a single process the cache is necessarily empty — **the blind spot is a rolling deploy**,
-where a second instance is still serving with cached identities while the first migrates. The owner
-has not yet told me the Render instance count and I am not guessing it. *Tests:* nine files write
+where a second instance is still serving with cached identities while the first migrates.
+
+**ANSWERED, AND THIS CLOSES THE EVICTION HALF OF L102 UNCONDITIONALLY.** The owner reports the
+Render service runs **one instance**: manual scaling is set to 1, autoscaling is off, and autoscaling
+requires a Pro plan the service is not on. So there is no second instance to hold a stale identity,
+no cross-instance window, and the shared-invalidation mechanism that was queued for Phase 7 is **not
+needed** — not deferred, not conditional, not needed. The seven per-site evictions are the complete
+fix on this deployment, and the "revocation is not instant across instances" caveat written into
+`docs/PHASE-2-REVIEW.md` does not apply to it.
+
+**The one residual, which is narrow and real.** Render's zero-downtime deploy runs the draining
+instance and the new one together for roughly a minute. During that overlap there genuinely are two
+processes, so for that window the cross-instance gap exists: the draining instance can honour a
+generation the new one has already invalidated. It closes by itself when the old instance exits.
+Three things make it the smallest version of this problem — it occurs only during a deploy rather
+than continuously, its duration is set by the drain rather than by the 60-second TTL, and the
+migration case in the paragraph above is unaffected because migrations complete before
+`app.listen`. It is recorded rather than fixed: a shared invalidation channel built for a one-minute
+deploy overlap is more moving parts than the window justifies, and if the service ever moves to a
+plan with autoscaling this becomes a live gap again and the Phase 7 item comes back. **That
+condition — instance count > 1 — is the thing to re-check, not the eviction code.**
+
+*Tests:* nine files write
 `auth_users` raw (`incident-roundtrip`, `rls-h1b`, `invite-roundtrip`, `store-roundtrip`,
 `signature-roundtrip`, `rls-integration`); `invite-roundtrip.test.ts:241`
 (`UPDATE auth_users SET company_id = ''`) bypasses eviction deliberately and is the pattern to watch
@@ -3449,3 +3470,690 @@ generation and sets no cookie; that is correct and is not part of this gap, beca
 route is unauthenticated, driven by the token in an emailed link, and its own reply tells the person
 to sign in — ending every session is the point of a reset.
 
+
+---
+
+### L105 — `createCompany` commits before `createUser` with no transaction around the pair, so a signup that fails the phone-uniqueness index leaves a company with no member — MEDIUM (write atomicity, signup path; QUEUED, first after the eleven-workstream merge lands and before any real signup)
+
+**How this was found.** Not by reading the signup path. A production read of `companies` on
+27 October 2026 returned **two** rows where one account exists: `company_2b7f006b…` (7 August,
+has a member) and `company_0f362068…` (1 October, no member, and zero
+rows in all fifteen tenant tables). The orphan row is the symptom; what follows is the defect.
+
+**The minting path, enumerated rather than assumed.** `createCompany` has exactly **one**
+non-test caller in the API — defined at `storage/authStore.ts:878`, called at
+`routes/auth.ts:439` — and that call site is reached only in the non-invite branch of
+`POST /auth/register/verify`, where `companyId = soloCompanyIdForEmail(email)`
+(`routes/auth.ts:436`). So every company id this product can mint is
+`'company_' || md5(lower(<the registering email>))`. The invite branch
+(`routes/auth.ts:430-434`) sets `companyId = ""` and deliberately creates no company, leaving
+`acceptSiteInvite` to stamp the invite's company transactionally. `createCompanyInvite`
+(`storage/projectsStore.ts:1284`) is a different function and creates no company.
+
+**The defect.** `createCompany` at `routes/auth.ts:439` and `createUser` at `routes/auth.ts:451`
+are two separate statements on a bare `getPgPool()` with **no enclosing transaction**, and
+nothing between them checks phone uniqueness. `auth_users_phone_idx`
+(`storage/migrations/001_initial_schema.sql:12`) is a unique partial index on
+`auth_users(phone) WHERE phone IS NOT NULL`, so a signup whose phone is already registered to
+another account raises 23505 inside `createUser`; the catch at `routes/auth.ts:489` returns a
+409 (*"Account already exists for this email or phone."*); and the `companies` row written
+twelve lines earlier **stays committed**. It stays forever: `companies.owner_email` carries no
+foreign key — `storage/migrations/014_companies_table.sql:9`, *"no FK constraint — soft
+relationship only"* — and `:3` of the same file states companies are never hard-deleted.
+`deletePendingRegistration` (`routes/auth.ts:452`) also never runs, so the pending row survives
+with it.
+
+**Scope, stated exactly.** `createCompany`'s `ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name`
+means a retry on the same email reuses the same id, so this leaves one orphan per email, not one
+per attempt. The orphan is inert: no member, no rows, and no route reads a company by
+`owner_email`. It is a junk tenant row and a 409 the person cannot act on, not a tenancy or
+disclosure defect — which is why this is MEDIUM and queued rather than taken now.
+
+**The innocent alternative, not excluded.** A second account could have registered on 1 October
+and later been deleted through `DELETE /auth/account` (`routes/auth.ts:684`), whose
+`deleteUserAccount` (`storage/authStore.ts:1088-1105`) removes that email's
+`auth_pending_registrations` and `auth_users` rows and, by the compliance rule above,
+deliberately **not** its `companies` row. That path leaves an identical-looking row and is
+working as designed. The two are distinguishable — the failed-signup path leaves the pending
+registration behind, the deletion path removes it, and production holds exactly one pending row
+— but **the owner has declined that check as not decision-relevant** (27 October 2026: *"Do not
+run the hash check on the 1 October company. The answer changes nothing."*). It is recorded here
+so a later session does not re-open it as new.
+
+**Not covered by any test.** There is no test for a phone collision on the second half of
+`register/verify`, in either store. The in-memory `createUser`
+(`storage/authStore.ts:501-506`) raises the same `uniqueViolationError("auth_users_phone")`, so
+the defect is reproducible in the in-memory suite as well as the DB-gated one — but per the
+standing rule the test belongs in the DB-gated suite, because the atomicity is the Postgres
+store's.
+
+**Not fixed in this entry, and nothing repaired.** No backfill, no deletion of the orphan row:
+this is a compliance-evidence product and the owner decides what happens to records. The fix is
+a transaction around the two writes, and it is first in the queue once the eleven-workstream
+merge has landed.
+
+---
+
+### L106 — `auth_pending_registrations` retains a password hash, a phone number and a name indefinitely, because expiry is enforced at use and deletion is only opportunistic — RETENTION QUESTION (owner's legal review; deliberately not filed as a code defect)
+
+**What the table is.** The pre-account staging row for a signup that has submitted email,
+password, name and phone but has not completed SMS verification. Created in
+`storage/migrations/001_initial_schema.sql:16-25`; extended by `029` with `email_verified_at`
+and `sms_sent_at` so the SMS is only sent after the email code is proven. It has no
+`company_id` and no RLS by design — it is pre-account, keyed and read by email alone
+(`029_pending_registration_staged_verification.sql:14-15`).
+
+**What one row contains.** `password_hash` — which is not only the hash: the register path
+stores a `::`-joined blob and splits it back out at `routes/auth.ts:418`, so the column also
+carries full name, legacy role and company name — plus `phone` (`NOT NULL`), `email_code`,
+`sms_code`, `expires_at`, `attempts`. A row is therefore a password hash, a mobile number and a
+person's name for someone who never completed a signup and has no account.
+
+**It expires, and expiry is not the same as deletion.** `expiresAt` is set to now +
+`ACCOUNT_VERIFICATION_TTL_MS` (`routes/auth.ts:60`, default **10 minutes**), and expiry is
+enforced where the row is used: `routes/auth.ts:386-389` in `register/verify` and `:269` in
+`register/verify-email` both delete the row and answer `restart: true`. Deletion of a row nobody
+returns to is `purgeExpiredAuthRecords` (`storage/authStore.ts:1061`, `DELETE FROM
+auth_pending_registrations WHERE expires_at < NOW()`), and there is **no scheduler**: it runs
+only when someone calls one of five endpoints — `register`/`register/initiate`
+(`routes/auth.ts:173`), `verify-email` (`:264`), `verify` (`:380`), `forgot-password` (`:997`),
+`reset-password` (`:1072`). Not on login. So an abandoned signup's row persists for as long as
+nobody else starts a signup or a password reset.
+
+**Measured in production.** The 27 October 2026 read returned **one** row in
+`auth_pending_registrations` — `auth_pending_registrations` has no RLS, so that count is real
+rather than a filtered view. It is inert for authentication: `verify` checks expiry before it
+looks at either code, so the row cannot be completed into an account.
+
+**Why this is not filed as a defect.** Nothing is behaving other than as written, and no fix is
+proposed. The question is whether retaining a password hash, a phone number and a name for an
+abandoned signup, with no upper bound on how long, is acceptable under the privacy obligations
+this product is being built to meet — and that is a legal-review question, not an engineering
+one. Owner's decision, 27 October 2026: *"flagged as a retention question for my legal review
+rather than a code fix."* If the answer is that it is not acceptable, the engineering shape is
+small and additive (a scheduled purge, or a purge on login), and it would then be filed
+properly.
+
+---
+
+### L107 — The crew-permission table's six pins came through the eleven-workstream merge unchanged, and that is the defect: four new crew-facing surfaces have no row in it — MEDIUM (test integrity; the table that defines "crew can do their job" does not know about a quarter of the job) — QUEUED, behind L105
+
+**How this was found.** Not by a failure. By the opposite: during the merge rehearsal
+(`rehearsal/merge-all-2`, 27 October 2026) every pinned count in the repository was re-measured
+across the union of all twelve branches, and the six pins in
+`services/api/src/routes/crew-permissions-db.test.ts` were the only ones that needed no change
+at all:
+
+```
+EXPECTED_READS            = 15
+EXPECTED_WRITE_STEPS      = 14
+EXPECTED_REFUSALS         = 16
+EXPECTED_FIELD_PROBES     = 4
+EXPECTED_PARITY_KINDS     = 5
+EXPECTED_OWNERSHIP_PROBES = 20
+```
+
+A pin that does not move across a merge of eleven feature branches is either a surface that did
+not grow or a measurement that stopped following it. **This is the second.** The pins are
+correct — each one still equals the length of the list it counts — and they are correct because
+no branch added a row to any of those lists. The file's own comment says what that means:
+*"Changing a number here is changing what 'crew can do their job' means, so it has to happen in
+the same commit as the route that moved."* Four routes moved and no number changed with them.
+
+**The four uncovered surfaces, verified by reading the route definitions on the merged tree.**
+
+1. **`/clients` — workstream 1 (`feat/clients-sites-entries`, PR 2).**
+   `clientsRouter.use("/clients", ...FIELD_ACCESS)` at `routes/clients.ts:43`, so
+   `GET /clients` (`:71`) is open to any signed-in identity **deliberately** — a crew member
+   needs the client list because it supplies the headings of their own site list. The three
+   writes carry `requireAtLeast("manager")` (`:82`, `:107`, `:131`). So this surface needs
+   **two** kinds of row: a crew 200 on the read (it is a read crew must keep) and three crew
+   refusals on the writes. It has neither. The read is the more important of the two, because
+   the plausible wrong fix here is a `canSeeClients` gate, and nothing in the table would go red
+   if someone added one.
+2. **Timesheet approval — workstream 2a (`feat/timesheets-approval`, PR 3).**
+   `crewRouter.post("/crew/timecards/:id/approval", requireAtLeast("manager"), …)` at
+   `routes/crew.ts:377`. Two distinct refusals, and the table has a row for neither:
+   the **403** for a crew member with no rank, and the **409** for an approved card
+   (`routes/crew.ts:301`), which refuses a **manager** too — no rank opens it, they reopen the
+   card first. A 409 that applies to every role is exactly the kind of refusal the four
+   status-code populations were built to hold, and it is the one refusal in the API that a
+   rank-shaped test cannot express.
+3. **`/projects/sites/bin` — workstream 6 (`feat/bin-retention`, PR 8).**
+   `projectsRouter.get("/projects/sites/bin", requireAtLeast("manager"), …)` at
+   `routes/projects.ts:315`. Crew refusal: no row.
+4. **`/projects/sites/:id/restore` — workstream 6, same PR.**
+   `projectsRouter.post("/projects/sites/:id/restore", requireAtLeast("manager"), …)` at
+   `routes/projects.ts:326`. Crew refusal: no row. Restore is the undo of a destructive
+   operation, so it is the one of the four whose gate being wrong is least likely to be noticed
+   by its absence and most likely to matter.
+
+**What is and is not covered today.** Each of the four gates is tested in its own workstream's
+suite — these are not routes that shipped untested. What is missing is their place in the
+*table*: the one file that enumerates the crew-facing surface as a population and measures it in
+both directions, and whose six pins are the mechanism that makes a route dropping out of the
+list a red build. A per-route test proves the gate; the table proves the **list of gates** is
+complete. Four surfaces are outside it, so for those four the completeness claim the pins make
+is untrue, and the file reads green saying so.
+
+**Deliberately not fixed in this entry, and this is the owner's instruction, 27 October 2026:**
+*"queue the new rows behind the post-merge transaction-gap fix. Do not add them now; they would
+move three pins and re-run the whole back-port."* Adding the rows moves `EXPECTED_READS`,
+`EXPECTED_REFUSALS` and `EXPECTED_WRITE_STEPS`, and those three pins are back-ported onto three
+different branches at three different positions in the merge order — so the rows cannot be added
+without re-deriving and re-pushing the pin commits on every branch behind them. The rows go on
+**after** the merge lands, in the queue position behind **L105** (the `createCompany`/`createUser`
+transaction gap, which is first).
+
+**Shape of the fix, for whoever picks it up.** Four to seven new rows in the existing lists in
+`crew-permissions-db.test.ts` — one crew-200 read row for `GET /clients`, three crew-403 write
+rows for the client writes, one 403 and one 409 for timecard approval, one crew-403 each for
+`/bin` and `/restore` — each with its positive control on the same endpoint in the same test per
+the standing rule, the three pins raised to the measured lengths in the same commit, and the
+whole thing in the DB-gated suite because every one of them is a permission against Postgres.
+
+---
+
+### L108 — `pnpm --filter` exits 0 when it matches nothing, so one working-directory change turns a build step into a silent no-op — LOW (tooling hazard, not a defect in this repo today; recorded because the failure mode is invisible by construction)
+
+**What this is.** Not a finding against this repository's current state. A property of the tool
+the build is written in, filed because the day it bites, nothing in the output will say so. Every
+`pnpm --filter … run <script>` step in this repo is one `working-directory` edit away from
+becoming a step that runs no script, prints one line of prose, and exits **0** — which `set -e`
+treats as success, which a CI step treats as a pass, and which a green check mark on a pull
+request reports as a build that ran.
+
+**The measurements.** pnpm **10.30.3**, 27 October 2026, from
+`/Users/zackdancey/Dev/SiteSnap/Projects`:
+
+```
+$ pnpm --filter ./does-not-exist run typecheck
+No projects matched the filters in "/Users/zackdancey/Dev/SiteSnap/Projects"
+exit=0
+
+$ pnpm --filter does-not-exist run typecheck          # a package NAME, not a path
+No projects matched the filters in "/Users/zackdancey/Dev/SiteSnap/Projects"
+exit=0
+```
+
+So the zero-exit is not a quirk of path filters. A **misspelled package name** behaves
+identically — which matters here, because `ci.sh` reaches the two most expensive and least
+locally-reproducible suites in the repo by name:
+
+```
+Projects/scripts/ci.sh:342:  pnpm --filter services-api run test:redis
+Projects/scripts/ci.sh:347:  pnpm --filter services-api run test:db
+```
+
+Rename that package, or typo it in an edit, and `ci.sh` prints its `═══ Tests (database — RLS +
+store round-trip) ═══` banner, runs nothing, and exits 0 — the precise outcome the whole
+vacuity-guard apparatus in `run-tests.sh` and `assert-ci-single-definition.sh` exists to make
+impossible, arriving one layer above where those guards look. `run-tests.sh` cannot refuse to
+pass vacuously if it is never invoked.
+
+**Why a working-directory change is the trigger.** A relative filter resolves against
+`process.cwd()`, **not** against the workspace root, and not against whatever `-C` names. Both
+sides of that, measured:
+
+```
+$ cd Projects && pnpm --filter ./services/api list --depth -1
+services-api@0.1.0 /Users/zackdancey/Dev/SiteSnap/Projects/services/api (PRIVATE)
+exit=0                                    # matched
+
+$ pnpm -C Projects --filter ./services/api list --depth -1
+No projects matched the filters "/Users/zackdancey/Dev/SiteSnap/services/api" in "/Users/zackdancey/Dev/SiteSnap/Projects"
+exit=0                                    # matched NOTHING — and still exit 0
+```
+
+The second message is the whole entry in one line: pnpm read the workspace at
+`…/SiteSnap/Projects` and looked in it for a package at `…/SiteSnap/services/api`, a path
+assembled from the *shell's* directory. The filter and the workspace disagreed about where
+"here" is, pnpm said so in prose, and then reported success.
+
+**Call sites, both trees.** Every one of these is a relative-path or bare-name filter whose
+correctness is a function of the directory it runs in:
+
+| | docs branch (`docs/nine-workstreams-handover`) | merged tree (`rehearsal/merge-all-2`) |
+|---|---|---|
+| workflow | `.github/workflows/deploy-api.yml:51,54,57` | `.github/workflows/api-post-merge-checks.yml:73,76,79` |
+| scripts | `Projects/package.json:15,16` (`dev:api`, `dev:mobile`) | `Projects/package.json:15,16` |
+| CI program | `Projects/scripts/ci.sh:323` (`./shared`), `:342`, `:347` (`services-api`) | `Projects/scripts/ci.sh:491`, `:510`, `:515` |
+
+**Why they are all correct today, and what is holding them up.** Two different mechanisms, both
+one line long:
+
+- The workflow sets `defaults: run: working-directory: Projects` (`deploy-api.yml:18-20`), so
+  every `run:` step starts in the workspace and the three relative filters resolve.
+- `ci.sh` sets its own directory on line 23, `cd "$(dirname "$0")/.."`, which from
+  `Projects/scripts` lands in `Projects`. `package.json`'s scripts inherit the workspace
+  directory from pnpm.
+
+Delete, move or re-indent either line and six steps become no-ops at once, with no diff anywhere
+near the filters themselves. That is the hazard: the guard is not adjacent to the thing it
+guards, and the symptom of its removal is a faster green build.
+
+**The mitigation exists and is one flag.** `pnpm run --help` documents
+`--fail-if-no-match`: *"If no projects are matched by the command, exit with exit code 1
+(fail)."* Measured, same shell, same version:
+
+```
+$ pnpm --filter ./does-not-exist --fail-if-no-match run typecheck >/dev/null 2>&1; echo $?
+1
+$ pnpm --filter ./does-not-exist run typecheck >/dev/null 2>&1; echo $?
+0
+```
+
+Adding it to all eight call sites is additive, mechanical, and changes no behaviour on a matching
+filter. It is **not** done in this entry: the eight sites are spread across two workflow files,
+`package.json` and `ci.sh` on twelve unmerged branches, and touching `ci.sh` and a workflow on
+every branch during a merge sequence buys a tooling improvement at the price of twelve new
+conflicts. It goes in after the merge, as one commit.
+
+**Measurement caveat, because it cost two wrong readings.** In this shell (zsh), `$?` after a
+pipeline is the **last** command's status and `${PIPESTATUS[0]}` is not reliable — piping pnpm
+into `tail` reported `exit=0` for the `--fail-if-no-match` run, which is `tail`'s status, not
+pnpm's. Every exit code above was read from an unpiped command. Any future attempt to re-measure
+this must do the same or it will conclude the flag does not work.
+
+**Relationship to the withdrawn semantic conflict 12A.** The merge rehearsal's twelfth semantic
+conflict was filed as a defect — that the three `deploy-api.yml` filters were silently matching
+nothing — and it is **withdrawn**: `working-directory: Projects` and those filters arrived in the
+**same commit**, `986becd` (25 June 2026, line 17 of that file), so there has never been a
+revision of `main` on which they were broken. Zero days unverified.
+`docs/NINE-WORKSTREAMS-HANDOVER.md` §7b item 12 carries the withdrawal and both transcripts. What
+survived the withdrawal is only this: the claim was wrong about the repo and right about the
+tool, and `pnpm` will not tell you which of the two you are looking at, because it reports both
+with exit 0.
+
+**One more place this is already half-recorded.** `CLAUDE.md` §5 warns that *"under `-C Projects`,
+path filters like `--filter ./services/api` match nothing"* and tells you to filter by package
+name. That is the same observation, written as a convenience note. What it does not say — and
+what makes it a hazard rather than a style preference — is that the no-match **passes**. A reader
+who follows §5 is safe; a reader who ignores it does not get an error.
+
+---
+
+### L109 — a DB-gated suite reaches the Postgres path of seven of the eleven stores only by remembering a line nothing checks for, and the omission is silent — MEDIUM (one suite was affected and is fixed; the failure mode is invisible by construction, and it makes a negative assertion vacuous)
+
+**What this is.** `storage/report-payload-db.test.ts` ran against Postgres for the first time on
+28 October 2026, in PR #70's CI, and two of its four tests failed with `undefined` where a
+person's name should have been. The suite migrated the database, seeded it, inserted three
+`auth_users` rows with `full_name` populated, and then read its member list out of an **empty
+in-process `Map`**. The SELECT never ran. Nothing errored; the test simply asked the wrong store.
+
+This is **AUDIT L65's shape for the eighth time** — a test believing it exercised Postgres while
+exercising the in-memory fallback — but the mechanism is narrower and more actionable than L65's
+general warning, and it is the mechanism that is worth filing: **the store a DB suite talks to is
+selected by a line the suite itself has to remember to write, and omitting it is not an error.**
+
+**The one line.**
+
+```ts
+process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
+```
+
+Eight DB-gated suites already carry it at the top of their gated block, several with the same
+justifying comment. `report-payload-db.test.ts` was the ninth and the first to omit it. Measured
+(`grep -l 'process\.env\.DATABASE_URL *=' ` over the `TEST_DATABASE_URL`-gated suites, merged
+tree, before the fix): eight of nine.
+
+**Why the line is needed at all — the split convention.** `test-setup.ts` blanks `DATABASE_URL`
+for every test, deliberately, so that no suite can reach the production database. A store
+therefore only selects Postgres under `test:db` if its own `useDatabase()` knows to look at
+`TEST_DATABASE_URL`. Four do. Seven do not:
+
+| `useDatabase()` consults `TEST_DATABASE_URL` under `NODE_ENV=test` | stores |
+|---|---|
+| **yes** — selects Postgres on its own | `projectsStore`, `inspectionStore`, `incidentStore`, `signatureStore` |
+| **no** — reads `DATABASE_URL` only, so a test must set it | `authStore`, `crewStore`, `deliveriesStore`, `locationStore`, `pushStore`, `templateStore`, `uploadsStore` |
+
+`projectsStore`'s version carries a comment explaining exactly why it is test-aware. Seven stores
+never got the same treatment, so the compensating `DATABASE_URL` line migrated into the test
+files instead, one copy per file, as folklore.
+
+**What it cost here, and the part that matters.** Both failing assertions were **positive
+controls**. Test 1 expects the author of an entry to be named `Dana Okafor`; test 2 expects a
+misfiled row to be attributed to nobody *while the two legitimate rows are attributed correctly*,
+which is what makes the refusal mean something. The refusal halves — "A must not be told B's
+member's name", "the misfiled row must name nobody" — **passed**, because an empty index refuses
+everything. Had the suite been written with the negative assertions alone, in the house style
+before the both-controls rule, the first Postgres run of a compliance-document attribution path
+would have come back **green while testing nothing at all**. The both-controls rule is the only
+reason this was ever seen.
+
+**The measurements.** All from `/Users/zackdancey/Dev/SiteSnap`, 28 October 2026, on
+`feat/report-periods` at `84a78a5` (position 6 of the merge train):
+
+```
+# the suite is new at this position — first Postgres run, so a branch defect, not a merge artefact
+origin/main  TEST_DATABASE_URL-gated suites: 14
+merge (HEAD) TEST_DATABASE_URL-gated suites: 17
+arriving:  storage/report-payload-db.test.ts
+           storage/report-photos-db.test.ts
+           storage/report-range-db.test.ts
+removed:   none
+git log origin/main -- …/report-payload-db.test.ts   -> empty (never on main)
+git diff 04614b5 HEAD  -- …/authStore.ts             -> empty (untouched by the merge)
+git diff 797dbb0 HEAD  -- …/authStore.ts             -> empty (untouched by the branch)
+```
+
+The branch selection itself, measured on the compiled modules with **no database** —
+`TEST_DATABASE_URL` pointed at `127.0.0.1` port 1, so nothing is reachable and nothing is
+written:
+
+```
+DATABASE_URL blank:  listCompanyMembers("…") -> []            # MEMORY path, never asked Postgres
+                     resolveAuthorName -> undefined, undefined # the CI failure, reproduced locally
+DATABASE_URL set:    listCompanyMembers("…") -> throws ECONNREFUSED  # POSTGRES path, tried to connect
+```
+
+That is the whole defect: a branch, not a column. `USER_COLUMNS` includes `full_name`, `mapUser`
+maps it to `fullName`, and `listCompanyMembers`' query —
+`SELECT <USER_COLUMNS> FROM auth_users WHERE company_id = $1 ORDER BY created_at ASC` — is
+correct. It was never executed.
+
+**A false claim of my own, recorded rather than amended away.** Commit `44b5637`'s message
+asserts that eight route DB suites "have been running auth in memory under `test:db` all along"
+and that their `deleteUserAccount` cleanup is a Postgres-side no-op. **That is wrong.** All eight
+already set `DATABASE_URL`; their cleanup does reach Postgres. The claim was reasoned from
+`authStore`'s source without checking the suites, and `312307d` corrects it in the same branch's
+history. `--amend` is unavailable in this environment, so the false statement remains in the log
+and this paragraph is how a future reader learns not to act on it. There is no eight-suite gap.
+
+**Remedies, neither taken yet.** The fix shipped on `feat/report-periods` is the per-file line,
+matching the other eight — the smallest change that makes the suite test what it claims, with no
+effect on any other suite. The standing problem is untouched:
+
+1. **Make the seven stores' `useDatabase()` test-aware**, as `projectsStore`'s already is. All
+   nine per-file lines then become redundant and the hazard disappears at its source. Blast
+   radius is every DB-gated suite at once, since each would begin exercising Postgres paths it
+   currently takes in memory, and it cannot be verified in this environment — there is no local
+   Postgres, no Docker and no `psql`. It needs a CI run or a scratch `TEST_DATABASE_URL`.
+2. **Enforce the convention structurally** in `services/api/scripts/run-tests.sh`, which already
+   refuses to pass vacuously on three counters. The check is derivable rather than hand-written:
+   the set of non-test-aware stores is greppable (`function useDatabase` without
+   `TEST_DATABASE_URL` in its body), so any `TEST_DATABASE_URL`-gated suite importing one of them
+   and lacking the `DATABASE_URL` assignment is a failure. This is the cheaper of the two and does
+   not need a database to validate.
+
+Option 1 is the real fix and option 2 is what stops the ninth omission becoming a tenth. They are
+not alternatives.
+
+**Where it is already half-recorded.** `CLAUDE.md` §5 explains that `test` and `test:db` are
+separate runs *because* "some stores are test-aware … so setting `TEST_DATABASE_URL` for the
+whole suite flips those stores to the DB and breaks tests that assume the in-memory store". That
+is the same split, written from the other side — as a reason the two runs exist. What it does not
+say is that for the seven stores on the other side of the split, a DB suite gets the in-memory
+store unless it intervenes, and gets no warning when it does not.
+
+---
+
+### L110 — the TAP counter parsers in both `run-tests.sh` scripts depend on node's default test reporter, which changed between node 20 and node 24 — LOW (tooling hazard; CI is unaffected because it pins node 20, and the local failure is fail-closed and loud)
+
+**What this is.** Both vacuity-guarding test runners read their counters out of `node --test`'s TAP
+summary with `awk '/^# pass /{print $3}'`. That is the *default* output format on node 20 and is not
+the default on node 24: node switched the default reporter for a non-TTY stdout from `tap` to `spec`,
+and the spec reporter writes `ℹ pass 2` where the TAP reporter writes `# pass 2`. The parsers
+therefore read nothing on node 24, and every pinned count the runners exist to check becomes
+unreadable at once.
+
+**Why this is LOW and not higher.** CI pins the version that works, at
+`.github/workflows/ci.yml:67` (`node-version: 20`), so no pinned count is unchecked on any branch or
+on `main`. And the mobile parser fails **closed** — the message is already written for exactly this
+cause:
+
+```sh
+# apps/mobile/scripts/run-tests.sh:100
+PASSED=$(awk '/^# pass /{print $3}' "$OUT" | tail -1)
+if [ -z "$PASSED" ]; then
+  echo "ERROR: could not find a '# pass' line in the test output." >&2
+  echo "  The runner's summary format changed; update this parser rather than" >&2
+  echo "  dropping the check." >&2
+  exit 1
+fi
+```
+
+So the realistic cost is a local run on a system node that stops with an accurate diagnosis, not a
+green run that checked nothing. This is filed because the *next* reporter change may not be a
+rename, and because one of the four sites does not fail this cleanly — see the asymmetry below.
+
+**The measurements.** A two-test probe, run four ways on 29 October 2026. Local node is
+`/usr/local/bin/node` v24.13.1 (a system install); only v20.20.0 exists under `~/.nvm`.
+
+| node | flags | the line the parsers look for |
+|---|---|---|
+| v20.20.0 | default | `# pass 2` — **found** |
+| v24.13.1 | default | `ℹ pass 2` — **no `# pass` line at all** |
+| v24.13.1 | `--test-reporter=tap` | `# pass 2` — **found** |
+| v20.20.0 | `--test-reporter=tap` | `# pass 2` — **found** |
+
+The fourth row is the one that matters for the remedy: the flag is **backward-safe**, so it can be
+added without a version check and without touching CI's pinned 20. Note also that node 24's default
+run still **exits 0** — the reporter change is not itself an error, which is why the parsers are the
+only thing that notices.
+
+**A correction to my own earlier record.** I wrote, in PR 11's body and in the instruction this entry
+was filed from, that the dependency is in "all three `run-tests.sh` files" and that the fix touches
+"all three scripts". That is wrong in both halves. Measured:
+
+| | count | where |
+|---|---|---|
+| `run-tests.sh` scripts in the repo | **2** | `apps/mobile/scripts/`, `services/api/scripts/` |
+| TAP counter parse sites | **4** | mobile `100` (`# pass`), `122` (`# skipped`); API `239` (`# skipped`), `291` (`# pass`) |
+| real `node --test` invocation sites | **3** | mobile `88`; API `200`, `226` |
+
+There is no third script. The "three" was a conflation of the three *invocation* sites with the
+number of files, and one of those three invocations — API `200`, the `exec` on the DB path — parses
+nothing at all, so the flag is needed at only two of them for correctness and at all three for
+consistency.
+
+**The asymmetry between the four parse sites, which is the part worth keeping.** Three of the four
+fail closed with the "could not find a '# pass' line" message. The fourth, `services/api/scripts/run-tests.sh:291`, does not:
+
+```sh
+PASSED=$(awk '/^# pass /{print $3}' "$OUT" | tail -1)
+if [ "${PASSED:-0}" -ne "$EXPECTED_PASSES" ]; then
+  echo "ERROR: $MODE run passed 0 test(s), expected $EXPECTED_PASSES." >&2
+```
+
+`${PASSED:-0}` turns an unparseable summary into a **measured zero**, so the failure is reported as
+"the run passed 0 tests" rather than as "the parser stopped working". Those are different problems
+with different fixes, and a reader handed the first one will go looking at the test suite. The
+default is doing the opposite of what defaults are for here: it is converting a known-unknown into a
+confident wrong answer. Worth fixing even if the reporter question never arises again.
+
+**The remedy, not taken.** Pass `--test-reporter=tap` explicitly at all three `node --test`
+invocation sites, and replace `${PASSED:-0}` at API `291` with the same `[ -z "$PASSED" ]`
+fail-closed branch the other three use. One commit, five lines.
+
+**Why it is deliberately not done yet.** It is cross-cutting: both scripts are in the conflict set of
+nine of the twelve merges in the eleven-workstream train (`apps/mobile/scripts/run-tests.sh` is the
+single most frequent textual conflict in the whole batch — see
+`docs/NINE-WORKSTREAMS-HANDOVER.md` §7a). Editing either one mid-train adds a conflict hunk to every
+branch behind it, for a change that fixes nothing CI can see. It belongs in the same post-merge
+commit as the three loose floors, and is queued there.
+
+---
+
+### L111 — `rate-limit-redis-connecting.test.ts` is load-dependent and will occasionally go red in CI; that is expected and is not a regression — LOW (known flake, documented rather than fixed; an occasional random red in this file is not a signal)
+
+**What this is, and why it is being recorded rather than repaired.** This suite asserts things about a
+**time window**, not about a return value. It points the rate limiter at an unreachable Redis
+(`REDIS_URL = "redis://127.0.0.1:1"`) and then checks what the system says about itself at specific
+wall-clock moments: that it is quiet during the grace period and complains exactly once after it. The
+assertions are therefore races between the code's timers and the machine's scheduling, and on a
+loaded 8-core box running a 68-file suite in parallel they can lose.
+
+**The constants it races.** All four are set at module top or inline, and all four are real durations
+rather than fake timers:
+
+| constant | value | what it bounds |
+|---|---|---|
+| `RATE_LIMIT_REDIS_CONNECT_GRACE_MS` | `2000` | how long a connecting Redis stays unannounced |
+| `RATE_LIMIT_REDIS_READY_TIMEOUT_MS` | `800` | how long a readiness probe waits |
+| the "silence is bounded" sleep | `2600` | the test's own wait past the grace window |
+| the mid-flight sample | `250` | when state is read against a socket that accepts and never speaks RESP |
+
+The margin on the one that fails is **600 ms** — a 2600 ms sleep against a 2000 ms grace. A test
+process descheduled for longer than that inside the sleep reads the post-window state late, or reads
+it before the timer that was supposed to have fired has run, and the equality assertions
+(`degradationReports === 1`, `state === "degraded"`) go red. Nothing is wrong with the code when that
+happens.
+
+**What was measured, and on what date.** 28–29 October 2026.
+
+| measurement | result |
+|---|---|
+| the original observation | **green / red / green** across three full in-memory suite runs on the same tree, nothing edited in between |
+| the file in isolation, repeated | **8 of 8 green** (`flake-iso-1..8`), 4 tests each |
+| the failing test, when it fails | `not ok 144 - 'connected' is never claimed while the socket is still opening` |
+| the file's blob across the whole train | `1a2b38c4b0…` **identical** at base `ee7e093` and at `main` `e00b8f8` |
+| `middleware/rateLimit.ts` across the train | `5f9ab8357c…` **identical** at both |
+| `git log ee7e093..origin/main -- <file>` | **empty** |
+
+So the conclusion that matters for reading CI: **no branch in the eleven-workstream batch touched
+this file or the middleware it tests.** A red here cannot have been introduced by any of them. If it
+goes red on a PR, re-run it; if it goes red twice on the same tree and green on a third, that is this
+entry and not a finding.
+
+**An honest negative result.** I tried to reproduce it deliberately, by loading all 8 cores and
+re-running the file under contention. It **did not reproduce** — 2 completed loaded runs, both
+4 pass / 0 fail. The experiment also cost more than it returned: the construct I used to generate
+load spawned two batches of spinning subshells that outlived their parent and were reparented to
+PID 1, taking the load average to 24.21 before I noticed and killed them. That was my own error, not
+a property of the test.
+
+The consequence for this entry is that it rests on (a) the original green/red/green on an unchanged
+tree, (b) the blob-identity proof that nothing in the batch is implicated, (c) today's 8/8 in
+isolation, and (d) the 600 ms margin above — **not** on a reproduction I can perform on demand. The
+mechanism is inferred from the constants, and it is the only mechanism consistent with a file that is
+8/8 alone and intermittently red in a parallel suite. I have not proved it, and if the real cause is
+something else, the thing that will show it is a red run whose timing does not fit these numbers.
+
+**Remedies, none taken.** In increasing order of honesty and cost: raise the 2600 ms sleep, which
+widens the margin and makes the suite slower without making the assertion deterministic; replace the
+sleeps with injected fake timers, which makes it deterministic and stops it testing the real timer
+path it exists to test; or move the file to a serial, non-parallel mode in `run-tests.sh` the way the
+DB suites already are (`--test-concurrency=1`), which keeps the real timers and removes the
+contention. The third is the right one if this becomes annoying. It is not worth a cross-cutting
+`run-tests.sh` edit mid-train, for the reason in L110.
+
+---
+
+### L112 — a merge resolution can change the population a pinned count measures while leaving the pin line untouched on that side, so git auto-merges a now-stale pin with no conflict — MEDIUM (merge-integrity hazard class; one live instance, caught only because the pin was an equality check and not a floor)
+
+**What this is.** A pinned count is an assertion about a population — how many workflows, test files,
+tests, gated suites, predicates. A merge can change that population *without touching the line that
+records it*, because the population lives in other files. When the side that changes the population is
+also the side that did not edit the pin line, git has nothing to resolve: one side edited the line,
+the other did not, so the three-way merge takes the edit and reports success. The merged tree then
+pins a number measured against a population that no longer exists.
+
+This is not the same hazard as a pin that both sides edited — that conflicts, and conflicts get read.
+It is the complement of it, and it is invisible by exactly the mechanism that makes the other one
+visible.
+
+**The instance, and it is reproducible rather than anecdotal.** `scripts/assert-workflow-runners-pinned.sh`
+carries two pins eleven lines apart. Workstream 8 had deleted `deploy-api.yml`, so on that branch both
+pins were correctly lowered. Ruling F3 then kept workstream 0's *renamed* replacement for that
+workflow, which puts the file back — so both lowered pins became wrong at the moment the resolution
+was chosen. Three-way state:
+
+| ref | `EXPECTED_WORKFLOWS` | `EXPECTED_PINNED` |
+|---|---|---|
+| merge base `ee7e093` | 3 | 4 |
+| `main` at position 10 `274ae567` | **4** (raised — a workflow was added) | 4 (untouched) |
+| workstream 8 tip `b5dbbf5` | **2** (lowered) | **3** (lowered) |
+
+Both pins were wrong in the same way, for the same reason, and needed the same correction. Git
+flagged one and carried the other. Reproduced directly on the three blobs:
+
+```
+$ git merge-file -L ours -L base -L theirs result.sh base.sh theirs.sh
+merge-file exit: 1
+
+40:<<<<<<< ours
+41:EXPECTED_WORKFLOWS=2  # ci.yml, build-mobile.yml (deploy-api.yml deleted: HALF-BUILT F3)
+42:=======
+50:EXPECTED_WORKFLOWS=4
+51:>>>>>>> theirs
+95:EXPECTED_PINNED=3  # build-mobile.yml has two jobs, ci.yml one (deploy-api.yml deleted: HALF-BUILT F3)
+```
+
+`EXPECTED_WORKFLOWS` is inside conflict markers because `main` happened to have edited that line too.
+`EXPECTED_PINNED=3` is at line 95 with **no marker**, because `main` happened not to have. The
+difference between a pin a human is forced to read and a pin that slides through is not the pin's
+importance, not its staleness, and not whether the merge invalidated it — it is the coincidence of
+whether the other branch independently edited the same line. That is the whole finding.
+
+**The detection point, which is the argument.** The merged tree failed:
+
+```
+FAIL: matched 4 pinned 'runs-on:' lines, expected 3.
+./scripts/ci.sh → exit 1
+```
+
+It failed because that check is written as an **equality**, `[ "$PINNED" != "$EXPECTED_PINNED" ]`.
+Had it been written as the floor the same script's sibling checks use — `[ "$PINNED" -lt "$EXPECTED_PINNED" ]`,
+or the `>= 8` shape used in three test files in this repo — then 4 pinned runners against a pin of 3
+would have **passed**, and the merged tree would have carried a pin asserting less than the truth with
+nothing to say so. The stale pin was found by the pin, and only because of how the pin was spelled.
+
+**Equality over floors wherever the population is knowable, and this is now evidence for it rather
+than a preference.** The standing rule in this project is that any pinned count is measured, never
+hand-written, after `EXPECTED_WRITE_STEPS = 13` read green against a sequence of 14 for the life of a
+branch. L112 adds the second half of that rule: a **measured** count still has to be written as an
+equality to do its job, because a floor cannot distinguish "the population is as I measured it" from
+"the population has grown and I am no longer measuring anything". Three floors in this repo were loose
+on the merged tree at position 11, each measured and each still passing:
+
+| floor | reads | measured on `main` | where |
+|---|---|---|---|
+| `predicates.length` | `>= 8` | **11** | `apps/mobile/lib/permissions.test.ts:135` |
+| `files.length` | `>= 40` | **67** | `services/api/src/storage/store-ddl-guard.test.ts:110` |
+| `files.length` | `>= 14` | **15** | `services/api/src/routes/async-route-errors.test.ts:276` |
+
+None of the three is a defect today and all three are green. That is the point: they are green at 11
+against 8 and at 67 against 40, so they would be equally green at 2 against 8 having lost nine
+predicates, and equally green having lost 27 route files — any of which is the population changing
+underneath a check that has stopped noticing. Raising them is queued as one post-merge commit.
+
+**The distinction not to overstate, because one of those same files gets it right.**
+`async-route-errors.test.ts` uses a floor at line 276 for the *population* and an **equality** at 293
+for the *property*:
+
+```ts
+assert.ok(files.length >= 14, `expected the route files to still be here, found ${files.length}`);
+...
+assert.equal(wrapped, files.length,
+  `expected all ${files.length} route files to build a wrapped router, ${wrapped} do`);
+```
+
+That is a legitimate shape — the floor is a vacuity guard answering "did I read anything at all", and
+the real assertion is the equality against whatever population was read. A floor used that way does
+not go stale in the same manner, because the number it compares against is measured at run time
+rather than written down. So the rule is not "no floors": it is **equality wherever the number is
+written down, and a run-time-derived population wherever one can be derived.** A hand-written floor is
+the worst of the three, because it is a written-down number that cannot fail upward.
+
+**What would actually have caught this, and what would not.** Not a floor. Not reading the diff —
+there is no diff to read on the carried line, which is the hazard. Not running the branch's own gates,
+because the pin is correct on the branch. Three things would:
+
+1. **Equality checks on every written-down pin**, which is what caught this one.
+2. **Re-measuring every pin on the merged tree rather than on either parent** — the practice this
+   batch adopted after the first instance, and the one that found the `isAtLeast` stale doc comment at
+   position 11 as well.
+3. **A deliberate audit of the pins adjacent to any line resolved by hand.** The generalisation of
+   this instance: when a resolution is made on one line of a file, every *other* pin in that file is a
+   candidate for having been invalidated by the same resolution, and git's silence about them carries
+   no information.
+
+**Where it is already recorded, and why this entry exists anyway.** This instance is written up twice
+already — in `scripts/assert-workflow-runners-pinned.sh`'s own comment block and in
+`docs/NINE-WORKSTREAMS-HANDOVER.md` §9c item 15, which notes it is the *second* occurrence of the same
+shape and that "back-porting a pin fixes the line you edited and leaves the line next to it to merge
+silently". Both of those record it as an incident in a specific merge. It is filed here as a class,
+because the conditions that produce it are generic — a pin, a population in other files, a resolution
+that changes the population, and one side not having touched the pin line — and none of them is
+specific to workflows, to this script, or to this batch.
