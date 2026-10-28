@@ -444,12 +444,72 @@ export async function approveDiary(diaryId: string): Promise<Diary> {
  * `generation` rides along in the response so the preview and the exports can
  * mark the diary honestly even before it is persisted.
  */
-export async function generateDiary(payload: { siteId: string; period: string }): Promise<Diary> {
-  const data = await request<{ success: boolean; diary: Diary; generation?: DiaryGeneration | null }>("POST", `/api/generate-diary`, {
+/**
+ * The dates a generated report covers, and what the server left out of it.
+ *
+ * Returned on every response since the API half of AUDIT L92, and read here so
+ * the portal can state the window instead of a period word. `mode` says whether
+ * the server used the range it was given or anchored on the latest entry it
+ * could see — worth showing, because an anchored window is dates the user did
+ * not choose.
+ */
+export type ReportWindowResult = {
+  from: string;
+  to: string;
+  period?: string;
+  mode?: "explicit" | "anchored";
+  anchoredOn?: string;
+};
+
+export type GeneratedDiaryResult = {
+  diary: Diary;
+  reportWindow: ReportWindowResult | null;
+  /** Entries the server could not place in any window, for having no usable date. */
+  undatedEntries: number;
+  /** Entries whose author could not be named within the caller's company (L96). */
+  unattributedEntries: number;
+  /** True when the report hit the server's entry ceiling and is not the whole window. */
+  truncatedAtCeiling: boolean;
+};
+
+/**
+ * `from` and `to` are optional and must be sent TOGETHER or not at all — the
+ * API refuses a half-range rather than guessing which of the two readings of a
+ * lone `from` was meant, and the portal does not second-guess that.
+ *
+ * Omitting both is the pre-L92 behaviour: the server anchors the window on the
+ * latest entry it can see. That is still what this portal sends when the user
+ * has not chosen dates, so the API shipping ahead of this bundle changes
+ * nothing for anyone.
+ */
+export async function generateDiary(payload: {
+  siteId: string;
+  period: string;
+  from?: string;
+  to?: string;
+}): Promise<GeneratedDiaryResult> {
+  const range = payload.from && payload.to ? { from: payload.from, to: payload.to } : {};
+  const data = await request<{
+    success: boolean;
+    diary: Diary;
+    generation?: DiaryGeneration | null;
+    reportWindow?: ReportWindowResult;
+    undatedEntries?: number;
+    unattributedEntries?: number;
+    truncatedAtCeiling?: boolean;
+  }>("POST", `/api/generate-diary`, {
     siteId: payload.siteId,
     period: payload.period,
+    ...range,
   });
-  return { ...data.diary, generation: data.generation ?? null };
+  return {
+    diary: { ...data.diary, generation: data.generation ?? null },
+    reportWindow: data.reportWindow ?? null,
+    undatedEntries: typeof data.undatedEntries === "number" ? data.undatedEntries : 0,
+    unattributedEntries:
+      typeof data.unattributedEntries === "number" ? data.unattributedEntries : 0,
+    truncatedAtCeiling: data.truncatedAtCeiling === true,
+  };
 }
 
 /**

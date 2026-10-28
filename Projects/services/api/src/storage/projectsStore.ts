@@ -20,6 +20,33 @@ type SiteStatus = "active" | "completed" | "on-hold";
 type DiaryStatus = "draft" | "approved";
 type ReportPeriod = "daily" | "weekly" | "monthly";
 
+/**
+ * The table and the column a report range filters on, named once.
+ *
+ * AUDIT L99 is what a hand-written name in a SQL predicate costs: a
+ * `deleted_at IS NULL` clause sat in `updateSiteProgress` against a column that
+ * exists in no migration, so every progress write matched zero rows and site
+ * progress had never once worked in production. Nothing failed — the predicate
+ * was simply false, forever. A literal in a predicate is a claim about the
+ * schema that no compiler and no test checks.
+ *
+ * So the range predicate below is built from these two constants, and
+ * `storage/report-range-db.test.ts` asserts against
+ * `information_schema.columns` that the column named here is a column that
+ * exists on the table named here. That test is the only thing standing between
+ * a rename and another silently-false predicate.
+ *
+ * `date` is TEXT (migration 001), holding `YYYY-MM-DD`. The range comparison is
+ * therefore a string comparison, which is correct for that format and is the
+ * same comparison `utils/reportWindow.ts` makes in memory — deliberately, so
+ * the DB path and the in-memory path cannot disagree about what a window means.
+ */
+export const PROJECT_ENTRIES_TABLE = "project_entries";
+export const PROJECT_ENTRY_DATE_COLUMN = "date";
+
+/** An inclusive date-only range over `PROJECT_ENTRY_DATE_COLUMN`. */
+export type EntryDateRange = { from: string; to: string };
+
 export type SiteRecord = {
   id: string;
   ownerEmail: string;
@@ -513,12 +540,32 @@ export async function deleteSite(actor: Actor, siteId: string): Promise<boolean>
   return (result.rowCount ?? 0) > 0;
 }
 
-export async function listEntries(actor: Actor, siteId?: string, limit = 200, offset = 0): Promise<EntryRecord[]> {
+/**
+ * Entries the actor may read, newest first.
+ *
+ * `range` filters on the entry's own `date` IN THE QUERY, which is AUDIT L98's
+ * fix. Without it a report loaded `limit` rows ordered by `timestamp` and then
+ * filtered them by period in JavaScript, so a monthly report on a site with
+ * more than `limit` entries since was computed from whichever 200 rows happened
+ * to be newest — and the entries it dropped were silently absent rather than
+ * reported. Raising the number would have hidden the same defect for longer,
+ * which the audit notes is exactly what happened the first time. Filtering
+ * first means the cap applies to the window the caller asked for, and the
+ * caller can tell when it bit (see `REPORT_ENTRY_CEILING` in routes/ai.ts).
+ */
+export async function listEntries(
+  actor: Actor,
+  siteId?: string,
+  limit = 200,
+  offset = 0,
+  range?: EntryDateRange
+): Promise<EntryRecord[]> {
   if (!useDatabase()) {
     await ensureMemoryLoaded();
     return Array.from(memory.entries.values())
       .filter((entry) => canReadRow(actor, "entry", entry))
       .filter((entry) => (siteId ? entry.siteId === siteId : true))
+      .filter((entry) => (range ? entry.date >= range.from && entry.date <= range.to : true))
       .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
       .slice(offset, offset + limit);
   }
@@ -533,11 +580,17 @@ export async function listEntries(actor: Actor, siteId?: string, limit = 200, of
     params.push(siteId);
     queryParts.push(`site_id = $${params.length}`);
   }
+  if (range) {
+    params.push(range.from, range.to);
+    queryParts.push(
+      `${PROJECT_ENTRY_DATE_COLUMN} >= $${params.length - 1} AND ${PROJECT_ENTRY_DATE_COLUMN} <= $${params.length}`
+    );
+  }
   const where = `WHERE ${queryParts.join(" AND ")}`;
   params.push(limit, offset);
   const result = await withTenant(actor, (client) =>
     client.query(
-      `SELECT * FROM project_entries ${where} ORDER BY timestamp DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      `SELECT * FROM ${PROJECT_ENTRIES_TABLE} ${where} ORDER BY timestamp DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
     )
   );
