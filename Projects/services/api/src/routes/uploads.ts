@@ -5,7 +5,11 @@ import { requireAuth, AuthenticatedRequest, AUTH_ERROR_CODES } from "../middlewa
 import { verifyAuthToken } from "../utils/authToken";
 import { getMediaStorage } from "../storage/mediaStorage";
 import { signUploadPath, verifyUploadSignature } from "../utils/signedUrl";
-import { recordUpload, uploadBelongsToActorCompany } from "../storage/uploadsStore";
+import {
+  recordUpload,
+  uploadBelongsToActorCompany,
+  uploadIdsBelongingToActorCompany,
+} from "../storage/uploadsStore";
 import { rateLimit } from "../middleware/rateLimit";
 
 export const uploadsRouter: Router = asyncSafeRouter();
@@ -88,24 +92,44 @@ uploadsRouter.post("/uploads/sign", requireAuth, async (req, res) => {
 
   const companyId = (req as AuthenticatedRequest).auth.companyId;
   const base = `${req.protocol}://${req.get("host")}`;
-  const signed = await Promise.all(
-    (paths as unknown[]).map(async (raw) => {
-      const path = typeof raw === "string" ? raw.trim() : "";
-      // Extract id and filename from /api/uploads/:id/:filename
-      const match = path.match(/\/api\/uploads\/([^/]+)\/([^/?]+)/);
-      if (!match) return { path, url: null, error: "Invalid upload path." };
-      const [, id, filename] = match;
-      if (!(await uploadBelongsToActorCompany({ companyId }, id))) {
-        // Do not confirm existence of another tenant's file.
-        return { path, url: null, error: "Not found." };
-      }
-      const { sig, exp } = signUploadPath(id, filename);
-      return {
-        path,
-        url: `${base}/api/uploads/${id}/${filename}?sig=${encodeURIComponent(sig)}&exp=${exp}`,
-      };
-    })
+
+  // Parse every path first, then ask about ownership ONCE.
+  //
+  // This used to be a `Promise.all` over the paths with the single-id ownership
+  // check inside it, which made a fifty-path request fifty concurrent
+  // `withTenant` TRANSACTIONS — BEGIN, set_config, SELECT, COMMIT each — all
+  // started at the same moment against a pool that holds far fewer connections.
+  // Signing is on the path of every screen that shows a photograph, so this was
+  // the hottest query in the API. One `id = ANY(...)` answers all fifty.
+  //
+  // The ordering and the per-path response shape are unchanged: the map below
+  // runs over the parsed list in the order it arrived, so `signed[i]`
+  // corresponds to `paths[i]` exactly as before. The mobile client matches
+  // results by `path`, but the portal's own helper does not promise to.
+  const parsed = (paths as unknown[]).map((raw) => {
+    const path = typeof raw === "string" ? raw.trim() : "";
+    // Extract id and filename from /api/uploads/:id/:filename
+    const match = path.match(/\/api\/uploads\/([^/]+)\/([^/?]+)/);
+    return match ? { path, id: match[1], filename: match[2] } : { path, id: null, filename: null };
+  });
+
+  const owned = await uploadIdsBelongingToActorCompany(
+    { companyId },
+    parsed.map((entry) => entry.id).filter((id): id is string => Boolean(id))
   );
+
+  const signed = parsed.map(({ path, id, filename }) => {
+    if (!id || !filename) return { path, url: null, error: "Invalid upload path." };
+    if (!owned.has(id)) {
+      // Do not confirm existence of another tenant's file.
+      return { path, url: null, error: "Not found." };
+    }
+    const { sig, exp } = signUploadPath(id, filename);
+    return {
+      path,
+      url: `${base}/api/uploads/${id}/${filename}?sig=${encodeURIComponent(sig)}&exp=${exp}`,
+    };
+  });
 
   return res.json({ signed });
 });

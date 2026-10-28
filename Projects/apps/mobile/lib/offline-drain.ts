@@ -47,7 +47,11 @@ export interface DrainDeps {
   // ───────────────────────────────────────────────────────────────────────────
   hydratePhotos: (photos: Photo[]) => Promise<Photo[]>;
   uploadPhoto: (photo: Photo) => Promise<Photo>;
-  deletePhotoPayloads: (photoIds: string[]) => Promise<void>;
+  // Returns `unknown` rather than `void`: the real implementation now reports
+  // what the retention pass evicted alongside the release (AUDIT L6), and the
+  // drain has no use for that. Widening here keeps the account available to
+  // callers that want it without the drain pretending to read it.
+  deletePhotoPayloads: (photoIds: string[]) => Promise<unknown>;
   isManagedMediaUri: (uri: string | undefined | null) => boolean;
   updateQueuedPayload: (id: string, payload: unknown) => Promise<void>;
 
