@@ -28,6 +28,7 @@ import {
   listEntries,
   listSiteInvites,
   listSiteMembers,
+  listBinnedSites,
   listSites,
   listTemplates,
   removeSiteMember,
@@ -36,10 +37,12 @@ import {
   updateSiteProgress,
   updateSiteClient,
   updateTemplate,
+  restoreSite,
 } from "../storage/projectsStore";
 import { isRateLimitedByAccount, LIMITS } from "../middleware/rateLimit";
 import { sendSiteInvite } from "../services/notificationService";
 import { normalizeEmail } from "../utils/emailAddresses";
+import { BIN_RETENTION_DAYS, daysInBin } from "../storage/softDelete";
 
 function parsePagination(query: Record<string, unknown>) {
   const limit = Math.min(Math.max(Number(query.limit) || 200, 1), 500);
@@ -287,10 +290,39 @@ projectsRouter.patch("/projects/sites/:id", requireAtLeast("manager"), async (re
   return res.json({ site });
 });
 
+// Still DELETE, and still 404 when it does nothing, so no client changes to
+// keep working. What changed is underneath: this now bins the site instead of
+// hard-deleting it and nine cascading tables with it. The response gains
+// `binned: true` and the retention period so a client can say what happened;
+// `ok: true` is kept for the callers that only check that.
 projectsRouter.delete("/projects/sites/:id", requireAtLeast("manager"), async (req, res) => {
   const removed = await deleteSite(getActor(req as unknown as AuthenticatedRequest), req.params.id);
   if (!removed) return res.status(404).json({ error: "Site not found." });
-  return res.json({ ok: true });
+  return res.json({ ok: true, binned: true, retentionDays: BIN_RETENTION_DAYS });
+});
+
+// The bin. Manager and above, matching the gate on DELETE: whoever can put a
+// site in the bin can see what is in it and take it back out. A viewer cannot,
+// and crew cannot — neither can delete a site in the first place.
+projectsRouter.get("/projects/sites/bin", requireAtLeast("manager"), async (req, res) => {
+  const { limit, offset } = parsePagination(req.query as Record<string, unknown>);
+  const sites = await listBinnedSites(getActor(req as unknown as AuthenticatedRequest), limit, offset);
+  return res.json({
+    sites: sites.map((site) => ({ ...site, daysInBin: daysInBin(site.deletedAt) })),
+    retentionDays: BIN_RETENTION_DAYS,
+    limit,
+    offset,
+  });
+});
+
+projectsRouter.post("/projects/sites/:id/restore", requireAtLeast("manager"), async (req, res) => {
+  const site = await restoreSite(getActor(req as unknown as AuthenticatedRequest), req.params.id);
+  // 404 covers both "no such site" and "that site is not in the bin". They are
+  // the same answer to the caller — there is nothing at that address to restore
+  // — and distinguishing them would tell a manager in company A that a site id
+  // belonging to company B exists.
+  if (!site) return res.status(404).json({ error: "Site not found in the bin." });
+  return res.json({ site });
 });
 
 projectsRouter.get("/projects/entries", async (req, res) => {
@@ -308,6 +340,10 @@ projectsRouter.post("/projects/entries", async (req, res) => {
     return res.status(400).json({ error: "Invalid entry payload.", details: parsed.error.flatten() });
   }
   const entry = await createEntry(actor, parsed.data);
+  // A binned site, another company's site and a nonexistent one are one answer.
+  // See createEntry: an entry filed against a binned site is written and then
+  // never readable, so a 201 here loses the work and calls it saved.
+  if (!entry) return res.status(404).json({ error: "Site not found." });
   return res.status(201).json({ entry });
 });
 

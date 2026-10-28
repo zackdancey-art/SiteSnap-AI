@@ -261,10 +261,27 @@ export default function SiteDetailScreen() {
       void doDelete();
       return;
     }
-    Alert.alert("Delete Site", `Delete "${site.name}" and all its entries?`, [
-      { text: "Cancel", style: "cancel" },
-      { text: "Delete", style: "destructive", onPress: () => void doDelete() },
-    ]);
+    // The old copy read `Delete "X" and all its entries?` and was true when it
+    // was written: the route hard-deleted, and nine tables cascade off
+    // project_sites, so the entries really did go. Phase 6 bins the site
+    // instead, and leaving that sentence up would be the AUDIT L73 habit in its
+    // other direction -- telling somebody their records were destroyed when
+    // they were not, which is how a recoverable site never gets recovered.
+    //
+    // It states no retention period. The number lives in one place
+    // (BIN_RETENTION_DAYS, services/api/src/storage/softDelete.ts) and this
+    // dialogue runs BEFORE the request that would report it, so a figure here
+    // could only be a second copy that drifts. The bin screen shows the
+    // countdown, from the server.
+    Alert.alert(
+      "Delete Site",
+      `Move "${site.name}" to the bin? Its diary entries and records are kept, and ` +
+        `you can restore the site from Settings › Deleted Sites.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Delete", style: "destructive", onPress: () => void doDelete() },
+      ]
+    );
   };
 
   const statusColor =

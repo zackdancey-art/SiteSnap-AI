@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from "uuid";
 import { Actor } from "./actor";
 import { canEditRow, canReadRow, editOwnershipSql, readVisibilitySql } from "./recordScope";
 import { withTenant } from "./tenant";
+import { liveOnly, softDeleteAssignment } from "./softDelete";
 
 /**
  * The table and the approval columns, named once.
@@ -253,7 +254,7 @@ export async function listTimecards(actor: Actor, siteId?: string): Promise<Time
       .sort((a, b) => b.date.localeCompare(a.date));
   }
   const params: unknown[] = [actor.companyId];
-  const conditions = ["deleted_at IS NULL", `company_id = $1`];
+  const conditions = [liveOnly(TIMECARDS_TABLE), `company_id = $1`];
   const visibility = readVisibilitySql(actor, "timesheet", params);
   if (visibility) conditions.push(visibility);
   if (siteId) { params.push(siteId); conditions.push(`site_id = $${params.length}`); }
@@ -360,7 +361,7 @@ export async function updateTimecard(
 
   return withTenant(actor, async (client) => {
     const selectParams: unknown[] = [id, actor.companyId];
-    const selectConditions = ["id = $1", "company_id = $2", "deleted_at IS NULL"];
+    const selectConditions = ["id = $1", "company_id = $2", liveOnly(TIMECARDS_TABLE)];
     const ownership = editOwnershipSql(actor, "timesheet", selectParams);
     if (ownership) selectConditions.push(ownership);
     // The whole row rather than the status column alone, so that an edit which
@@ -458,7 +459,7 @@ export async function setTimecardApproval(
       ` ${TIMECARD_APPROVED_BY_COLUMN} = $4,` +
       ` ${TIMECARD_APPROVED_AT_COLUMN} = ${clearsReview ? "NULL" : "NOW()"},` +
       ` ${noteAssignment}, updated_at = NOW()` +
-      ` WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL RETURNING *`,
+      ` WHERE id = $1 AND company_id = $2 AND ${liveOnly(TIMECARDS_TABLE)} RETURNING *`,
     params
   ));
   if (result.rowCount === 0) return { ok: false, reason: "not-found" };
@@ -495,7 +496,7 @@ export async function deleteTimecard(actor: Actor, id: string): Promise<Timecard
 
   return withTenant(actor, async (client) => {
     const selectParams: unknown[] = [id, actor.companyId];
-    const selectConditions = ["id = $1", "company_id = $2", "deleted_at IS NULL"];
+    const selectConditions = ["id = $1", "company_id = $2", liveOnly(TIMECARDS_TABLE)];
     const ownership = editOwnershipSql(actor, "timesheet", selectParams);
     if (ownership) selectConditions.push(ownership);
     const current = await client.query<{ approval_status: string | null }>(
@@ -508,7 +509,7 @@ export async function deleteTimecard(actor: Actor, id: string): Promise<Timecard
     if (!isTimecardEditable(status)) return { ok: false, reason: "locked", status } as const;
 
     const result = await client.query(
-      `UPDATE ${TIMECARDS_TABLE} SET deleted_at = NOW(), updated_at = NOW()` +
+      `UPDATE ${TIMECARDS_TABLE} SET ${softDeleteAssignment(TIMECARDS_TABLE)}, updated_at = NOW()` +
         ` WHERE id = $1 AND company_id = $2 RETURNING *`,
       [id, actor.companyId]
     );
@@ -540,7 +541,8 @@ export async function findTimecardOwner(
   }
   const result = await withTenant(actor, (client) =>
     client.query<{ owner_email: string; company_id: string }>(
-      `SELECT owner_email, company_id FROM ${TIMECARDS_TABLE} WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL LIMIT 1`,
+      `SELECT owner_email, company_id FROM ${TIMECARDS_TABLE}` +
+        ` WHERE id = $1 AND company_id = $2 AND ${liveOnly(TIMECARDS_TABLE)} LIMIT 1`,
       [id, actor.companyId]
     )
   );

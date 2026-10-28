@@ -1,6 +1,15 @@
 import React, { createContext, useContext, useEffect, useState } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { Site, Client, Entry, GeneratedDiary, SiteTemplate, SiteMember, InviteResult } from "@/lib/types";
+import {
+  Site,
+  Client,
+  BinnedSite,
+  Entry,
+  GeneratedDiary,
+  SiteTemplate,
+  SiteMember,
+  InviteResult,
+} from "@/lib/types";
 import { resolveApiBaseUrl } from "@/lib/api-base-url";
 import { useAuth, isTokenExpiringSoon } from "@/lib/auth-context";
 import { SessionExpiredError, notifySessionExpired } from "@/lib/session";
@@ -67,6 +76,11 @@ interface DataContextType {
   /** Hands failed ops back to the drain. Returns how many were queued again. */
   retryFailedSync: (ids?: string[]) => Promise<number>;
   addSite: (site: Omit<Site, "id" | "createdAt">) => Promise<void>;
+  /**
+   * Moves a site to the bin. Phase 6: this no longer destroys anything. The
+   * site and every record under it stay in the database and can be restored
+   * until the retention period runs out.
+   */
   deleteSite: (id: string) => Promise<void>;
   /**
    * The four client calls, and ALL FOUR REQUIRE CONNECTIVITY. That is a
@@ -87,6 +101,16 @@ interface DataContextType {
   deleteClient: (id: string) => Promise<number>;
   /** File a site under a client, or pass null to unfile it. */
   fileSite: (siteId: string, clientId: string | null) => Promise<void>;
+
+  /**
+   * The sites in the bin, newest first, with the number of days each has been
+   * there. Not held in state like `sites` is: a screen nobody has opened should
+   * not be refetching, and a stale bin list is worse than no bin list when the
+   * decision being made on it is whether something still exists.
+   */
+  listBinnedSites: () => Promise<{ sites: BinnedSite[]; retentionDays: number }>;
+  /** Takes a site back out of the bin, and refreshes so its records reappear. */
+  restoreSite: (id: string) => Promise<void>;
   addEntry: (
     entry: Omit<Entry, "id" | "timestamp" | "createdAt">,
     onProgress?: SaveProgressCallback
@@ -860,8 +884,21 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  /**
+   * Phase 6: the route is still DELETE and still 404s when it does nothing, so
+   * this call is unchanged. What changed is what it means on the server -- the
+   * site is binned, not destroyed.
+   *
+   * The local filtering below stays, and is still correct: a binned site is
+   * absent from `GET /projects/sites`, and its entries and diaries are absent
+   * from their listings too, so dropping them from state matches what the next
+   * refresh would produce. It is a HIDE, not a destroy -- which is why
+   * `restoreSite` can bring all three back with a plain refresh.
+   */
   const deleteSite = async (id: string) => {
-    await apiJson<{ ok: boolean }>(`/projects/sites/${id}`, { method: "DELETE" });
+    await apiJson<{ ok: boolean; binned?: boolean; retentionDays?: number }>(`/projects/sites/${id}`, {
+      method: "DELETE",
+    });
     const updatedSites = sites.filter((s) => s.id !== id);
     const updatedEntries = entries.filter((e) => e.siteId !== id);
     const updatedDiaries = diaries.filter((d) => d.siteId !== id);
@@ -978,6 +1015,24 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         })
       );
     }
+  };
+
+  const listBinnedSites = async (): Promise<{ sites: BinnedSite[]; retentionDays: number }> => {
+    const response = await apiJson<{ sites: BinnedSite[]; retentionDays: number }>(
+      "/projects/sites/bin"
+    );
+    return { sites: response.sites ?? [], retentionDays: response.retentionDays };
+  };
+
+  /**
+   * `refresh()` rather than splicing the restored site into state: restoring a
+   * site brings its entries and diaries back with it, and this provider holds
+   * all three. Reconstructing that here would mean deciding which of the cached
+   * entries belong to the restored site, when the server already knows.
+   */
+  const restoreSite = async (id: string) => {
+    await apiJson<{ site: Site }>(`/projects/sites/${id}/restore`, { method: "POST" });
+    await refresh();
   };
 
   const addEntry = async (
@@ -1268,6 +1323,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         updateClient,
         deleteClient,
         fileSite,
+        listBinnedSites,
+        restoreSite,
         addEntry,
         updateEntry,
         deleteEntry,

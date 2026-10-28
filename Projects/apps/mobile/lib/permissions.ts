@@ -90,10 +90,32 @@ export function canInvite(companyRole: unknown): boolean {
 }
 
 /**
- * Removing a site. Exception 2: editing entries is daily work, removing a site
- * is not, and the bin that would make it recoverable does not exist yet.
+ * Removing a site. Exception 2: editing entries is daily work and removing a
+ * site is not.
+ *
+ * The clause that used to end this comment -- "and the bin that would make it
+ * recoverable does not exist yet" -- is no longer true. The bin exists: the
+ * route soft-deletes, and canSeeSiteBin below leads to where it can be undone.
+ * The gate stays where it was anyway, because the records under a site are the
+ * seven-year compliance evidence and taking them out of the day's listings is
+ * still not daily work.
  */
 export function canDeleteSite(companyRole: unknown): boolean {
+  return isManagerOrAbove(companyRole);
+}
+
+/**
+ * The bin, and restoring from it. Gated with canDeleteSite deliberately: the
+ * same people who can put a site in the bin can take it out again, and nobody
+ * else can see what is in there.
+ *
+ * It matches the API exactly -- GET /projects/sites/bin and
+ * POST /projects/sites/:id/restore are both requireAtLeast("manager") -- which
+ * is the point of it being a function here rather than a condition in the
+ * screen: a Settings row leading to a screen that can only 403 is worse than no
+ * row, because the person reads it as the feature being broken.
+ */
+export function canSeeSiteBin(companyRole: unknown): boolean {
   return isManagerOrAbove(companyRole);
 }
 

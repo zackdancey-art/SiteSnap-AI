@@ -53,13 +53,12 @@ cd "$(dirname "$0")/.."
 # This number is EXPECTED TO CHANGE — raise it in the same commit that adds a
 # DB-gated suite. That is the point: the change has to be deliberate and shows
 # up in review, rather than a count drifting unobserved.
-# 17, MEASURED on the tree this branch merges into -- main plus the PRs
+# 19, MEASURED on the tree this branch merges into -- main plus the PRs
 # ahead of it in the merge order -- not on this branch alone. The number is
-# POSITION-DEPENDENT: 11 on main, +1 clients (PR 2), +1 timesheets (PR 3),
-# +1 whs (PR 4), +3 here = 17. This branch wrote 14, which is main plus its
-# own three. Every count and every position:
+# POSITION-DEPENDENT: 11 on main, +1 clients, +1 timesheets, +1 whs, +3
+# report-periods, +2 here = 19. Every count and every position:
 # docs/NINE-WORKSTREAMS-HANDOVER.md.
-EXPECTED_DB_SUITES=17
+EXPECTED_DB_SUITES=19
 
 # How many individual TESTS are gated on REDIS_TEST_URL.
 #

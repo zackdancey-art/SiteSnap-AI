@@ -6,6 +6,63 @@
 // This is finding H5. Keep as .js (not .json) so `__dirname` is available.
 const tsconfigRootDir = __dirname;
 
+// ── The soft-delete column name is banned from SQL text ───────────────────
+//
+// AUDIT L99: `updateSiteProgress` carried `deleted_at IS NULL` against
+// `project_sites`, which has no such column. Every call against Postgres failed
+// with `column "deleted_at" does not exist`, so site progress had never once
+// worked in production, and nothing in the repo noticed for months. The author
+// of that predicate did not forget to check -- they believed the column was
+// there, because four sibling tables do have it.
+//
+// That is not a class of mistake a comment prevents. So the column name is
+// allowed to appear in SQL text in exactly one module, `storage/softDelete.ts`,
+// which pairs it with the explicit list of tables that have it and returns the
+// predicate through a function whose parameter type makes a wrong table a
+// COMPILE error. Everywhere else, writing the string is a lint error.
+//
+// Scope, deliberately narrow and deliberately dumb: string literals and
+// template-literal text only. `row.deleted_at`, a row-type property, and a
+// `deletedAt` field name are Identifiers, not Literals, so they are untouched --
+// the mappers that read the column still read it by name, which is correct.
+// What cannot be written is SQL, because SQL is a string.
+//
+// This is a text rule, so it is evadable: `"deleted" + "_at"` passes. That is
+// accepted. The rule is not a sandbox, it is a tripwire on the exact shape the
+// defect took, and a contributor assembling the column name from fragments to
+// get around a lint error is a different conversation from one who simply did
+// not know.
+const SOFT_DELETE_COLUMN_BAN_MESSAGE =
+  'Do not write "deleted_at" into SQL. This is AUDIT L99: the predicate was written out by ' +
+  "hand against project_sites, which had no such column, and site progress silently failed on " +
+  "every call for months. Use liveOnly() / deletedOnly() / softDeleteAssignment() / " +
+  "restoreAssignment() / purgeEligible() from storage/softDelete.ts, which take a table name " +
+  "whose type is the explicit list of tables that have the column -- so the wrong table is a " +
+  "compile error rather than a runtime one. Reading the column off a row (row.deleted_at) is " +
+  "fine and is not what this rule matches.";
+
+const SOFT_DELETE_COLUMN_BAN = [
+  // A plain string: ["deleted_at IS NULL", ...], 'SET deleted_at = NOW()'.
+  { selector: "Literal[value=/deleted_at/]", message: SOFT_DELETE_COLUMN_BAN_MESSAGE },
+  // The literal chunks of a template: `... WHERE deleted_at IS NULL ...`.
+  // TemplateElement, not TemplateLiteral: the text lives on the elements, and a
+  // selector on the parent would miss it.
+  { selector: "TemplateElement[value.raw=/deleted_at/]", message: SOFT_DELETE_COLUMN_BAN_MESSAGE },
+];
+
+// Repeated rather than referenced in two places below, because an eslint
+// `overrides` block REPLACES a rule's options instead of merging them. The
+// comments at each use site say which block is replacing what.
+const DYNAMIC_POOL_IMPORT_BAN = {
+  // \u002F is a literal "/": the attribute-value regex is itself delimited by
+  // /, so a bare slash would close it early.
+  selector: "ImportExpression[source.value=/storage\\u002Fpostgres$/]",
+  message:
+    "Dynamic import of the raw pool is banned for the same reason as the static one: " +
+    "getPgPool() bypasses withTenant(), RLS fails closed, and the call site sees zero " +
+    "rows rather than an error. Import a store from storage/ instead.",
+};
+
 // ── eslint-plugin-react-hooks: scoped to the two React packages ───────────
 //
 // NOT enabled at the root, and the reason is a measurement rather than a
@@ -147,18 +204,10 @@ module.exports = {
         // assumed. Without this second rule the ban is bypassable by writing the
         // import dynamically, which is exactly what someone reaching for the
         // pool in a route handler would end up doing.
-        "no-restricted-syntax": [
-          "error",
-          {
-            // \u002F is a literal "/": the attribute-value regex is itself
-            // delimited by /, so a bare slash would close it early.
-            selector: "ImportExpression[source.value=/storage\\u002Fpostgres$/]",
-            message:
-              "Dynamic import of the raw pool is banned for the same reason as the static one: " +
-              "getPgPool() bypasses withTenant(), RLS fails closed, and the call site sees zero " +
-              "rows rather than an error. Import a store from storage/ instead.",
-          },
-        ],
+        // Two bans, in one rule because an overrides block replaces a rule's
+        // options wholesale: the dynamic pool import, and the soft-delete column
+        // name in SQL text (AUDIT L99 -- see the constant's comment above).
+        "no-restricted-syntax": ["error", DYNAMIC_POOL_IMPORT_BAN, ...SOFT_DELETE_COLUMN_BAN],
       },
       parserOptions: { tsconfigRootDir, project: ["./services/api/tsconfig.json"] },
     },
@@ -271,6 +320,29 @@ module.exports = {
       //                   tenanted read and write in the file goes through the
       //                   HTTP API or through inspectionStore.
         "services/api/src/routes/inspection-template-id-db.test.ts",
+      //   routes/site-bin-db.test.ts
+      //                   migrations and the drain as above, plus two kinds of
+      //                   read that are deliberately NOT tenanted: four
+      //                   information_schema/catalogue queries (which prove the
+      //                   soft-delete column exists with the right type and
+      //                   nullability, and that it does NOT exist on the tables
+      //                   the registry says are hard-deleted), and two reads of
+      //                   `auth_users`, which carries no RLS and no company_id
+      //                   predicate -- one of them being what supplies the
+      //                   tenant for everything else.
+      //
+      //                   Every read of a tenanted table in that file goes
+      //                   through withTenant, and this rule is why. Four of them
+      //                   were written as bare pool queries against
+      //                   project_sites and project_entries -- both FORCE ROW
+      //                   LEVEL SECURITY -- and would have matched zero rows
+      //                   with no error. The partition assertion among them
+      //                   would have read `0 + 0 === 0` and PASSED: a vacuous
+      //                   assertion in the suite guarding the one destructive
+      //                   feature in the phase. There is no Postgres in the
+      //                   environment it was written in, so nothing would have
+      //                   run it; this rule is what caught it. Exact filename.
+        "services/api/src/routes/site-bin-db.test.ts",
       ],
       rules: {
         "no-restricted-imports": [
@@ -280,13 +352,46 @@ module.exports = {
         // Must be named explicitly: an overrides block replaces only the rules it
         // lists, so leaving this out would keep the dynamic-import ban switched on
         // for server.ts, whose shutdown path is the one legitimate dynamic import.
-        "no-restricted-syntax": "off",
+        //
+        // It used to be a flat "off", and that was wrong in a way nothing
+        // reported: the exemption exists for ONE import in server.ts, but the
+        // files list covers all of `storage/**` -- every store in the codebase.
+        // So a no-restricted-syntax rule added at the API level was silently
+        // disabled across the entire storage layer, which is the only place the
+        // soft-delete ban has anything to do. The ban would have linted clean
+        // and caught nothing. Listing the ban explicitly here is what makes it
+        // reach the stores; the dynamic-import ban stays dropped, which is all
+        // the "off" was ever meant to do.
+        "no-restricted-syntax": ["error", ...SOFT_DELETE_COLUMN_BAN],
       },
       parserOptions: { tsconfigRootDir, project: ["./services/api/tsconfig.json"] },
     },
     {
       files: ["shared/**/*.{ts,tsx,js,jsx}"],
       parserOptions: { tsconfigRootDir, project: ["./shared/tsconfig.build.json"] },
+    },
+    {
+      // The one module allowed to write the soft-delete column name into SQL,
+      // and the two tests that assert it does. Last in the list on purpose:
+      // overrides are applied in order and the last matching block wins, so
+      // this must come after the two blocks above that switch the ban on.
+      //
+      // Exempting the registry is not a hole in the ban, it is the ban's shape.
+      // The column name has to be written down once somewhere; the work is in
+      // making that one place the only place, pairing it with the explicit table
+      // list, and typing the accessor so a table without the column cannot be
+      // passed. A ban with no exemption would just be a module that cannot exist.
+      files: [
+        "services/api/src/storage/softDelete.ts",
+        "services/api/src/storage/softDelete.test.ts",
+        "services/api/src/storage/soft-delete-schema-db.test.ts",
+      ],
+      rules: {
+        // Only this rule is named, so the no-restricted-imports exemption these
+        // files inherit from the storage/** block above is untouched -- the DB
+        // suite legitimately holds the pool to apply migrations.
+        "no-restricted-syntax": "off",
+      },
     },
   ],
 };

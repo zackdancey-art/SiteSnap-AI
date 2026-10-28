@@ -248,6 +248,64 @@ test("delete site removes associated entries", async () => {
   assert.equal(entries.body.entries.length, 0);
 });
 
+/**
+ * A binned site refuses a NEW entry, rather than accepting it and hiding it.
+ *
+ * The test above is the read half: binning a site takes its entries out of the
+ * listing. This is the write half, and it was the defect. `createEntry` had no
+ * liveness check, so a POST against a binned site inserted the row and answered
+ * 201 — and because `listEntries` filters on site liveness, the row was never
+ * readable again. The caller was told the entry was saved and it was gone.
+ *
+ * That is reached in practice by an offline replay: the field app queues entries
+ * while out of signal, the site is binned meanwhile, and the queue drains on
+ * reconnect. Each 201 clears one entry from the queue as delivered. In a site
+ * diary a visible failure beats a silent success, so the route answers 404 and
+ * the entry stays in the queue with somebody told about it.
+ *
+ * The authoritative version of this is `routes/site-bin-db.test.ts`, against
+ * Postgres, where it also asserts the row is absent from `project_entries`
+ * rather than merely absent from the listing. This copy exists because the
+ * guard has two implementations — `createEntry`'s in-memory branch and its SQL
+ * branch — and the two store paths disagreeing is this repo's most repeated
+ * defect. Both controls are on the same endpoint in the same test.
+ */
+test("a binned site refuses a new entry, and a live one accepts it", async () => {
+  const token = await createWorkerToken();
+
+  const site = await req<{ site: { id: string } }>(
+    "POST",
+    "/projects/sites",
+    { name: "Bin Guard", address: "1 Rd", client: "C", startDate: "2025-01-01", status: "active" },
+    token
+  );
+  const siteId = site.body.site.id;
+
+  // POSITIVE CONTROL, same endpoint, same test: the site is live and the entry
+  // is accepted. Without this, deleting the route outright would pass below.
+  const live = await req<{ entry: { id: string } }>(
+    "POST", "/projects/entries", { siteId, date: "2025-01-01", notes: "while live", photos: [] }, token
+  );
+  assert.equal(live.status, 201, `a live site must accept an entry: ${JSON.stringify(live.body)}`);
+
+  const del = await req<{ ok: boolean }>("DELETE", `/projects/sites/${siteId}`, undefined, token);
+  assert.equal(del.status, 200, "the site must actually reach the bin for the refusal to mean anything");
+
+  const binned = await req<{ error: string }>(
+    "POST", "/projects/entries", { siteId, date: "2025-01-01", notes: "while binned", photos: [] }, token
+  );
+  assert.equal(binned.status, 404, "a binned site must refuse a new entry rather than hide it");
+
+  // And the refusal lifts on restore, so "404" cannot mean the route is simply
+  // broken for this site for ever.
+  const restored = await req<{ ok: boolean }>("POST", `/projects/sites/${siteId}/restore`, undefined, token);
+  assert.equal(restored.status, 200, `restore failed: ${JSON.stringify(restored.body)}`);
+  const after = await req<{ entry: { id: string } }>(
+    "POST", "/projects/entries", { siteId, date: "2025-01-01", notes: "after restore", photos: [] }, token
+  );
+  assert.equal(after.status, 201, "a restored site must accept entries again");
+});
+
 test("pagination limit and offset work", async () => {
   const token = await createWorkerToken();
 

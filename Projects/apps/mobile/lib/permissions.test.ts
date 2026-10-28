@@ -13,6 +13,7 @@ import {
   canFileSiteUnderClient,
   canInvite,
   canManageClients,
+  canSeeSiteBin,
   canManageSiteMembers,
   canSeeSupervisorDashboard,
   describeFailure,
@@ -57,10 +58,30 @@ test("the three exceptions refuse crew and allow the roles that own them", () =>
   assert.equal(canInvite("manager"), true);
   assert.equal(canInvite("owner"), true);
 
-  // Exception 2: removing a site, until the recoverable bin exists.
+  // Exception 2: removing a site. The bin now exists -- see canSeeSiteBin
+  // below -- and the gate is unchanged, which is itself the decision.
   assert.equal(canDeleteSite("crew"), false);
   assert.equal(canDeleteSite("manager"), true);
   assert.equal(canDeleteSite("owner"), true);
+
+  // The bin is gated WITH the deletion, not above or below it: whoever can put
+  // a site in it can take it out. Both routes behind it are
+  // requireAtLeast("manager"), so a wider predicate here would render a
+  // Settings row that can only 403, which reads as a broken feature.
+  // Messages on all four: the bin lists sites a person may restore, and both
+  // routes behind it are requireAtLeast("manager"). A bare `true !== false` on
+  // this line tells whoever broke it nothing about which half of that moved.
+  assert.equal(canSeeSiteBin("crew"), false, "crew must not be shown the bin: the API 403s both its routes");
+  assert.equal(canSeeSiteBin("viewer"), false, "viewer must not be shown the bin: the API 403s both its routes");
+  assert.equal(canSeeSiteBin("manager"), true, "manager must be shown the bin, or the row is missing for the people it is for");
+  assert.equal(canSeeSiteBin("owner"), true, "owner must be shown the bin, or the row is missing for the people it is for");
+  for (const role of ROLES) {
+    assert.equal(
+      canSeeSiteBin(role),
+      canDeleteSite(role),
+      `${role}: seeing the bin and deleting a site must stay the same permission`
+    );
+  }
 
   // Exception 3: company settings, owner-only — stricter than the other two,
   // matching requireCompanyRole("owner") on PATCH /company/profile.

@@ -3,6 +3,7 @@ import { getPgPool } from "./postgres";
 import { Actor } from "./actor";
 import { canEditRow, canReadRow, editOwnershipSql, readVisibilitySql } from "./recordScope";
 import { withTenant } from "./tenant";
+import { liveOnly, softDeleteAssignment } from "./softDelete";
 import { computeInspectionContentHash, voidStaleSignaturesOnClient, voidStaleSignaturesInMemory } from "./signatureStore";
 
 export type InspectionTemplateRecord = {
@@ -189,7 +190,7 @@ export async function listInspections(actor: Actor, siteId?: string): Promise<In
       .sort((a, b) => b.date.localeCompare(a.date));
   }
   const params: unknown[] = [actor.companyId];
-  const conditions = ["deleted_at IS NULL", `company_id = $1`];
+  const conditions = [liveOnly("inspections"), `company_id = $1`];
   const visibility = readVisibilitySql(actor, "inspection", params);
   if (visibility) conditions.push(visibility);
   if (siteId) { params.push(siteId); conditions.push(`site_id = $${params.length}`); }
@@ -207,7 +208,7 @@ export async function getInspection(actor: Actor, id: string): Promise<Inspectio
     return existing;
   }
   const params: unknown[] = [id, actor.companyId];
-  const conditions = ["id = $1", "company_id = $2", "deleted_at IS NULL"];
+  const conditions = ["id = $1", "company_id = $2", liveOnly("inspections")];
   const visibility = readVisibilitySql(actor, "inspection", params);
   if (visibility) conditions.push(visibility);
   const result = await withTenant(actor, (client) => client.query(
@@ -333,7 +334,7 @@ export async function updateInspection(actor: Actor, id: string, patch: Inspecti
          overall_outcome = COALESCE($12, overall_outcome),
          follow_up_required = COALESCE($13, follow_up_required),
          updated_at = NOW()
-       WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL${ownerClause} RETURNING *`,
+       WHERE id = $1 AND company_id = $2 AND ${liveOnly("inspections")}${ownerClause} RETURNING *`,
       params
     );
     if (result.rowCount === 0) return null;
@@ -352,11 +353,11 @@ export async function deleteInspection(actor: Actor, id: string): Promise<boolea
     return true;
   }
   const params: unknown[] = [id, actor.companyId];
-  const conditions = ["id = $1", "company_id = $2", "deleted_at IS NULL"];
+  const conditions = ["id = $1", "company_id = $2", liveOnly("inspections")];
   const ownership = editOwnershipSql(actor, "inspection", params);
   if (ownership) conditions.push(ownership);
   const result = await withTenant(actor, (client) => client.query(
-    `UPDATE inspections SET deleted_at = NOW() WHERE ${conditions.join(" AND ")}`, params
+    `UPDATE inspections SET ${softDeleteAssignment("inspections")} WHERE ${conditions.join(" AND ")}`, params
   ));
   return (result.rowCount ?? 0) > 0;
 }
@@ -382,7 +383,7 @@ export async function findInspectionOwner(
   }
   const result = await withTenant(actor, (client) =>
     client.query<{ owner_email: string; company_id: string }>(
-      `SELECT owner_email, company_id FROM inspections WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL LIMIT 1`,
+      `SELECT owner_email, company_id FROM inspections WHERE id = $1 AND company_id = $2 AND ${liveOnly("inspections")} LIMIT 1`,
       [id, actor.companyId]
     )
   );

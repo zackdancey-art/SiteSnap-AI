@@ -287,6 +287,7 @@ function RootLayoutNav() {
           the two screens above are both AUDIT findings for having been pushed
           by a router call that no Stack.Screen here matched. */}
       <Stack.Screen name="clients" options={{ headerShown: false }} />
+      <Stack.Screen name="settings/site-bin" options={{ headerShown: false }} />
     </Stack>
     </>
   );

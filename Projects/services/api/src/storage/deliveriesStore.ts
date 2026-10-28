@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from "uuid";
 import { Actor } from "./actor";
 import { canEditRow, canReadRow, editOwnershipSql, readVisibilitySql } from "./recordScope";
 import { withTenant } from "./tenant";
+import { liveOnly, softDeleteAssignment } from "./softDelete";
 
 export type DeliveryRecord = {
   id: string;
@@ -47,6 +48,24 @@ function mapRow(row: {
   };
 }
 
+// `initDeliveriesSchema` was removed here. It had no callers anywhere in src --
+// `grep -rn initDeliveriesSchema src` returned only its own definition -- and it
+// was a SECOND hand-written definition of `material_deliveries`, duplicating
+// migration 010. Two definitions of one table is the L11 shape: `CREATE TABLE
+// IF NOT EXISTS` is a no-op against an existing table, so a column added to one
+// definition and not the other produces no error anywhere, and the divergence
+// surfaces as a 500 in production.
+//
+// It also held the last hand-written `deleted_at` in this file. The whole point
+// of storage/softDelete.ts is that the column name occurs once; a dead CREATE
+// TABLE reintroducing it would have to be exempted from the eslint ban, and an
+// exemption for dead code is worse than deleting the dead code.
+//
+// The schema lives in src/storage/migrations/010_*.sql, applied at boot. Four
+// other `init*Schema` functions remain (projectsStore, templateStore, pushStore,
+// authStore); whether they are also dead is a workstream 8 question, not one
+// this commit answers.
+
 export async function listDeliveries(actor: Actor, siteId?: string): Promise<DeliveryRecord[]> {
   if (!useDatabase()) {
     return Array.from(memory.values())
@@ -55,7 +74,7 @@ export async function listDeliveries(actor: Actor, siteId?: string): Promise<Del
       .sort((a, b) => b.date.localeCompare(a.date));
   }
   const params: unknown[] = [actor.companyId];
-  const conditions: string[] = ["deleted_at IS NULL", `company_id = $1`];
+  const conditions: string[] = [liveOnly("material_deliveries"), `company_id = $1`];
   const visibility = readVisibilitySql(actor, "delivery", params);
   if (visibility) conditions.push(visibility);
   if (siteId) {
@@ -107,7 +126,7 @@ export async function updateDelivery(
   }
   return withTenant(actor, async (client) => {
     const check = await client.query<{ owner_email: string; company_id: string }>(
-      `SELECT owner_email, company_id FROM material_deliveries WHERE id = $1 AND deleted_at IS NULL LIMIT 1`, [id]
+      `SELECT owner_email, company_id FROM material_deliveries WHERE id = $1 AND ${liveOnly("material_deliveries")} LIMIT 1`, [id]
     );
     if (check.rowCount === 0) return null;
     if (!canEditRow(actor, "delivery", { companyId: check.rows[0].company_id, ownerEmail: check.rows[0].owner_email })) return null;
@@ -137,11 +156,11 @@ export async function deleteDelivery(actor: Actor, id: string): Promise<boolean>
     return true;
   }
   const params: unknown[] = [id, actor.companyId];
-  const conditions = ["id = $1", "company_id = $2", "deleted_at IS NULL"];
+  const conditions = ["id = $1", "company_id = $2", liveOnly("material_deliveries")];
   const ownership = editOwnershipSql(actor, "delivery", params);
   if (ownership) conditions.push(ownership);
   const result = await withTenant(actor, (client) => client.query(
-    `UPDATE material_deliveries SET deleted_at = NOW() WHERE ${conditions.join(" AND ")}`, params
+    `UPDATE material_deliveries SET ${softDeleteAssignment("material_deliveries")} WHERE ${conditions.join(" AND ")}`, params
   ));
   return (result.rowCount ?? 0) > 0;
 }
@@ -167,7 +186,7 @@ export async function findDeliveryOwner(
   }
   const result = await withTenant(actor, (client) =>
     client.query<{ owner_email: string; company_id: string }>(
-      `SELECT owner_email, company_id FROM material_deliveries WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL LIMIT 1`,
+      `SELECT owner_email, company_id FROM material_deliveries WHERE id = $1 AND company_id = $2 AND ${liveOnly("material_deliveries")} LIMIT 1`,
       [id, actor.companyId]
     )
   );
