@@ -698,10 +698,35 @@ export async function listEntries(
   return result.rows.map(mapEntry);
 }
 
+/**
+ * File one entry against a site, or refuse.
+ *
+ * Returns null when the actor's company has no LIVE site with this id — the
+ * site is binned, belongs to another company, or never existed. All three
+ * answer the same way, because a site the caller cannot see must not be
+ * distinguishable from one that is not there.
+ *
+ * THE BINNED-SITE CASE IS WHY THIS GUARD EXISTS, and it is a silent-success
+ * defect rather than a theoretical one. `listEntries` filters its Postgres read
+ * through `onLiveSite()` and its in-memory read through `!...deletedAt`, so an
+ * entry on a binned site is invisible the moment it is written. Without a guard
+ * here the write still succeeded: the route answered 201 with the entry body,
+ * the mobile app cleared it from the offline queue as delivered, and the row
+ * was never readable again. That is the exact shape of an offline replay —
+ * the field app holds a queued entry, the site is binned while the phone is out
+ * of signal, and the queue drains on reconnect. In a site diary a visible
+ * failure beats a silent success: a 404 leaves the entry in the queue and the
+ * person told, where a 201 loses the day's work and reports it as saved.
+ *
+ * Liveness and tenancy only — deliberately NOT `canManageSite`. Filing against
+ * a site is not managing it: every member including crew files entries on every
+ * site in the company (see `listSites` and `readVisibility("site")`), so a role
+ * check here would stop a crew member diarising the site they are standing on.
+ */
 export async function createEntry(
   actor: Actor,
   payload: Omit<EntryRecord, "id" | "ownerEmail" | "timestamp" | "companyId">
-): Promise<EntryRecord> {
+): Promise<EntryRecord | null> {
   const entry: EntryRecord = {
     id: uuidv7(),
     ownerEmail: actor.email,
@@ -716,12 +741,23 @@ export async function createEntry(
   };
   if (!useDatabase()) {
     await ensureMemoryLoaded();
+    const site = memory.sites.get(entry.siteId);
+    if (!site || site.companyId !== actor.companyId || site.deletedAt) return null;
     memory.entries.set(entry.id, entry);
     await persistMemory();
     return entry;
   }
-  const result = await withTenant(actor, (client) =>
-    client.query(
+  return withTenant(actor, async (client) => {
+    // Inside the same transaction as the INSERT, the way updateEntry reads
+    // before it writes, so the window between "the site is live" and "the row
+    // is written" is as narrow as this store makes it anywhere.
+    const site = await client.query(
+      `SELECT 1 FROM project_sites
+       WHERE id = $1 AND company_id = $2 AND ${liveOnly("project_sites")} LIMIT 1`,
+      [entry.siteId, actor.companyId]
+    );
+    if (site.rowCount === 0) return null;
+    const result = await client.query(
       `INSERT INTO project_entries
          (id, owner_email, company_id, site_id, date, location_address, weather, crew_count, notes, photos_json, swms_ref, hazard_notes, toolbox_talk, notes_mode, hourly_notes)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14,$15::jsonb)
@@ -743,9 +779,9 @@ export async function createEntry(
         entry.notesMode ?? "free",
         JSON.stringify(entry.hourlyNotes ?? []),
       ]
-    )
-  );
-  return mapEntry(result.rows[0]);
+    );
+    return mapEntry(result.rows[0]);
+  });
 }
 
 export async function updateEntry(

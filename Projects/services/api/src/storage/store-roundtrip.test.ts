@@ -129,6 +129,10 @@ if (!process.env.TEST_DATABASE_URL) {
       siteId, date: "2026-02-02", locationAddress: "Zone A", weather: "Fine", crewCount: "5",
       notes: "poured slab", photos: [], swmsRef: "SWMS-9", hazardNotes: "trench barriered", toolboxTalk: true,
     } as Parameters<typeof S.createEntry>[1]);
+    // createEntry refuses a binned or out-of-company site with null; this seed
+    // uses the live site created above, so a null here is a broken fixture
+    // rather than the guard, and must not read as a passing round trip.
+    assert.ok(entry, "createEntry refused the round-trip fixture's own live site");
     const rows = await S.listEntries(actor, siteId);
     const row = rows.find((e) => e.id === entry.id);
     assert.ok(row, "created entry not read back");

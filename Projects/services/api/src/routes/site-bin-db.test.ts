@@ -478,6 +478,14 @@ if (!process.env.TEST_DATABASE_URL) {
       `control: inviting to a live site must succeed, got ${inviteLive.status}`
     );
 
+    const entryLive = await req<{ entry: { id: string } }>(
+      "POST",
+      "/projects/entries",
+      { siteId, date: TODAY, workCompleted: "Entry filed while live.", photos: [] },
+      ownerToken
+    );
+    assert.equal(entryLive.status, 201, "control: a live site must accept a new entry");
+
     await seed("DELETE", `/projects/sites/${siteId}`, undefined, ownerToken);
 
     // ── The refusals, on the identical routes.
@@ -512,6 +520,32 @@ if (!process.env.TEST_DATABASE_URL) {
       `a binned site must not accept new invitations, got ${inviteBinned.status}`
     );
 
+    // THE SILENT-SUCCESS CASE. Before the guard in createEntry this POST
+    // answered 201 with an entry body, and the row was then invisible for ever
+    // after because listEntries filters through onLiveSite(). An offline replay
+    // draining its queue onto a site binned while the phone was out of signal
+    // lost the day's work and reported it as saved.
+    const entryBinned = await req<{ error: string }>(
+      "POST",
+      "/projects/entries",
+      { siteId, date: TODAY, workCompleted: "Entry filed while binned.", photos: [] },
+      ownerToken
+    );
+    assert.equal(entryBinned.status, 404, "a binned site must not accept a new entry");
+
+    // And it refused by NOT WRITING, which is the whole point: a 201 and a
+    // hidden row would satisfy any assertion about the listing, so the listing
+    // is not what is checked here. The row count comes straight from the table.
+    const storedEntries = await tenanted<{ n: string }>(
+      `SELECT COUNT(*) AS n FROM project_entries WHERE site_id = $1`,
+      [siteId]
+    );
+    assert.equal(
+      Number(storedEntries.rows[0].n),
+      2,
+      "the refused entry must not be in the table -- the seed's entry and the live control's, and nothing from the binned POST"
+    );
+
     // The stored progress was not changed by the refused call. A 404 that had
     // already written would be the worst of both answers.
     const stored = await tenanted<{ progress_percent: number | null }>(
@@ -531,6 +565,16 @@ if (!process.env.TEST_DATABASE_URL) {
       ownerToken
     );
     assert.equal(progressRestored.status, 200, "a restored site must accept writes again");
+
+    // The entry route in particular: otherwise "404 on a binned site" could
+    // mean the guard is simply denying this site's entries permanently.
+    const entryRestored = await req<{ entry: { id: string } }>(
+      "POST",
+      "/projects/entries",
+      { siteId, date: TODAY, workCompleted: "Entry filed after restore.", photos: [] },
+      ownerToken
+    );
+    assert.equal(entryRestored.status, 201, "a restored site must accept new entries again");
   });
 
   test("the bin and restore are manager-and-above, with the owner succeeding on the same routes", async () => {

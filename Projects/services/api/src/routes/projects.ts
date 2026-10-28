@@ -340,6 +340,10 @@ projectsRouter.post("/projects/entries", async (req, res) => {
     return res.status(400).json({ error: "Invalid entry payload.", details: parsed.error.flatten() });
   }
   const entry = await createEntry(actor, parsed.data);
+  // A binned site, another company's site and a nonexistent one are one answer.
+  // See createEntry: an entry filed against a binned site is written and then
+  // never readable, so a 201 here loses the work and calls it saved.
+  if (!entry) return res.status(404).json({ error: "Site not found." });
   return res.status(201).json({ entry });
 });
 
