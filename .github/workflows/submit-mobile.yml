@@ -1,0 +1,62 @@
+name: Submit Mobile to the Stores (manual)
+
+# Submission to the App Store and Google Play is a DELIBERATE, HUMAN act.
+#
+# HALF-BUILT-MECHANISMS F11: this step used to live in `build-mobile.yml` as a
+# job gated on `startsWith(github.ref, 'refs/tags/v')`, so pushing a version
+# tag submitted to both stores with no human step. Tagging a commit is a
+# routine gesture; putting a binary in front of two review queues is not.
+#
+# So it is its own workflow, with no `push` trigger of any kind, and it refuses
+# to run unless somebody types the word SUBMIT. The confirmation is not
+# ceremony: `workflow_dispatch` is one click from a branch dropdown, and a
+# mis-click here is not something a revert can undo — once a build is in review
+# the only remedies are Apple's and Google's.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type SUBMIT to confirm. Anything else aborts.'
+        required: true
+        type: string
+      platform:
+        description: 'Platform(s) to submit'
+        required: true
+        default: 'ios'
+        type: choice
+        options: [ios, android, all]
+
+jobs:
+  submit:
+    # Pinned for the reason given in ci.yml: `ubuntu-latest` starts moving to
+    # Ubuntu 26.04 on 19 October 2026 and would change this runner's OS with no
+    # commit to point at. Raise both together, deliberately.
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: Projects/apps/mobile
+
+    steps:
+      # First step, before checkout: an aborted run should cost nothing and be
+      # obvious in the log.
+      - name: Check the confirmation
+        if: ${{ inputs.confirm != 'SUBMIT' }}
+        run: |
+          echo "::error::Aborted. The confirmation input must be exactly SUBMIT."
+          exit 1
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install EAS CLI
+        run: npm install -g eas-cli
+
+      # EXPO_TOKEN must be set as a repository secret. If it is not set, this
+      # step fails rather than doing something quieter — which is the correct
+      # outcome for a submission, and is also how you find out whether the
+      # secret exists at all.
+      - name: EAS Submit
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: eas submit --profile production --platform "${{ inputs.platform }}" --non-interactive

@@ -8,6 +8,11 @@ import { canEditRow, canReadRow, editOwnershipSql, readVisibilitySql } from "./r
 import { FileBackedStore } from "./fileStore";
 import { findUserByEmail, setUserCompany, invalidateSessionIdentity } from "./authStore";
 import { withTenant } from "./tenant";
+// The column name only, not the store. clientsStore imports THIS file
+// dynamically inside two functions, so the graph has no load-time cycle; the
+// constant is shared rather than retyped because two files holding the same
+// column string is how a `deleted_at` predicate landed on a table without one.
+import { SITE_CLIENT_COLUMN } from "./clientsStore";
 import { DiaryProvenance } from "../services/diaryProvenance";
 import { normalizeEmail, sameEmail } from "../utils/emailAddresses";
 
@@ -26,14 +31,38 @@ export type SiteRecord = {
   status: SiteStatus;
   createdAt: string;
   progressPercent?: number;
-  // NO `deletedAt`. A site is HARD deleted in both stores — `deleteSite` does
-  // `memory.sites.delete(...)` and `DELETE FROM project_sites`, and
-  // `project_sites` has no `deleted_at` column in any migration. The field used
-  // to be declared here and was never written by anything, which is how a
+  /**
+   * Which client this site is filed under, or null for "Unfiled".
+   *
+   * NULLABLE WITH NO DEFAULT IS THE WHOLE DESIGN (migration 032). Every site
+   * that existed before clients did keeps its free-text `client` above and
+   * reads back as unfiled, because two spellings of one builder are one client
+   * or two and only the company can say which. The backfill is an opt-in
+   * script, not part of the migration.
+   *
+   * Filing is NOT an access boundary. Nothing in this service consults
+   * `clientId` to decide who may read or change a row — see the header of
+   * storage/clientsStore.ts.
+   */
+  clientId?: string | null;
+  // NO `deletedAt` ON THIS BRANCH, and the distinction matters. A site is HARD
+  // deleted in both stores as of this commit — `deleteSite` does
+  // `memory.sites.delete(...)` and `DELETE FROM project_sites` — and the field
+  // used to be declared here while nothing ever wrote it, which is how a
   // `deleted_at IS NULL` predicate came to sit in `updateSiteProgress` against
-  // a column that does not exist. Soft-delete for sites is Phase 6, with the
-  // bin and the 90-day purge; it arrives with a migration, a mapper and a list
-  // filter, the way the other four record types have it. See AUDIT L99.
+  // a column that did not exist. See AUDIT L99.
+  //
+  // What this comment does NOT say, deliberately: that no migration adds the
+  // column. An earlier draft asserted "`project_sites` has no `deleted_at`
+  // column in any migration", which was true of this branch and false of the
+  // tree this branch merges into — the soft-delete workstream's migration 034
+  // adds it, and that branch merges after this one. A sentence that is true on
+  // a branch and false on main is the shape of defect this file's own header
+  // warns about, so the claim is scoped to the branch or not made at all.
+  // Soft-delete for sites arrives with that migration, its mapper and its list
+  // filter; when it does, `deletedAt` is declared here and every predicate
+  // naming the column comes from storage/softDelete.ts rather than being
+  // written out.
 };
 
 export type EntryRecord = {
@@ -271,9 +300,11 @@ function mapSite(row: {
   name: string;
   address: string;
   client: string;
+  client_id: string | null;
   start_date: string;
   status: SiteStatus;
   created_at: Date;
+  progress_percent?: number;
 }): SiteRecord {
   return {
     id: row.id,
@@ -282,9 +313,27 @@ function mapSite(row: {
     name: row.name,
     address: row.address,
     client: row.client,
+    // `?? null` rather than passing it through: a column added by migration 032
+    // reads back as NULL on every pre-existing row, and the two clients branch
+    // on `clientId == null` to render the Unfiled group.
+    clientId: row.client_id ?? null,
     startDate: row.start_date,
     status: row.status,
     createdAt: row.created_at.toISOString(),
+    /**
+     * `progress_percent` has existed since migration 009 and this mapper had
+     * never read it, so the Postgres path WROTE progress and never returned it:
+     * `listSites` does `SELECT *`, mapSite dropped the column, and the mobile
+     * site screen falls back to `?? 0`. The slider therefore reset to zero on
+     * every reload against a real database while the in-memory twin — which
+     * spreads the whole record — returned it correctly. The same pairing that
+     * hid AUDIT L99's missing-column error one line further on.
+     *
+     * Optional in the row shape because `updateSiteClient` and `createSite`
+     * both RETURN * from statements that include the column, but the type is
+     * shared with callers that select a narrower set.
+     */
+    progressPercent: row.progress_percent ?? 0,
   };
 }
 
@@ -367,9 +416,11 @@ type SiteRow = {
   name: string;
   address: string;
   client: string;
+  client_id: string | null;
   start_date: string;
   status: SiteStatus;
   created_at: Date;
+  progress_percent: number;
 };
 
 export async function listSites(actor: Actor, limit = 200, offset = 0): Promise<SiteRecord[]> {
@@ -413,10 +464,11 @@ export async function createSite(
   }
   const result = await withTenant(actor, (client) =>
     client.query<SiteRow>(
-      `INSERT INTO project_sites (id, owner_email, company_id, name, address, client, start_date, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+      `INSERT INTO project_sites (id, owner_email, company_id, name, address, client, ${SITE_CLIENT_COLUMN}, start_date, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        RETURNING *`,
-      [site.id, actor.email, actor.companyId, site.name, site.address, site.client, site.startDate, site.status]
+      [site.id, actor.email, actor.companyId, site.name, site.address, site.client,
+       site.clientId ?? null, site.startDate, site.status]
     )
   );
   return mapSite(result.rows[0]);
@@ -1823,6 +1875,100 @@ export async function updateSiteProgress(actor: Actor, siteId: string, progressP
   );
   if (result.rowCount === 0) return null;
   return mapSite(result.rows[0]);
+}
+
+/**
+ * File a site under a client, or unfile it.
+ *
+ * WHY THIS WRITES TWO COLUMNS
+ *
+ * `project_sites.client` is free text that has existed since migration 001 and
+ * is still read by things this workstream does not touch: the site card on both
+ * clients, the mobile search box, and the generated report header. Setting
+ * `client_id` alone would leave a site filed under "Metro Builders Pty Ltd"
+ * printing "metro builders" on its reports forever. So filing a site also
+ * rewrites the free text to the client's canonical name, and the caller passes
+ * that name in — this store does not read the clients table (that would make
+ * the module graph circular at load time, and the route has already fetched the
+ * client to validate it exists).
+ *
+ * UNFILING LEAVES THE FREE TEXT ALONE. `clientId: null` clears the link and
+ * keeps whatever name was last written, because the alternative is a site that
+ * loses its client entirely when somebody deletes the wrong client row.
+ *
+ * Returns null when there is no such site in the actor's company.
+ */
+export async function updateSiteClient(
+  actor: Actor,
+  siteId: string,
+  filing: { clientId: string | null; clientName?: string }
+): Promise<SiteRecord | null> {
+  if (!useDatabase()) {
+    await ensureMemoryLoaded();
+    const existing = memory.sites.get(siteId);
+    if (!existing || existing.companyId !== actor.companyId) return null;
+    const updated: SiteRecord = {
+      ...existing,
+      clientId: filing.clientId,
+      ...(filing.clientId && filing.clientName ? { client: filing.clientName } : {}),
+    };
+    memory.sites.set(siteId, updated);
+    await persistMemory();
+    return updated;
+  }
+  const result = await withTenant(actor, (client) =>
+    client.query<SiteRow>(
+      // COALESCE on `client` so unfiling (clientName undefined -> null) keeps
+      // the existing free text. No `deleted_at` predicate: project_sites has no
+      // such column — see the note in updateSiteProgress.
+      `UPDATE project_sites
+          SET ${SITE_CLIENT_COLUMN} = $2,
+              client = COALESCE($3, client),
+              updated_at = NOW()
+        WHERE id = $1 AND company_id = $4
+        RETURNING *`,
+      [siteId, filing.clientId, filing.clientId ? filing.clientName ?? null : null, actor.companyId]
+    )
+  );
+  if (result.rowCount === 0) return null;
+  return mapSite(result.rows[0]);
+}
+
+/**
+ * Every site's id and filing, unpaginated, for counting sites per client.
+ *
+ * `listSites` caps at 200 and `clientsStore.countSitesByClient` needs the whole
+ * company, so this is a separate narrow read rather than a bigger limit on the
+ * list route. Only the in-memory path uses it — against Postgres the count is
+ * one GROUP BY in clientsStore.
+ */
+export async function listSitesForClientCounts(
+  actor: Actor
+): Promise<Array<{ id: string; clientId: string | null }>> {
+  await ensureMemoryLoaded();
+  return Array.from(memory.sites.values())
+    .filter((site) => site.companyId === actor.companyId)
+    .map((site) => ({ id: site.id, clientId: site.clientId ?? null }));
+}
+
+/**
+ * The in-memory twin of `ON DELETE SET NULL`.
+ *
+ * Against Postgres, deleting a client unfiles its sites because migration 032
+ * declares the foreign key that way — deliberately not CASCADE, so deleting a
+ * client can never delete site records. The in-memory store has no foreign
+ * keys, so it does the same thing by hand. Returns how many sites were unfiled.
+ */
+export async function unfileSitesForDeletedClient(actor: Actor, clientId: string): Promise<number> {
+  await ensureMemoryLoaded();
+  let unfiled = 0;
+  for (const [siteId, site] of memory.sites.entries()) {
+    if (site.companyId !== actor.companyId || site.clientId !== clientId) continue;
+    memory.sites.set(siteId, { ...site, clientId: null });
+    unfiled += 1;
+  }
+  if (unfiled > 0) await persistMemory();
+  return unfiled;
 }
 
 export async function removeSiteMember(

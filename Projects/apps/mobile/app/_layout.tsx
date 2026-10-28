@@ -283,6 +283,10 @@ function RootLayoutNav() {
           header below it. Two back affordances, one screen. Same omission as
           terms-of-service above, different symptom. AUDIT L59. */}
       <Stack.Screen name="settings/offline-sync" options={{ headerShown: false }} />
+      {/* Clients. Pattern B. Registered the same breath it was written, because
+          the two screens above are both AUDIT findings for having been pushed
+          by a router call that no Stack.Screen here matched. */}
+      <Stack.Screen name="clients" options={{ headerShown: false }} />
     </Stack>
     </>
   );

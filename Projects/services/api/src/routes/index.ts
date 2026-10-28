@@ -13,6 +13,7 @@ import { deliveriesRouter } from "./deliveries";
 import { templatesRouter } from "./templates";
 import { locationRouter } from "./location";
 import { companyRouter } from "./company";
+import { clientsRouter } from "./clients";
 
 const apiRouter: Router = asyncSafeRouter();
 
@@ -29,5 +30,6 @@ apiRouter.use(deliveriesRouter);
 apiRouter.use(templatesRouter);
 apiRouter.use(locationRouter);
 apiRouter.use(companyRouter);
+apiRouter.use(clientsRouter);
 
 export { apiRouter };

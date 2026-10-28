@@ -716,3 +716,58 @@ could never have caught this condition here, because here it wins the flip.
 
 Do **not** answer a future `TS2322` about `ReactNode` and `bigint` by editing the
 call site. That error is this condition reporting itself.
+
+---
+
+## ADR-0005 — Sign-out revokes the whole account, and the per-session denylist is queued
+
+**Decided 2026-10-18, with the workstream 0 safety fixes. Owner-approved as built.**
+
+### What was chosen
+
+`POST /auth/logout` increments `auth_users.token_generation`, which is a column
+**per account**, not per session. So signing out on one device ends every session
+on that account: the phone, the portal tab, the tablet in the site shed. Both
+clients say so before they act, from one constant each
+(`SIGN_OUT_SCOPE_NOTICE`).
+
+### Why, when it is plainly wider than the button implies
+
+Because the alternative on offer was not a narrower sign-out, it was **no
+sign-out**. Before this, logout cleared a cookie and revoked nothing: a bearer
+credential stayed live on the server for the rest of its TTL, so sign-out landed
+somewhere between 23 and 30 days later when the token aged out (HALF-BUILT-
+MECHANISMS F5). A hire phone handed back was signed out only on the phone.
+
+`token_generation` is the only revocation mechanism this product has, and Phase 2
+built it for exactly this. Using it means the scope is account-wide; not using it
+means the product has no way to end a session at all. The scope is a real cost
+and it is the smaller one.
+
+### The honest fix, queued and deliberately not built
+
+**A per-session denylist.** A session identifier in the token, a row per revoked
+session, and a check in `requireAuth` alongside the generation comparison — so
+"Sign Out" ends this session and "Sign out others" ends the rest, each meaning
+what it says. It was not built here because it is a storage and middleware
+change with its own cache-invalidation story, and workstream 0 was the
+pre-everything safety pass; shipping it there would have put the week's riskiest
+change in the week's smallest PR.
+
+Consequence to live with meanwhile: "Sign Out" and "Sign out all other devices"
+now do nearly the same thing. The second control keeps a reason to exist — it
+hands back a replacement credential and keeps the current device signed in,
+which Sign Out does not — and its copy now says that rather than implying a
+difference in blast radius that no longer exists.
+
+### What would change the answer
+
+- **Anyone asks for per-device session management**, or a shared-device account
+  makes the account-wide scope a daily annoyance rather than a theoretical one.
+  Then build the denylist; it is a clean addition, not a rewrite.
+- **A second revocation axis arrives for another reason** (a compliance hold, a
+  device-trust feature). Then the denylist is already half-paid for and this
+  entry should be taken back up rather than treated as settled.
+
+Do not "fix" the redundancy of the two controls by deleting the account-wide
+revocation from `/auth/logout`. That is the line that makes sign-out work.
