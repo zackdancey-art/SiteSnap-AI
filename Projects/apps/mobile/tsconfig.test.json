@@ -34,6 +34,10 @@
     "lib/photo-uri.ts",
     "lib/photo-uri.test.ts",
     "lib/offline-queue.ts",
+    "lib/entry-sync-state.ts",
+    "lib/entry-sync-state.test.ts",
+    "lib/photo-payload-retention.ts",
+    "lib/photo-payload-retention.test.ts",
     "lib/photo-payload-store.ts",
     "lib/photo-payload-store.test.ts",
     "lib/sync-telemetry-redaction.ts",
@@ -62,8 +66,12 @@
     "lib/invite-refusal.test.ts",
     "lib/permissions.ts",
     "lib/permissions.test.ts",
+    "lib/site-grouping.ts",
+    "lib/site-grouping.test.ts",
     "lib/session-routing-audit.ts",
     "lib/session-routing-audit.test.ts",
+    "lib/whs-checklists.ts",
+    "lib/whs-checklists.test.ts",
     "lib/report-window.ts",
     "lib/report-window.test.ts"
   ]

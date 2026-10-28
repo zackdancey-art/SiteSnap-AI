@@ -3,6 +3,7 @@ import { asyncSafeRouter } from "../middleware/asyncRouter";
 import { z } from "zod";
 import { verifyProvenance } from "../services/diaryProvenance";
 import { FIELD_ACCESS, requireAtLeast, AuthenticatedRequest } from "../middleware/auth";
+import { getClient } from "../storage/clientsStore";
 import { requireOwnRecord } from "../middleware/recordOwnership";
 import { createAuthToken } from "../utils/authToken";
 import { findUserByEmail } from "../storage/authStore";
@@ -33,6 +34,7 @@ import {
   updateDiary,
   updateEntry,
   updateSiteProgress,
+  updateSiteClient,
   updateTemplate,
 } from "../storage/projectsStore";
 import { isRateLimitedByAccount, LIMITS } from "../middleware/rateLimit";
@@ -48,10 +50,36 @@ function parsePagination(query: Record<string, unknown>) {
 const SiteSchema = z.object({
   name: z.string().min(1),
   address: z.string().min(1),
+  // Still required, still free text. Migration 032 added `client_id` but did
+  // not retire this: every existing site has a name typed into it, the report
+  // header and the mobile search box read it, and making it optional would mean
+  // a site created by a client that has not shipped the clients UI yet arrives
+  // with no client name at all. `clientId` below is the filing; this is the
+  // label. When both are present the label is kept in step with the client's
+  // canonical name — see updateSiteClient in projectsStore.
   client: z.string().min(1),
   startDate: z.string().min(1),
   status: z.enum(["active", "completed", "on-hold"]),
+  // Optional and nullable: a site created before the clients UI ships, or by a
+  // client that never sends it, is Unfiled rather than rejected.
+  clientId: z.string().min(1).nullish(),
 });
+
+/**
+ * Filing a site under a client, as its own route and its own schema.
+ *
+ * `.strict()` and one field. This is NOT the missing general site-edit route:
+ * there is still no way to change a site's name, address or status anywhere in
+ * this product, which is a real gap and deliberately not closed here — a PATCH
+ * that accepted the whole site would be a bigger surface than this workstream
+ * asked for, and `requireAtLeast("manager")` on a wide-open patch is exactly
+ * the kind of route that quietly grows. One field, one meaning.
+ *
+ * `clientId: null` unfiles.
+ */
+const SiteFilingSchema = z.object({
+  clientId: z.string().min(1).nullable(),
+}).strict();
 
 const EntrySchema = z.object({
   siteId: z.string().min(1),
@@ -212,8 +240,51 @@ projectsRouter.post("/projects/sites", requireAtLeast("manager"), async (req, re
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid site payload.", details: parsed.error.flatten() });
   }
-  const site = await createSite(actor, parsed.data);
+  // Validate the filing HERE rather than relying on the foreign key. Two
+  // reasons: against Postgres a bad id is a 23503 the caller reads as a 500,
+  // and the in-memory store has no foreign keys at all, so this is the only
+  // check on the dev and test path. `getClient` is company-scoped, so another
+  // company's client id is "not found" rather than a cross-tenant filing.
+  const { clientId, ...siteFields } = parsed.data;
+  let clientName: string | undefined;
+  if (clientId) {
+    const client = await getClient(actor, clientId);
+    if (!client) return res.status(400).json({ error: "Client not found." });
+    clientName = client.name;
+  }
+  const site = await createSite(actor, {
+    ...siteFields,
+    clientId: clientId ?? null,
+    // Keep the free-text label in step with the client's canonical name, the
+    // same way updateSiteClient does — otherwise a site created with a clientId
+    // prints whatever the form happened to have in the client text box.
+    client: clientName ?? siteFields.client,
+  });
   return res.status(201).json({ site });
+});
+
+/**
+ * File a site under a client, or unfile it. Manager+, matching POST and DELETE.
+ *
+ * Mounted before `/projects/sites/:id/progress` reads no differently to Express
+ * — the paths are distinct — but it sits next to the site routes it belongs
+ * with rather than next to progress, which is a field update by any role.
+ */
+projectsRouter.patch("/projects/sites/:id", requireAtLeast("manager"), async (req, res) => {
+  const actor = getActor(req as unknown as AuthenticatedRequest);
+  const parsed = SiteFilingSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid site patch.", details: parsed.error.flatten() });
+  }
+  let clientName: string | undefined;
+  if (parsed.data.clientId) {
+    const client = await getClient(actor, parsed.data.clientId);
+    if (!client) return res.status(400).json({ error: "Client not found." });
+    clientName = client.name;
+  }
+  const site = await updateSiteClient(actor, req.params.id, { clientId: parsed.data.clientId, clientName });
+  if (!site) return res.status(404).json({ error: "Site not found." });
+  return res.json({ site });
 });
 
 projectsRouter.delete("/projects/sites/:id", requireAtLeast("manager"), async (req, res) => {

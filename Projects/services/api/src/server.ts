@@ -241,6 +241,25 @@ export async function bootstrap() {
     Sentry.captureException(err);
     void shutdown("uncaughtException");
   });
+  /**
+   * THIS HANDLER DOES NOT EXIT, AND THAT IS A DECISION, NOT AN OVERSIGHT.
+   *
+   * `uncaughtException` above shuts down; this one logs, captures and leaves
+   * the process running. AUDIT L99's "the related finding that is NOT fixed"
+   * records why that is arguably wrong: for a rejection that leaves a request
+   * hanging, not exiting converted a fast crash-and-restart into a silent
+   * five-minute stall.
+   *
+   * The owner's decision, recorded here rather than only in
+   * docs/PHASE-2-REVIEW.md because this is where a future session would
+   * "tidy" it: now that 41 routes are wrapped by `asyncSafeRouter`, watch
+   * Sentry for a week from the Phase 2 merge (PR #64) and make this exit ONLY
+   * if that week is clean. Making it exit before then turns every unknown
+   * rejection into a restart on a single Render instance.
+   *
+   * Do not change it. If you believe it should exit, the thing to change first
+   * is the week of Sentry data, not this line.
+   */
   process.on("unhandledRejection", (reason) => {
     console.error("[server] unhandledRejection", reason);
     Sentry.captureException(reason instanceof Error ? reason : new Error(String(reason)));

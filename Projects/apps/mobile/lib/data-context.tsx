@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { Site, Entry, GeneratedDiary, SiteTemplate, SiteMember, InviteResult } from "@/lib/types";
+import { Site, Client, Entry, GeneratedDiary, SiteTemplate, SiteMember, InviteResult } from "@/lib/types";
 import { resolveApiBaseUrl } from "@/lib/api-base-url";
 import { useAuth, isTokenExpiringSoon } from "@/lib/auth-context";
 import { SessionExpiredError, notifySessionExpired } from "@/lib/session";
@@ -23,6 +23,7 @@ import {
   type QueuedOp,
 } from "@/lib/offline-queue";
 import { drainQueue } from "@/lib/offline-drain";
+import { entrySyncStatesFromQueue, type EntrySyncStates } from "@/lib/entry-sync-state";
 import { materializeQueuedPhoto } from "@/lib/photo-bytes";
 import {
   canonicalUploadPathFromResponse,
@@ -36,6 +37,13 @@ import { reportSyncFailure } from "@/lib/sync-telemetry";
 
 interface DataContextType {
   sites: Site[];
+  /**
+   * The company's clients, for filing sites under. Readable by every role —
+   * GET /clients is behind identity, not rank, deliberately (see
+   * lib/permissions.ts). Whether the WRITE controls are drawn is decided by
+   * canManageClients / canFileSiteUnderClient, not by this list being empty.
+   */
+  clients: Client[];
   entries: Entry[];
   diaries: GeneratedDiary[];
   templates: SiteTemplate[];
@@ -49,10 +57,36 @@ interface DataContextType {
    * holding the phone can learn that work did not sync.
    */
   failedOps: QueuedOp[];
+  /**
+   * Per-entry sync state, keyed by entry id — AUDIT L37's remaining half. An
+   * entry id ABSENT from this map has reached the server; see
+   * lib/entry-sync-state.ts for why it is derived from the queue rather than
+   * read off `Entry.isPending`, which is set once and never cleared.
+   */
+  entrySyncStates: EntrySyncStates;
   /** Hands failed ops back to the drain. Returns how many were queued again. */
   retryFailedSync: (ids?: string[]) => Promise<number>;
   addSite: (site: Omit<Site, "id" | "createdAt">) => Promise<void>;
   deleteSite: (id: string) => Promise<void>;
+  /**
+   * The four client calls, and ALL FOUR REQUIRE CONNECTIVITY. That is a
+   * decision, not an omission.
+   *
+   * `lib/offline-queue.ts` has a closed union of five op types — addEntry,
+   * updateEntry, deleteEntry, addSite, deleteSite — covering field capture,
+   * which is what the queue exists for: a phone in a basement with photographs
+   * on it. Filing is office work that can wait for coverage, and queuing it
+   * would mean a client created offline has a local id that no site can be
+   * filed against until the queue drains, which is a worse experience than
+   * being told to try again with signal. A network failure therefore surfaces
+   * to the caller, which shows it with describeFailure().
+   */
+  addClient: (input: ClientInput) => Promise<Client>;
+  updateClient: (id: string, patch: Partial<ClientInput>) => Promise<Client>;
+  /** Unfiles the client's sites and deletes none of them. Returns how many. */
+  deleteClient: (id: string) => Promise<number>;
+  /** File a site under a client, or pass null to unfile it. */
+  fileSite: (siteId: string, clientId: string | null) => Promise<void>;
   addEntry: (
     entry: Omit<Entry, "id" | "timestamp" | "createdAt">,
     onProgress?: SaveProgressCallback
@@ -105,8 +139,25 @@ export interface CompanyInviteResult {
   deliveryError?: string;
 }
 
+/**
+ * What a client form sends. Deliberately NOT `Omit<Client, …>`: `siteCount` is
+ * computed by the API from a GROUP BY and must never be writable from here,
+ * and spelling the five fields out is what keeps it that way if Client grows a
+ * field. Matches ClientSchema in services/api/src/routes/clients.ts, where
+ * `name` is the only required one — a builder adding a client mid-job has the
+ * name and nothing else to hand.
+ */
+export interface ClientInput {
+  name: string;
+  contactName: string;
+  contactEmail: string;
+  contactPhone: string;
+  notes: string;
+}
+
 const DataContext = createContext<DataContextType | null>(null);
 const SITES_KEY = "sitesnap.sites";
+const CLIENTS_KEY = "sitesnap.clients";
 const ENTRIES_KEY = "sitesnap.entries";
 const DIARIES_KEY = "sitesnap.diaries";
 const BASE_URL = resolveApiBaseUrl();
@@ -119,6 +170,7 @@ function getCacheKeys(email?: string | null) {
   const scope = normalizeEmailKey(email);
   return {
     sites: `${SITES_KEY}:${scope}`,
+    clients: `${CLIENTS_KEY}:${scope}`,
     entries: `${ENTRIES_KEY}:${scope}`,
     diaries: `${DIARIES_KEY}:${scope}`,
   };
@@ -402,6 +454,29 @@ async function persistCache(email: string | null | undefined, sites: Site[], ent
 }
 
 
+/**
+ * The clients cache is its own pair of helpers rather than a fifth argument to
+ * persistCache.
+ *
+ * persistCache is called from nineteen places and every one of them passes
+ * sites, entries and diaries because every one of them changes one of those
+ * three. A client write changes none of them, and widening the shared function
+ * would mean nineteen call sites each passing a `clients` they do not touch —
+ * which is how a stale array gets written over a fresh one by a caller that had
+ * no business naming it.
+ *
+ * There is NO legacy unscoped key to fall back to here, unlike loadCache: this
+ * key is new in this commit, so an absent value means "not fetched yet", and
+ * the only correct answer for it is an empty list.
+ */
+async function persistClientsCache(email: string | null | undefined, clients: Client[]) {
+  await AsyncStorage.setItem(getCacheKeys(email).clients, JSON.stringify(clients));
+}
+
+async function loadClientsCache(email: string | null | undefined): Promise<Client[]> {
+  return safeParseArray<Client>(await AsyncStorage.getItem(getCacheKeys(email).clients));
+}
+
 async function loadCache(email: string | null | undefined) {
   const keys = getCacheKeys(email);
   const [sitesRaw, entriesRaw, diariesRaw] = await Promise.all([
@@ -553,6 +628,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     _setRefreshTokenFn(refreshToken);
   }, [refreshToken]);
   const [sites, setSites] = useState<Site[]>([]);
+  const [clients, setClients] = useState<Client[]>([]);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [diaries, setDiaries] = useState<GeneratedDiary[]>([]);
   const [templates, setTemplates] = useState<SiteTemplate[]>([]);
@@ -561,6 +637,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const [lastSyncError, setLastSyncError] = useState<string | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
   const [failedOps, setFailedOps] = useState<QueuedOp[]>([]);
+  const [entrySyncStates, setEntrySyncStates] = useState<EntrySyncStates>({});
 
   // The failed list is read from storage rather than accumulated in memory:
   // ops dead-lettered on a previous launch must still be visible on this one.
@@ -569,6 +646,27 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       setFailedOps(await peekFailedQueue());
     } catch {
       // Storage being unreadable must not take the screen down with it.
+    }
+  }, []);
+
+  /**
+   * Re-derives the per-entry sync map from the queue. Called wherever the queue
+   * changes, which is the only thing that can change the answer.
+   *
+   * This is a whole-queue read, and that is affordable here in a way the
+   * photograph payload map is not: queued payloads have their base64 stripped
+   * before being enqueued (stripPhotoPayloads), so the queue is a short array of
+   * small objects rather than tens of megabytes of string.
+   *
+   * On a read failure the map is left EXACTLY AS IT WAS rather than cleared.
+   * Clearing it would silently promote every outstanding entry to "arrived",
+   * which is the one wrong answer this indicator exists to prevent.
+   */
+  const refreshEntrySyncStates = React.useCallback(async () => {
+    try {
+      setEntrySyncStates(entrySyncStatesFromQueue(await peekQueue()));
+    } catch {
+      // Keep the last known map; see above.
     }
   }, []);
 
@@ -589,10 +687,16 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       updateQueuedPayload,
       markOpFailed,
       report: reportSyncFailure,
-      onPending: setPendingCount,
+      onPending: (count) => {
+        setPendingCount(count);
+        // An op leaving the queue is the moment an entry becomes "arrived", so
+        // the per-entry map has to be re-derived here and not only on mount.
+        void refreshEntrySyncStates();
+      },
       onFailed: () => {
         // The count comes back with the list, so there is one source for both.
         void refreshFailedOps();
+        void refreshEntrySyncStates();
       },
       warn: (...args) => console.warn(...args),
     });
@@ -601,6 +705,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const retryFailedSync = async (ids?: string[]) => {
     const retried = await retryFailedOps(ids);
     await refreshFailedOps();
+    // A retried op goes from failed back to pending, so the badge must follow.
+    await refreshEntrySyncStates();
     if (retried > 0) await drainOfflineQueue();
     return retried;
   };
@@ -610,6 +716,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     const cachedBase = await loadCache(userEmail);
     const cached = { ...cachedBase, entries: await attachSignedPhotoUris(cachedBase.entries, token) };
     setSites(cached.sites);
+    setClients(await loadClientsCache(userEmail));
     setEntries(cached.entries);
     setDiaries(cached.diaries);
 
@@ -623,9 +730,32 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       setLastSyncError(null);
       // Drain any queued offline writes before pulling fresh data
       await drainOfflineQueue();
-      const [bootstrap, templatesResp] = await Promise.all([
+      const [bootstrap, templatesResp, clientsResp] = await Promise.all([
         apiJson<{ sites: Site[]; entries: Entry[]; diaries: GeneratedDiary[] }>("/projects/bootstrap"),
         apiJson<{ templates: SiteTemplate[] }>("/projects/templates").catch(() => ({ templates: [] })),
+        /**
+         * WHY THIS ONE SWALLOWS ITS FAILURE, matching templates above.
+         *
+         * Filing is additive. Every site carries its own `client` label and its
+         * own `clientId`, both from /projects/bootstrap, so a sites list, a
+         * site screen and every entry still work with no client list at all —
+         * the only thing lost is the headings on the grouped list and the
+         * picker's options, and the grouped list falls back to the label.
+         *
+         * Letting this reject would put the whole refresh into the catch below,
+         * which reverts sites, entries AND diaries to the cache and reports the
+         * app as offline. That trade is wrong in both directions: a phone
+         * running a build whose API has not yet deployed /clients would show a
+         * stale cache for everything, and the owner's deploy order is
+         * API-first, so the window is real but narrow and the failure mode must
+         * not be "the app stopped working".
+         *
+         * The cost of swallowing it: an empty picker is indistinguishable from
+         * a company with no clients. That is why the picker says "No clients
+         * yet" rather than claiming a failure, and why nothing here infers
+         * anything about permissions from an empty list.
+         */
+        apiJson<{ clients: Client[] }>("/clients").catch(() => ({ clients: null })),
       ]);
       const hydratedEntries = await attachSignedPhotoUris(
         await hydrateEntriesWithPhotoPayloads(bootstrap.entries),
@@ -635,6 +765,16 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       setEntries(hydratedEntries);
       setDiaries(bootstrap.diaries);
       setTemplates(templatesResp.templates);
+      // NULL means the request failed; an EMPTY ARRAY means a company with no
+      // clients. Collapsing those two into `[]` was the first version of this
+      // line, and it is wrong in both directions: a failed fetch would have
+      // overwritten a good cache with nothing, and deleting the last client
+      // from another device would have left this one showing it forever. The
+      // cache is only touched when the server actually answered.
+      if (clientsResp.clients !== null) {
+        setClients(clientsResp.clients);
+        await persistClientsCache(userEmail, clientsResp.clients);
+      }
       await persistCache(userEmail, bootstrap.sites, hydratedEntries, bootstrap.diaries);
       const remaining = await peekQueue();
       setSyncStatus(remaining.length > 0 ? "offline" : "idle");
@@ -664,7 +804,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     void refreshFailedOps();
     peekQueue()
-      .then((queue) => setPendingCount(queue.filter((op) => op.status !== "failed").length))
+      .then((queue) => {
+        setPendingCount(queue.filter((op) => op.status !== "failed").length);
+        setEntrySyncStates(entrySyncStatesFromQueue(queue));
+      })
       .catch(() => {});
   }, [refreshFailedOps]);
 
@@ -678,6 +821,12 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
           setDiaries(cached.diaries);
         })
         .catch((error) => console.warn("cache restore on logout failed", error));
+      // Separately, because the clients cache has its own key and its own
+      // failure: a readable sites cache and an unreadable clients one must not
+      // take each other down.
+      loadClientsCache(user?.email ?? null)
+        .then(setClients)
+        .catch((error) => console.warn("client cache restore on logout failed", error));
     }
   }, [authLoading, isAuthenticated, user?.email, token]);
 
@@ -703,6 +852,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         await persistCache(user?.email, updated, entries, diaries);
         await enqueue({ type: "addSite", payload: siteData });
         setPendingCount((n) => n + 1);
+        void refreshEntrySyncStates();
         setSyncStatus("offline");
         return;
       }
@@ -719,6 +869,115 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     setEntries(updatedEntries);
     setDiaries(updatedDiaries);
     await persistCache(user?.email, updatedSites, updatedEntries, updatedDiaries);
+  };
+
+  /**
+   * ═════════════════════════════════════════════════════════════════════════
+   *  CLIENT FILING. FOUR CALLS, ALL ONLINE-ONLY.
+   * ═════════════════════════════════════════════════════════════════════════
+   *
+   * None of these has an offline-optimistic branch and none enqueues. See the
+   * note on the interface above for why. A network failure reaches the screen,
+   * which renders it through describeFailure() so a 403 reads as a refusal
+   * rather than a breakage.
+   *
+   * Each one re-sorts by name after writing, because GET /clients returns the
+   * list sorted and a local insert that appends would put a new client at the
+   * bottom until the next refresh — the list would reorder itself under the
+   * finger that just created the row.
+   */
+  const sortClients = (list: Client[]) =>
+    [...list].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+
+  const commitClients = async (next: Client[]) => {
+    const sorted = sortClients(next);
+    setClients(sorted);
+    await persistClientsCache(user?.email, sorted);
+    return sorted;
+  };
+
+  const addClient = async (input: ClientInput): Promise<Client> => {
+    const resp = await apiJson<{ client: Client }>("/clients", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    await commitClients([...clients, resp.client]);
+    return resp.client;
+  };
+
+  /**
+   * The PATCH response carries no `siteCount` — routes/clients.ts returns the
+   * store record, and the count is computed only by the list route. So the
+   * local count is CARRIED OVER rather than taken from the response, which
+   * would otherwise write `undefined` into a field the delete confirmation
+   * quotes and turn "this will unfile 4 sites" into "unfile undefined sites".
+   */
+  const updateClient = async (id: string, patch: Partial<ClientInput>): Promise<Client> => {
+    const resp = await apiJson<{ client: Omit<Client, "siteCount"> }>(`/clients/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    });
+    const previous = clients.find((c) => c.id === id);
+    const merged: Client = { ...resp.client, siteCount: previous?.siteCount ?? 0 };
+    await commitClients(clients.map((c) => (c.id === id ? merged : c)));
+    return merged;
+  };
+
+  /**
+   * Delete a client. ITS SITES SURVIVE — the API unfiles them and deletes none,
+   * and the count it returns is what the screen reports.
+   *
+   * The local site rows are updated here too, because the sites in state still
+   * carry the dead `clientId`: leaving them would group them under a heading
+   * whose client no longer exists until the next refresh. `client` — the
+   * free-text label — is deliberately left alone, matching the server, which
+   * keeps it so that unfiling never erases what somebody typed.
+   */
+  const deleteClient = async (id: string): Promise<number> => {
+    const resp = await apiJson<{ ok: boolean; unfiledSites: number }>(`/clients/${id}`, {
+      method: "DELETE",
+    });
+    await commitClients(clients.filter((c) => c.id !== id));
+    const updatedSites = sites.map((site) =>
+      (site.clientId ?? null) === id ? { ...site, clientId: null } : site
+    );
+    setSites(updatedSites);
+    await persistCache(user?.email, updatedSites, entries, diaries);
+    return resp.unfiledSites;
+  };
+
+  /**
+   * File a site under a client, or unfile it with null.
+   *
+   * The site comes back from the route rather than being patched locally, and
+   * that matters for one field: filing REWRITES `client`, the free-text label,
+   * to the client's canonical name. Spreading `{ ...site, clientId }` here
+   * instead would leave the card showing the old typed label next to its new
+   * heading, which is the disagreement this feature exists to remove.
+   *
+   * `siteCount` on the two affected clients is adjusted locally for the same
+   * reason the sort is local — the delete confirmation quotes it, and a count
+   * that is one behind until the next refresh would misreport what deleting a
+   * client is about to do.
+   */
+  const fileSite = async (siteId: string, clientId: string | null): Promise<void> => {
+    const previousClientId = sites.find((s) => s.id === siteId)?.clientId ?? null;
+    const resp = await apiJson<{ site: Site }>(`/projects/sites/${siteId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ clientId }),
+    });
+    const updatedSites = sites.map((s) => (s.id === siteId ? resp.site : s));
+    setSites(updatedSites);
+    await persistCache(user?.email, updatedSites, entries, diaries);
+    if (previousClientId !== clientId) {
+      await commitClients(
+        clients.map((c) => {
+          if (c.id === clientId) return { ...c, siteCount: c.siteCount + 1 };
+          if (c.id === previousClientId) return { ...c, siteCount: Math.max(0, c.siteCount - 1) };
+          return c;
+        })
+      );
+    }
   };
 
   const addEntry = async (
@@ -764,6 +1023,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         await persistCache(user?.email, sites, updated, diaries);
         await enqueue({ type: "addEntry", payload: stripPhotoPayloads(optimistic) });
         setPendingCount((n) => n + 1);
+        void refreshEntrySyncStates();
         setSyncStatus("offline");
         return;
       }
@@ -992,6 +1252,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     <DataContext.Provider
       value={{
         sites,
+        clients,
         entries,
         diaries,
         templates,
@@ -999,9 +1260,14 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         lastSyncError,
         pendingCount,
         failedOps,
+        entrySyncStates,
         retryFailedSync,
         addSite,
         deleteSite,
+        addClient,
+        updateClient,
+        deleteClient,
+        fileSite,
         addEntry,
         updateEntry,
         deleteEntry,

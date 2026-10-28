@@ -107,6 +107,39 @@ export async function createTemplate(actor: Actor, name: string, items: string[]
   return { id: row.id, ownerEmail: row.owner_email, companyId: row.company_id, name: row.name, items: row.items_json, createdAt: row.created_at.toISOString() };
 }
 
+/**
+ * Whether `id` names an inspection template this actor's company has.
+ *
+ * Exists for one reason: `inspections.template_id` is
+ * `TEXT REFERENCES inspection_templates(id) ON DELETE SET NULL` (migration
+ * 009), and POST /api/inspections used to store whatever `templateId` the
+ * request carried. A value that is not a row in that table is a foreign-key
+ * violation — which means a 500 against Postgres and a cheerful 201 against the
+ * in-memory store, since the fallback store has no constraints. So the one
+ * environment where the bug is visible is the one nobody runs.
+ *
+ * Scoped by company rather than by author: an inspection template is the
+ * company's reusable checklist (RECORD_CLASS calls it `company-record`), so a
+ * crew member may start an inspection from a checklist a manager wrote. This
+ * answers "does the foreign key have something to point at", not "may you read
+ * it" — the read rule is readVisibilitySql in listTemplates, and narrowing this
+ * to the author would refuse the common case rather than the broken one.
+ *
+ * NOT RLS-forced, so the bare pool here matches the other inspection_templates
+ * queries in this file; see the note on findInspectionTemplateOwner.
+ */
+export async function inspectionTemplateExists(actor: Actor, id: string): Promise<boolean> {
+  if (!useDatabase()) {
+    const existing = memoryTemplates.get(id);
+    return Boolean(existing && existing.companyId === actor.companyId);
+  }
+  const result = await getPgPool().query(
+    `SELECT 1 FROM inspection_templates WHERE id = $1 AND company_id = $2 LIMIT 1`,
+    [id, actor.companyId]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
 export async function deleteTemplate(actor: Actor, id: string): Promise<boolean> {
   if (!useDatabase()) {
     const existing = memoryTemplates.get(id);
