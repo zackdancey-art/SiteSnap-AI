@@ -408,5 +408,36 @@ module.exports = {
         "no-restricted-syntax": "off",
       },
     },
+    {
+      // MERGE-TIME ADDITION, and the one exemption here that is not about the
+      // soft-delete registry. workstream 6 adds the column ban; workstream 8
+      // adds sqlSchemaAudit.test.ts, whose fixtures carry the L99 predicate ON
+      // PURPOSE -- `SELECT id FROM project_sites WHERE company_id = $1 AND
+      // deleted_at IS NULL` is the exact defect, fed to the checker to prove
+      // the checker reports it, with a positive control on the same statement.
+      // Neither branch is wrong and neither sees the other: the ban lints clean
+      // on workstream 6 and the fixtures lint clean on workstream 8. Only the
+      // union is red -- measured at 3 errors, lines 261/265/270, before this
+      // block existed.
+      //
+      // Exempting it does not weaken the ban. The file writes no SQL that runs:
+      // the strings are arguments to extractSqlLiterals, which parses them. And
+      // what it tests IS the audit enforcing the same rule as the ban, one
+      // layer down. Linting the fixtures would mean the checker for the defect
+      // cannot have a test for the defect.
+      //
+      // ITS OWN BLOCK, NOT AN ENTRY IN THE LIST ABOVE, AND THAT IS THE POINT.
+      // Adding this path to the registry block would have set the whole rule to
+      // "off" for it, and an overrides block replaces a rule's options wholesale
+      // rather than merging them -- so DYNAMIC_POOL_IMPORT_BAN would have gone
+      // off for this file too, silently, which is the identical mistake the
+      // storage/** block's own comment records having already been made once.
+      // The soft-delete ban is what needs dropping here; the pool ban has
+      // nothing to do with these fixtures and is re-listed so it stays on.
+      files: ["services/api/src/storage/sqlSchemaAudit.test.ts"],
+      rules: {
+        "no-restricted-syntax": ["error", DYNAMIC_POOL_IMPORT_BAN],
+      },
+    },
   ],
 };

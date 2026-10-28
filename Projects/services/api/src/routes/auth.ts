@@ -568,6 +568,18 @@ router.post("/auth/register/verify", async (req, res) => {
   }
 });
 
+/**
+ * A well-formed scrypt hash that no password will match. AUDIT L18, and see
+ * loginHandler's own comment for why an unknown email verifies against it.
+ *
+ * WELL-FORMED is the requirement, not secret: verifyPassword returns false
+ * immediately for anything that does not split into `scrypt$salt$hex`, so junk
+ * here would skip the derivation and reinstate the timing difference this
+ * constant exists to remove. The digest is 64 zero bytes; nothing is going to
+ * derive to that, and the salt is public by construction in every stored hash.
+ */
+const UNMATCHABLE_HASH = `scrypt$${"00".repeat(16)}$${"00".repeat(64)}`;
+
 async function loginHandler(req: Request, res: Response) {
   const email = String(req.body?.email ?? "").trim().toLowerCase();
   const password = String(req.body?.password ?? "").trim();
@@ -588,12 +600,32 @@ async function loginHandler(req: Request, res: Response) {
 
   try {
     const existing = await findUserByEmail(email);
-    if (!existing) {
-      return res.status(404).json({ error: "Account not found. Please sign up first." });
-    }
 
-    const passwordOk = await verifyPassword(password, existing.passwordHash);
-    if (!passwordOk) {
+    /**
+     * One answer for both failures. AUDIT L18.
+     *
+     * An unknown email used to answer 404 "Account not found. Please sign up
+     * first." and a wrong password 401 "Incorrect email or password.", which
+     * made this route an oracle: anyone could ask it whether a given email has
+     * a SiteSnap account and get a reliable yes or no, unauthenticated, at the
+     * per-account rate limit. For a product whose users are named site
+     * supervisors at identifiable companies, the answer is itself the
+     * information worth having -- it is a list of who to phish and with what.
+     *
+     * The response is now identical in status, code and message either way.
+     * So is the WORK: verifying against UNMATCHABLE_HASH makes an unknown
+     * email pay for the same scrypt derivation a known one does, because
+     * skipping it left the two cases a few milliseconds apart and a timing
+     * oracle is the same oracle.
+     *
+     * The cost is real and deliberate: a genuinely new person who tries to
+     * sign in before signing up is no longer told to sign up. That message
+     * cannot be restored for them without restoring it for everybody probing
+     * the route, since the server cannot tell the two apart -- which is the
+     * whole point.
+     */
+    const passwordOk = await verifyPassword(password, existing?.passwordHash ?? UNMATCHABLE_HASH);
+    if (!existing || !passwordOk) {
       return res.status(401).json({
         error: "Incorrect email or password.",
         code: AUTH_ERROR_CODES.INVALID_CREDENTIALS,

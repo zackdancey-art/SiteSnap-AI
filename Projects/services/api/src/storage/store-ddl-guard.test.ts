@@ -63,6 +63,16 @@ const DDL_EXEMPT: Record<string, string> = {
   // Legacy, live, and no-ops because migrations run first. See the note above.
   "storage/authStore.ts": "initAuthSchema, pre-migration legacy, runs after runMigrations()",
   "storage/projectsStore.ts": "initProjectSchema, pre-migration legacy, runs after runMigrations()",
+  // The test-database migration runner, hoisted out of eleven copies. Same
+  // bootstrap problem as migrate.ts above and for the same reason: it cannot
+  // read the applied-migrations set before the table holding it exists.
+  "storage/testMigrations.ts": "creates schema_migrations for the DB-gated suites, same bootstrap as migrate.ts",
+  // READS DDL, DOES NOT ISSUE IT. The three matches are a SQL reserved-word
+  // list and the two regexes that parse CREATE TABLE and ALTER TABLE out of the
+  // migration files. stripComments() cannot tell this apart from a store
+  // defining schema, because here the DDL text is code rather than a comment —
+  // which is exactly the case the exemption list exists to carry.
+  "storage/sqlSchemaAudit.ts": "parses DDL out of the migrations to audit store SQL against it; issues none",
 };
 
 /** DDL verbs. A store issuing any of these is defining schema. */

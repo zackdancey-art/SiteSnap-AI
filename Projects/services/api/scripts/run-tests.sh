@@ -135,6 +135,52 @@ case "$MODE" in
     # These share one Redis keyspace; parallel runs would cross-count.
     CONCURRENCY="--test-concurrency=1"
     ;;
+  all-db)
+    # Option A from the Phase 2 divergence cost-out: run EVERY suite against
+    # Postgres, so the in-memory store is not merely tested alongside the real
+    # one but unreachable for the length of the run.
+    #
+    # The seven defects that have hidden between the two stores all had the same
+    # shape: a rule the in-memory twin enforced and the SQL did not, or a column
+    # the SQL named and the schema did not have. Four of those classes are now
+    # closed structurally by storage/recordScope.ts, which drives the in-memory
+    # predicate and the SQL predicate from one frozen table, and the column class
+    # is closed statically by storage/sqlSchemaAudit.test.ts. This mode is what
+    # closes the remainder, and it is the only thing that can: it executes the
+    # SQL, which is the one thing no amount of reading it will do.
+    #
+    # THIS MODE IS NOT WIRED INTO ci.sh, DELIBERATELY. Its first run against a
+    # real database is expected to be RED — the in-memory suites have never been
+    # executed against Postgres, so every place the two stores disagree surfaces
+    # at once. Gating CI on it before that list is known and worked through would
+    # block every open pull request on failures that have nothing to do with any
+    # of them. Turn it on in scripts/ci.sh with one line once the list is empty;
+    # the PR body for this change says where.
+    DESCRIPTION="whole suite against Postgres"
+    if [ -z "${TEST_DATABASE_URL:-}" ]; then
+      {
+        echo ""
+        echo "ERROR: all-db mode requires TEST_DATABASE_URL to be set."
+        echo ""
+        echo "  Without it every store falls back to the in-memory path and this"
+        echo "  mode becomes an expensive re-run of the memory suite that looks"
+        echo "  like it proved something about Postgres. That is the exact"
+        echo "  silent-success this script exists to prevent."
+        echo ""
+        echo "  Point it at a THROWAWAY database. This mode runs the migrations"
+        echo "  and the suites delete rows wholesale between tests."
+        echo "    TEST_DATABASE_URL=postgres://... pnpm run test:all-db"
+        echo ""
+      } >&2
+      exit 1
+    fi
+    FILE_LIST=$(find dist -name '*.test.js' | sort)
+    # Every suite migrates and seeds the same database. Parallel execution races,
+    # and this is the cheap answer to the race the Phase 2 cost-out priced at
+    # two to four days of namespacing twenty-six files: there is no race if
+    # nothing runs at the same time as anything else.
+    CONCURRENCY="--test-concurrency=1"
+    ;;
   db)
     DESCRIPTION="database-gated suites"
     FILE_LIST=$(grep -rl '!process.env.TEST_DATABASE_URL' dist --include='*.test.js' | sort || true)
@@ -143,7 +189,7 @@ case "$MODE" in
     CONCURRENCY="--test-concurrency=1"
     ;;
   *)
-    echo "run-tests.sh: unknown mode '$MODE' (expected 'memory', 'db', 'redis' or 'openai')" >&2
+    echo "run-tests.sh: unknown mode '$MODE' (expected 'memory', 'db', 'all-db', 'redis' or 'openai')" >&2
     exit 2
     ;;
 esac
@@ -161,6 +207,9 @@ if [ -z "$FILE_LIST" ]; then
       echo "  The db suites are selected by grepping dist/ for the literal string"
       echo "  '!process.env.TEST_DATABASE_URL'. If that guard was rewritten, update"
       echo "  the selector in this script to match."
+    elif [ "$MODE" = "all-db" ]; then
+      echo "  all-db selects every dist/**/*.test.js, so an empty list means the"
+      echo "  build emitted nothing. Check that 'pnpm run build' ran."
     elif [ "$MODE" = "redis" ]; then
       echo "  The Redis tests are selected by grepping dist/ for 'REDIS_TEST_URL'."
       echo "  If that env var was renamed, update the selector in this script."
@@ -255,6 +304,12 @@ fi
 
 if [ "$MODE" = "redis" ] || [ "$MODE" = "openai" ]; then
   EXPECTED_SKIPS=0
+elif [ "$MODE" = "all-db" ]; then
+  # TEST_DATABASE_URL is set, so none of the db-gated suites skip — that is the
+  # whole point of this mode. REDIS_TEST_URL and OPENAI_LIVE_TEST_KEY are not
+  # set, so those gates still do. Derived rather than written, so it cannot
+  # drift away from the two counters above.
+  EXPECTED_SKIPS=$((EXPECTED_REDIS_TESTS + EXPECTED_LIVE_OPENAI_TESTS))
 else
   EXPECTED_SKIPS=$((EXPECTED_DB_SUITES + EXPECTED_REDIS_TESTS + EXPECTED_LIVE_OPENAI_TESTS))
 fi

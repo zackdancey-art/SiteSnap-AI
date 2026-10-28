@@ -16,6 +16,7 @@ import {
   canSeeSiteBin,
   canManageSiteMembers,
   canSeeSupervisorDashboard,
+  canVoidSignature,
   describeFailure,
   isForbidden,
   isTimecardEditable,
@@ -102,26 +103,35 @@ test("crew are the only operational role refused nothing else — every predicat
   // should be the thing that says so.
   // ENUMERATED FROM THE MODULE, NOT LISTED BY HAND.
   //
-  // This was a hand-written array of six, and a hand-written array is how the
+  // This was a hand-written array of seven, and a hand-written array is how the
   // rule above stops being enforced: the next predicate added to the module is
   // not in it, so "every predicate here is an exception" quietly becomes "the
-  // six predicates somebody remembered are". This phase adds two, and eight
-  // more workstreams will add others. Deriving the list means a predicate that
-  // grants crew something fails this test on the day it is written.
+  // seven predicates somebody remembered are". Eight other workstreams add
+  // predicates to this module; by the tree this branch merges into there are
+  // eleven, and a hand-written seven would have tested four of them not at all
+  // while still reading green.
   //
   // Keyed on the `can` prefix, which is the module's own naming convention for
-  // a permission predicate — `isForbidden` and `describeFailure` answer
-  // questions about an error, not about a role, and take an `unknown` error
-  // rather than a role.
+  // a permission predicate -- `isForbidden` and `describeFailure` answer
+  // questions about an error, not about a role.
   const predicates = Object.entries(permissionsModule)
     .filter(([name, value]) => name.startsWith("can") && typeof value === "function")
     .map(([, value]) => value as (role: unknown) => boolean);
 
   // The control on the derivation. Without it, a filter that matched nothing
   // would make the loop below iterate zero times and pass — the vacuity shape
-  // docs/VACUITY-AUDIT.md names. The floor is the count at the time of writing;
-  // it is a floor rather than an equality because adding a predicate must not
-  // break this test, only granting crew something must.
+  // docs/VACUITY-AUDIT.md names. It is a floor rather than an equality because
+  // adding a predicate must not break this test, only granting crew something
+  // must.
+  //
+  // MEASURED AT 11 ON THIS MERGED TREE, and deliberately still reading 8. Both
+  // parents wrote the floor as "the count at the time of writing" — 7 on one
+  // side, 8 on the other — and that sentence stops being true the moment two
+  // branches of predicates land together, which is what this merge is. Raising
+  // it is a one-line commit held back until the whole batch is on main, because
+  // a floor raised to 11 here would go red on every branch in the batch that
+  // does not yet carry all eleven. The number above is a floor that passes; the
+  // number that makes this test tight is queued, not forgotten.
   assert.ok(predicates.length >= 8, `expected at least 8 predicates, found ${predicates.length}`);
   assert.ok(
     predicates.includes(canSeeSupervisorDashboard),
@@ -198,6 +208,29 @@ test("managing clients and filing a site are manager+, and READING the client li
       .sort(),
     ["canFileSiteUnderClient", "canManageClients"],
     "two client predicates, both about WRITING — a third is probably a read gate the API has not got"
+  );
+});
+
+test("voiding a signature is manager+, and signing one is not", () => {
+  // AUDIT L91. Matches requireAtLeast("manager") on
+  // POST /inspections/:id/signatures/:sigId/void.
+  assert.equal(canVoidSignature("crew"), false);
+  assert.equal(canVoidSignature("viewer"), false);
+  assert.equal(canVoidSignature("manager"), true);
+  assert.equal(canVoidSignature("owner"), true);
+
+  // The same shape of trap as the diary predicate, in its sharpest form here:
+  // the fix for "crew can void" must not become "crew cannot sign". Crew are
+  // the inspectors — the signature this gate protects is usually theirs — so a
+  // canSignInspection predicate would be the defect, not the fix, and the
+  // assertion that no such predicate exists is the only one this file can make
+  // about it. The positive half, crew signing and being refused the void on the
+  // same inspection, is a Postgres probe in the API's
+  // routes/crew-permissions-db.test.ts.
+  assert.deepEqual(
+    Object.keys(permissionsModule).filter((k) => /sign(ature)?/i.test(k)),
+    ["canVoidSignature"],
+    "exactly one signature predicate — a second one is probably a refusal of signing"
   );
 });
 

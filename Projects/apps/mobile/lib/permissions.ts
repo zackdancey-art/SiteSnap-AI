@@ -205,6 +205,24 @@ export function canApproveTimesheet(companyRole: unknown): boolean {
 }
 
 /**
+ * Voiding an inspection signature: manager and above. AUDIT L91.
+ *
+ * The asymmetry with signing is the point. Crew inspect and crew sign what they
+ * inspected, so there is no `canSignInspection` here and there must not be one.
+ * Voiding is the retraction of that claim on a document retained for seven
+ * years, and until the gate this predicate mirrors existed, any crew member
+ * with a login could retract any signature on any inspection in their company.
+ *
+ * This hides one control. The server is what refuses — POST
+ * /inspections/:id/signatures/:sigId/void is requireAtLeast("manager") in
+ * routes/inspections.ts — and the rest of the inspections screen, signing
+ * included, stays fully usable for crew.
+ */
+export function canVoidSignature(companyRole: unknown): boolean {
+  return isManagerOrAbove(companyRole);
+}
+
+/**
  * Company settings: branding, NZBN, contact details, anything
  * organisation-level. Exception 3, and the only one that is owner-only rather
  * than manager+, because that is what the API already enforces

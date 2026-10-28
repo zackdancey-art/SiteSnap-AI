@@ -189,7 +189,16 @@ export default function LocationsPage() {
                     ? `No active workers. ${hiddenCount} worker${hiddenCount === 1 ? " has" : "s have"} not pinged in ${describeCutoff(mapPrefs.staleCutoffMinutes)} and are hidden by your Live Map settings.`
                     : "No workers have shared their location recently."}
                 </p>
-                <p style={{ fontSize: 12, marginTop: 8 }}>Workers enable tracking in the mobile app under Settings → Location Tracking.</p>
+                {/* AUDIT F1. This line used to read "Workers enable tracking in the
+                    mobile app under Settings → Location Tracking." There is no such
+                    row, and there never has been: the mobile app ships no control
+                    that turns location sharing on, which is why this page is always
+                    empty. Sending a manager to look for a switch that does not exist
+                    is worse than saying nothing -- they conclude the worker refused,
+                    and on a privacy feature that is an accusation. The feature itself
+                    is AUDIT L60/F1 and is not built here; this says only what is
+                    true. */}
+                <p style={{ fontSize: 12, marginTop: 8 }}>Location sharing is not available in the mobile app yet, so this page stays empty.</p>
               </div>
             ) : (
               <table className="data-table">

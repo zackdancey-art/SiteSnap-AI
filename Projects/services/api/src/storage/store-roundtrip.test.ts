@@ -30,10 +30,9 @@ process.env.NODE_ENV = "test";
 
 import assert from "node:assert/strict";
 import { test, before, after } from "node:test";
-import fs from "node:fs/promises";
-import path from "node:path";
 import type { Pool } from "pg";
 import type { Actor } from "./actor";
+import { applyMigrations } from "./testMigrations";
 
 if (!process.env.TEST_DATABASE_URL) {
   test("store round-trip (skipped: set TEST_DATABASE_URL)", { skip: true }, () => {});
@@ -42,34 +41,7 @@ if (!process.env.TEST_DATABASE_URL) {
   // binds to TEST_DATABASE_URL under NODE_ENV=test, so both point at the test DB.
   process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 
-  const MIGRATIONS_DIR = path.join(process.cwd(), "src", "storage", "migrations");
 
-  const applyMigrations = async (pool: Pool): Promise<void> => {
-    await pool.query(
-      `CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`
-    );
-    const done = new Set(
-      (await pool.query<{ version: string }>(`SELECT version FROM schema_migrations`)).rows.map((r) => r.version)
-    );
-    const files = (await fs.readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith(".sql")).sort();
-    for (const file of files) {
-      const version = file.replace(/\.sql$/, "");
-      if (done.has(version)) continue;
-      const sql = await fs.readFile(path.join(MIGRATIONS_DIR, file), "utf8");
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-        await client.query(sql);
-        await client.query(`INSERT INTO schema_migrations (version) VALUES ($1)`, [version]);
-        await client.query("COMMIT");
-      } catch (e) {
-        await client.query("ROLLBACK");
-        throw new Error(`migration ${file} failed: ${(e as Error).message}`);
-      } finally {
-        client.release();
-      }
-    }
-  };
 
   const CO = "rt-company";
   const OWNER = "rt-owner@test.local";

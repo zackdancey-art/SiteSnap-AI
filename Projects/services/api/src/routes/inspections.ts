@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { asyncSafeRouter } from "../middleware/asyncRouter";
 import { z } from "zod";
-import { FIELD_ACCESS, AuthenticatedRequest } from "../middleware/auth";
+import { FIELD_ACCESS, AuthenticatedRequest, requireAtLeast } from "../middleware/auth";
 import { requireOwnRecord } from "../middleware/recordOwnership";
 import {
   listTemplates, createTemplate, deleteTemplate, inspectionTemplateExists,
@@ -242,7 +242,27 @@ inspectionsRouter.get("/inspections/:id/signatures", async (req, res) => {
   }
 });
 
-inspectionsRouter.post("/inspections/:id/signatures/:sigId/void", async (req, res) => {
+/**
+ * Voiding a signature is manager+. AUDIT L91, the owner's decision.
+ *
+ * Everything else on this router is identity-only on purpose (FIELD_ACCESS
+ * above): capturing an inspection, signing one, listing signatures -- that is
+ * field work and rank has no business in it. Voiding is the one operation here
+ * that destroys evidence rather than recording it. A signature is the claim
+ * that a named person inspected a thing on a date; voiding it retracts that
+ * claim on a document retained for seven years, and until this line existed any
+ * crew member with a login could retract any signature on any inspection in
+ * their company.
+ *
+ * It is a route-level gate rather than a field-level one, unlike the diary
+ * status gate (AUDIT L81), because there is no benign version of this request:
+ * the route does exactly one thing, and that thing is the restricted thing.
+ *
+ * The record survives either way -- voidSignature sets voided_at and
+ * voided_reason, it does not delete the row -- so this gate decides who may
+ * retract, not whether the retraction is auditable.
+ */
+inspectionsRouter.post("/inspections/:id/signatures/:sigId/void", requireAtLeast("manager"), async (req, res) => {
   try {
     const parsed = SignatureVoidSchema.safeParse(req.body ?? {});
     if (!parsed.success) {

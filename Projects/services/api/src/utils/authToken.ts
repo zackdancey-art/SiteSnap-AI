@@ -82,17 +82,6 @@ export function getSessionTimings() {
   };
 }
 
-export const ELEVATED_ROLES: UserRole[] = ["supervisor", "admin"];
-
-/**
- * @deprecated Legacy elevation check kept only for auth-route call sites that
- * still reference the pre-company `role`. Company scoping no longer uses this —
- * all enforcement filters by companyId + companyRole. Do not add new callers.
- */
-export function isElevatedRole(role: UserRole) {
-  return role === "supervisor" || role === "admin";
-}
-
 // ── Legacy ↔ company role mapping (transition helpers) ────────────────────────
 export function companyRoleFromLegacy(role: UserRole): CompanyRole {
   if (role === "admin") return "owner";
