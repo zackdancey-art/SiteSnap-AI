@@ -81,6 +81,10 @@
     "lib/native-permission-audit.ts",
     "lib/native-permission-audit.test.ts",
     "lib/consent-summary.ts",
-    "lib/consent-summary.test.ts"
+    "lib/consent-summary.test.ts",
+    "lib/siteStatus.ts",
+    "lib/siteStatus.test.ts",
+    "lib/portfolio-metrics.ts",
+    "lib/portfolio-metrics.test.ts"
   ]
 }

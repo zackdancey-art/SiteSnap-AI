@@ -15,14 +15,18 @@ import { SyncStatusBanner } from "@/components/SyncStatusBanner";
 import Colors from "@/constants/colors";
 import { Site } from "@/lib/types";
 import { groupSitesByClient, shouldShowGroupHeadings } from "@/lib/site-grouping";
+import { siteStatusCfg } from "@/lib/siteStatus";
 import { TabScreenInsets, useTabScreenInsets } from "@/lib/useScreenInsets";
 
 function SiteCard({ site }: { site: Site }) {
   const entryCount = useData().entries.filter((e) => e.siteId === site.id).length;
 
-  const statusColor =
-    site.status === "active" ? Colors.success : site.status === "on-hold" ? Colors.warning : Colors.textTertiary;
-  const statusLabel = site.status === "on-hold" ? "On Hold" : site.status.charAt(0).toUpperCase() + site.status.slice(1);
+  // One decision, in lib/siteStatus.ts, shared with the portal and with the
+  // supervisor dashboard. The pair of ternaries this replaces gave a finished
+  // site the word "Completed" in Colors.textTertiary — the grey it uses for a
+  // status it does not recognise — while every portal surface shows "Complete"
+  // in accent orange. Same site, two surfaces, different word and colour.
+  const { color: statusColor, label: statusLabel } = siteStatusCfg(site.status);
 
   return (
     <Pressable

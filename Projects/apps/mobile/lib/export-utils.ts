@@ -12,6 +12,7 @@ import {
 import { reportMediaFailure } from "@/lib/media-telemetry";
 import { describeGeneration } from "@/lib/provenance";
 import { LOGO_DATA_URI } from "@/lib/logo";
+import { EXPORT_PALETTE } from "@/constants/exportPalette";
 
 export type ReportExportFormat = "pdf" | "doc";
 
@@ -114,21 +115,21 @@ export function buildHtmlDocument(args: {
       body {
         margin: 0;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        color: #0f2b46;
-        background: #eef2f7;
+        color: ${EXPORT_PALETTE.text};
+        background: ${EXPORT_PALETTE.pageGround};
       }
       .page {
         padding: 32px;
       }
       .shell {
-        background: #ffffff;
+        background: ${EXPORT_PALETTE.sheet};
         border-radius: 22px;
         overflow: hidden;
         box-shadow: 0 18px 60px rgba(15, 43, 70, 0.08);
       }
       .hero {
-        background: linear-gradient(135deg, #0f2b46 0%, #143a5b 100%);
-        color: #ffffff;
+        background: linear-gradient(135deg, ${EXPORT_PALETTE.text} 0%, ${EXPORT_PALETTE.heroEnd} 100%);
+        color: ${EXPORT_PALETTE.sheet};
         padding: 28px 32px;
         display: flex;
         align-items: center;
@@ -166,8 +167,8 @@ export function buildHtmlDocument(args: {
         padding: 24px 32px 0;
       }
       .meta-card {
-        background: #f6f8fb;
-        border: 1px solid #dde5ef;
+        background: ${EXPORT_PALETTE.panelFill};
+        border: 1px solid ${EXPORT_PALETTE.panelBorder};
         border-radius: 16px;
         padding: 14px 16px;
       }
@@ -175,12 +176,12 @@ export function buildHtmlDocument(args: {
         font-size: 11px;
         text-transform: uppercase;
         letter-spacing: 0.08em;
-        color: #6f8095;
+        color: ${EXPORT_PALETTE.mutedLabel};
         margin-bottom: 6px;
       }
       .meta-value {
         font-size: 15px;
-        color: #0f2b46;
+        color: ${EXPORT_PALETTE.text};
         line-height: 1.5;
         font-weight: 600;
       }
@@ -188,7 +189,7 @@ export function buildHtmlDocument(args: {
         padding: 24px 32px 32px;
       }
       .section {
-        border: 1px solid #e3eaf2;
+        border: 1px solid ${EXPORT_PALETTE.sectionBorder};
         border-radius: 18px;
         padding: 18px;
         margin-bottom: 16px;
@@ -197,11 +198,11 @@ export function buildHtmlDocument(args: {
       .section h2 {
         margin: 0 0 12px;
         font-size: 18px;
-        color: #0f2b46;
+        color: ${EXPORT_PALETTE.text};
       }
       .section p {
         margin: 0 0 12px;
-        color: #31455d;
+        color: ${EXPORT_PALETTE.bodyProse};
         line-height: 1.65;
         white-space: pre-wrap;
       }
@@ -211,7 +212,7 @@ export function buildHtmlDocument(args: {
       }
       .checklist li {
         margin-bottom: 8px;
-        color: #31455d;
+        color: ${EXPORT_PALETTE.bodyProse};
         line-height: 1.55;
       }
       .detail-table {
@@ -220,7 +221,7 @@ export function buildHtmlDocument(args: {
       }
       .detail-table th,
       .detail-table td {
-        border-top: 1px solid #e6edf5;
+        border-top: 1px solid ${EXPORT_PALETTE.detailRule};
         text-align: left;
         vertical-align: top;
         padding: 10px 0;
@@ -229,7 +230,7 @@ export function buildHtmlDocument(args: {
       }
       .detail-table th {
         width: 170px;
-        color: #6f8095;
+        color: ${EXPORT_PALETTE.mutedLabel};
         font-weight: 600;
         padding-right: 16px;
       }
@@ -240,24 +241,24 @@ export function buildHtmlDocument(args: {
         font-size: 13px;
       }
       .data-table thead th {
-        background: #f6f8fb;
+        background: ${EXPORT_PALETTE.panelFill};
         padding: 10px 12px;
         text-align: left;
         font-size: 11px;
         text-transform: uppercase;
         letter-spacing: 0.06em;
-        color: #6f8095;
-        border-bottom: 2px solid #dde5ef;
+        color: ${EXPORT_PALETTE.mutedLabel};
+        border-bottom: 2px solid ${EXPORT_PALETTE.panelBorder};
       }
       .data-table tbody td {
         padding: 10px 12px;
-        border-bottom: 1px solid #edf1f7;
+        border-bottom: 1px solid ${EXPORT_PALETTE.dataRule};
         vertical-align: middle;
       }
       .data-table tbody tr:last-child td { border-bottom: none; }
       .footer {
         padding-top: 6px;
-        color: #6f8095;
+        color: ${EXPORT_PALETTE.mutedLabel};
         font-size: 11px;
       }
       @page {
@@ -691,7 +692,7 @@ export function buildExportImageMarkup(photo: ExportPhoto, maxHeight = 320): str
   // Deliberately loud. Small grey italic print — or, in the gallery export, an
   // empty string — is how a document understates a gap in the evidence it
   // claims to contain.
-  return `<div style="margin:0 0 12px;padding:18px;border:2px dashed #fcd34d;border-radius:14px;background:#fef3c7;color:#92400e;">
+  return `<div style="margin:0 0 12px;padding:18px;border:2px dashed ${EXPORT_PALETTE.noticeBorder};border-radius:14px;background:${EXPORT_PALETTE.noticeBg};color:${EXPORT_PALETTE.noticeText};">
              <div style="font-weight:700;font-size:14px;margin-bottom:4px;">&#9888; IMAGE NOT INCLUDED</div>
              <div style="font-size:12px;line-height:1.5;">${escapeHtml(describeUnavailable(photo.exportUnavailableReason || "load-failed"))} This photograph is recorded in the entry but its image could not be attached to this document.</div>
            </div>`;
@@ -703,9 +704,9 @@ export function buildExportImageMarkup(photo: ExportPhoto, maxHeight = 320): str
  */
 export function buildIncompleteRecordNotice(unavailableCount: number, total: number): string {
   if (unavailableCount <= 0) return "";
-  return `<section class="section" style="border:2px solid #fcd34d;background:#fef3c7;border-radius:14px;padding:16px;">
-           <h2 style="color:#92400e;margin-top:0;">&#9888; Incomplete photo record</h2>
-           <p style="color:#92400e;margin:0;font-size:13px;line-height:1.6;">
+  return `<section class="section" style="border:2px solid ${EXPORT_PALETTE.noticeBorder};background:${EXPORT_PALETTE.noticeBg};border-radius:14px;padding:16px;">
+           <h2 style="color:${EXPORT_PALETTE.noticeText};margin-top:0;">&#9888; Incomplete photo record</h2>
+           <p style="color:${EXPORT_PALETTE.noticeText};margin:0;font-size:13px;line-height:1.6;">
              ${unavailableCount} of ${total} photographs could not be included in this export.
              The missing images are marked individually below. This document is not a complete photographic record.
            </p>

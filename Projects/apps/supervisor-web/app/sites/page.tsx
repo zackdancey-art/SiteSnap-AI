@@ -10,16 +10,15 @@ import { getSavedUser, listClients } from "@/lib/api";
 import type { Client, Site } from "@/lib/api";
 import { useBootstrap } from "@/lib/useBootstrap";
 import { groupSitesByClient, shouldShowGroupHeadings } from "@/lib/site-grouping";
+import {
+  SITE_STATUS_FILTERS,
+  canonicalSiteStatus,
+  matchesSiteStatusFilter,
+  siteStatusCfg,
+  siteStatusFilterLabel,
+  type SiteStatusFilter,
+} from "@/lib/siteStatus";
 
-const STATUS_CFG: Record<string, { label: string; color: string; bg: string }> = {
-  active:    { label: "Active",    color: "#22C55E", bg: "#F0FDF4" },
-  inactive:  { label: "Inactive",  color: "#9EAFC2", bg: "#F1F5F9" },
-  completed: { label: "Complete",  color: "#E8731A", bg: "#FFF7ED" },
-  on_hold:   { label: "On Hold",   color: "#F59E0B", bg: "#FFFBEB" },
-};
-function scfg(s: string) { return STATUS_CFG[s] ?? STATUS_CFG.inactive; }
-
-type FilterStatus = "all" | "active" | "inactive" | "completed" | "on_hold";
 
 const GRID: React.CSSProperties = {
   display: "grid",
@@ -33,7 +32,7 @@ function SitesPageInner() {
   const data = bootstrap.status === "ok" ? bootstrap.data : null;
   const loading = bootstrap.status === "loading";
   const [search, setSearch] = useState("");
-  const [filterStatus, setFilterStatus] = useState<FilterStatus>("all");
+  const [filterStatus, setFilterStatus] = useState<SiteStatusFilter>("all");
 
   /**
    * The client list, fetched separately from the bootstrap.
@@ -96,7 +95,7 @@ function SitesPageInner() {
         s.client?.toLowerCase().includes(q) ||
         clientName?.toLowerCase().includes(q) ||
         s.address?.toLowerCase().includes(q);
-      const matchStatus = filterStatus === "all" || s.status === filterStatus;
+      const matchStatus = matchesSiteStatusFilter(s.status, filterStatus);
       // An unresolvable ?clientId= still filters. It must not fall through to
       // an unfiltered list that looks exactly like a page with no filter on
       // it — that is how somebody concludes a client has every site.
@@ -116,23 +115,29 @@ function SitesPageInner() {
   );
   const showHeadings = !activeClientId && shouldShowGroupHeadings(groups);
 
+  // Tallied by canonical status, so a site stored as `on-hold` is counted under
+  // the On Hold tab. The previous version compared against the literal
+  // `"on_hold"` and so always reported 0 — see lib/siteStatus.ts.
   const counts = useMemo(() => {
-    if (!data) return { all: 0, active: 0, completed: 0, on_hold: 0 };
+    const tally: Record<SiteStatusFilter, number> = { all: 0, active: 0, completed: 0, "on-hold": 0 };
+    if (!data) return tally;
     // Counted over the client filter but not over the search or the status, so
     // the chips say how many sites each status HAS rather than how many are
     // showing — a chip reading "(0)" that you cannot click to anything is the
     // alternative.
     const pool = activeClientId ? data.sites.filter((s) => s.clientId === activeClientId) : data.sites;
-    return {
-      all: pool.length,
-      active: pool.filter((s) => s.status === "active").length,
-      completed: pool.filter((s) => s.status === "completed").length,
-      on_hold: pool.filter((s) => s.status === "on_hold").length,
-    };
+    tally.all = pool.length;
+    for (const site of pool) {
+      const key = canonicalSiteStatus(site.status);
+      // `inactive` is the fallback for an unrecognised status and has no tab;
+      // those sites are reachable under All, which is why `all` is the length.
+      if (key !== "inactive") tally[key] += 1;
+    }
+    return tally;
   }, [data, activeClientId]);
 
   function renderCard(site: Site) {
-    const cfg = scfg(site.status);
+    const cfg = siteStatusCfg(site.status);
     const entries = data!.entries.filter((e) => e.siteId === site.id);
     const diaries = data!.diaries.filter((d) => d.siteId === site.id);
     const approved = diaries.filter((d) => d.status === "approved").length;
@@ -204,7 +209,7 @@ function SitesPageInner() {
         <div className="page-body">
           {/* Filter bar */}
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            {(["all", "active", "completed", "on_hold"] as FilterStatus[]).map((s) => (
+            {SITE_STATUS_FILTERS.map((s) => (
               <button
                 key={s}
                 onClick={() => setFilterStatus(s)}
@@ -215,8 +220,8 @@ function SitesPageInner() {
                   border: filterStatus === s ? "none" : "1.5px solid var(--border)",
                 }}
               >
-                {s === "all" ? "All" : s === "on_hold" ? "On Hold" : s.charAt(0).toUpperCase() + s.slice(1)}&nbsp;
-                <span style={{ opacity: 0.7 }}>({counts[s as keyof typeof counts] ?? counts.all})</span>
+                {siteStatusFilterLabel(s)}&nbsp;
+                <span style={{ opacity: 0.7 }}>({counts[s]})</span>
               </button>
             ))}
             <input

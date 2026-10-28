@@ -20,35 +20,66 @@ export function isCrew(companyRole: string | null | undefined): boolean {
 /**
  * Whether the supervisor dashboard is shown to this role.
  *
- * WHAT IS REFUSED, AND WHAT IS DELIBERATELY NOT
+ * MANAGER AND OWNER. THE OWNER DECIDED THIS; IT USED TO BE VIEWER+.
  *
- * Crew, and only crew. The decision is about crew: they view and edit
- * everything a manager can, except the supervisor dashboard, which does not
- * appear for them at all. A VIEWER keeps it, because the dashboard's own route
- * — GET /projects/reports/supervisor — is viewer+ at the API, so tightening
- * this to manager+ would take a whole screen off viewers in the name of a
- * decision that never mentioned them.
+ * The previous version of this comment left the question open, and said so:
+ * the portal showed the dashboard to viewers because the route behind it is
+ * viewer+ at the API, while mobile's equivalent predicate
+ * (apps/mobile/lib/permissions.ts) was already manager+ — so a viewer got the
+ * dashboard on the portal and not on the phone. That was written up as a
+ * question rather than unified in passing, because either direction changes
+ * what a viewer can do.
  *
- * Mobile's equivalent predicate (apps/mobile/lib/permissions.ts) IS manager+,
- * which it already was before this work. So a viewer gets the dashboard on the
- * portal and not on the phone. That asymmetry is pre-existing and is left
- * alone rather than unified in passing; it is written up in the PR body as a
- * question for the owner, because either direction changes what a viewer can
- * do and that is not this change's call.
+ * The answer was to align both surfaces to manager+. This is that change. The
+ * asymmetry is gone and mobile is the surface that did not move.
  *
- * AN ABSENT ROLE IS NOT REFUSED, ON PURPOSE
+ * WHAT THIS IS NOT
  *
- * The role is read from localStorage, and a session stored by an older build
- * may carry no `companyRole` at all. Refusing a manager their dashboard
- * because their saved session predates the field would be a worse failure than
- * the one this guards against — and it would be invisible, since the fix is to
- * sign out and back in, which nobody would think to do. Only a role known to
- * be crew is withheld. The thing that holds when this is wrong is the API: it
- * refuses crew the dashboard's route independently, which is the point of
- * doing both halves.
+ * It is NOT a new refusal. `GET /projects/summary` — the route both clients'
+ * dashboards actually read their figures from — is still
+ * `requireAtLeast("viewer")`, so a viewer who calls it directly still gets the
+ * numbers. Hiding a control is
+ * not a permission — the repo's own rule — and claiming this withholds data
+ * would be false. What it withholds is the SCREEN, on both surfaces, which is
+ * what the decision named. Moving the routes is a separate change: it would
+ * touch the rank table in crew-permissions-db.test.ts, two access tests and
+ * the load-test's route list, and it is flagged in the PR body as the owner's
+ * call rather than taken here.
+ *
+ * AN ABSENT ROLE IS NOW REFUSED, WHICH IS A CHANGE
+ *
+ * Written as the two admitted roles by name, like the rest of this file, so an
+ * unrecognised role gets the least access — matching mobile, where
+ * `isManagerOrAbove` has always failed closed. The earlier viewer+ version
+ * failed OPEN for an absent role on purpose, because `companyRole` is optional
+ * on the saved user (`User` in lib/api.ts) and a session stored by an older
+ * build may carry none; refusing a manager their dashboard over a stale
+ * localStorage entry is a bad failure, and an invisible one, since the fix is
+ * to sign out and back in and nobody would think to do that.
+ *
+ * Failing closed and saying nothing would reintroduce exactly that. So
+ * `isUnknownRole` below exists to let the screen tell those two cases apart:
+ * a known crew or viewer is told the dashboard is for managers; a session with
+ * no role at all is told to sign in again, which is the thing that actually
+ * fixes it.
  */
+const DASHBOARD_ROLES = ["manager", "owner"];
+
 export function canSeeSupervisorDashboard(companyRole: string | null | undefined): boolean {
-  return !isCrew(companyRole);
+  return DASHBOARD_ROLES.includes(companyRole ?? "");
+}
+
+/**
+ * A saved session that carries no company role, or one this build does not
+ * recognise — as distinct from a role that is simply below the line.
+ *
+ * Only used to choose which refusal to show. It is not a permission and grants
+ * nothing: every predicate here still refuses an unknown role.
+ */
+const KNOWN_ROLES = ["crew", "viewer", "manager", "owner"];
+
+export function isUnknownRole(companyRole: string | null | undefined): boolean {
+  return !KNOWN_ROLES.includes(companyRole ?? "");
 }
 
 /**
@@ -202,6 +233,11 @@ export function canApproveTimesheet(companyRole: string | null | undefined): boo
  * read /projects/bootstrap and /location/workers like anybody else, so Sites,
  * Reports, Activity and the live map all answer 200. Sites is the honest
  * landing page — it is the screen the rest of their work hangs off.
+ *
+ * Now that the dashboard is manager+, this sends VIEWERS to /sites too, which
+ * is a visible change for them: they used to land on the dashboard. Everything
+ * else a viewer could reach, they still can — including GET /projects/summary,
+ * which stays viewer+ at the API.
  */
 export function landingPath(companyRole: string | null | undefined): string {
   return canSeeSupervisorDashboard(companyRole) ? "/dashboard" : "/sites";
@@ -221,6 +257,7 @@ export function useRole() {
     // the reasoning for what an absent role gets here is its own — see the
     // note on canSeeSupervisorDashboard.
     canSeeSupervisorDashboard: canSeeSupervisorDashboard(user?.companyRole),
+    isUnknownRole: isUnknownRole(user?.companyRole),
     canReadCompanyProfile: canReadCompanyProfile(user?.companyRole),
     canApproveDiary: canApproveDiary(user?.companyRole),
     canManageClients: canManageClients(user?.companyRole),

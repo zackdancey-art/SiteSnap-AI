@@ -6,6 +6,9 @@ import { useAuth } from "@/lib/auth-context";
 import Colors from "@/constants/colors";
 import { buildDiariesReportHtml, runReportExport } from "@/lib/export-utils";
 import { canSeeSupervisorDashboard } from "@/lib/permissions";
+import { siteStatusCfg } from "@/lib/siteStatus";
+import { approvalTone } from "@/lib/portfolio-metrics";
+import { usePortfolioSummary } from "@/lib/usePortfolioSummary";
 
 /** "2 entries", "1 entry", "no entries" — a count that reads as a sentence. */
 function countPhrase(n: number, one: string, many: string) {
@@ -35,6 +38,56 @@ function recencyLabel(latest: string | null): string {
   return `Last entry ${days} days ago`;
 }
 
+/**
+ * The portal's MetricCard, in React Native. Same four parts in the same order —
+ * accent stripe, tinted icon chip, figure, label, optional sub-line — because
+ * the two dashboards are meant to be the same dashboard.
+ *
+ * `value` is `number | string` for one reason: the em dash. A figure that has
+ * not arrived is shown as "—", never as 0 and never as a number counted off the
+ * capped bootstrap arrays.
+ */
+function MetricCard({ label, value, accent, iconBg, icon, sub }: {
+  label: string;
+  value: number | string;
+  accent: string;
+  iconBg: string;
+  icon: string;
+  sub?: string;
+}) {
+  return (
+    <View style={[styles.metricCard, { borderLeftColor: accent }]}>
+      <View style={[styles.metricIcon, { backgroundColor: iconBg }]}>
+        <Text style={styles.metricIconGlyph}>{icon}</Text>
+      </View>
+      <Text style={styles.metricValue}>{value}</Text>
+      <Text style={styles.metricLabel}>{label}</Text>
+      {sub ? <Text style={styles.metricSub}>{sub}</Text> : null}
+    </View>
+  );
+}
+
+/** The portal's ProgressBar, clamped the same way. */
+function ProgressBar({ value, color }: { value: number; color: string }) {
+  return (
+    <View style={styles.progressTrack}>
+      <View style={[styles.progressFill, { width: `${Math.min(100, Math.max(0, value))}%`, backgroundColor: color }]} />
+    </View>
+  );
+}
+
+/**
+ * The three health colours, mapped from the tone rather than from a threshold
+ * written again here. The portal's bar uses #22C55E / #F59E0B / #EF4444, which
+ * are Colors.success / Colors.warning / Colors.error to the byte — see the
+ * colour note in lib/siteStatus.ts.
+ */
+const TONE_COLOR = {
+  good: Colors.success,
+  fair: Colors.warning,
+  poor: Colors.error,
+} as const;
+
 export default function SupervisorDashboardScreen() {
   const { sites, entries, diaries } = useData();
   const { user } = useAuth();
@@ -44,21 +97,38 @@ export default function SupervisorDashboardScreen() {
   // silently expose a screen, and the API refuses the data regardless.
   const canSeeSupervisor = canSeeSupervisorDashboard(user?.companyRole);
 
+  /**
+   * The figures are counted in the DATABASE, not in this component. AUDIT L98.
+   *
+   * This screen used to say its whole metrics surface in one sentence, measured
+   * off the `useData()` arrays:
+   *
+   *     `${activeSites} active sites · ${entries.length} entries · ${diaries.length} diaries.`
+   *
+   * Those arrays come from `/projects/bootstrap`, which passes no limit to
+   * `listSites`/`listEntries`/`listDiaries`, so each takes their default
+   * `limit = 200`. A company with five thousand entries read "200 entries" on
+   * the phone — the same defect the portal's dashboard had, from the same
+   * cause, and it is why the portal's cards now call `/projects/summary`. This
+   * surface is now the route's second caller.
+   *
+   * When that request has not succeeded the cards show an em dash rather than
+   * falling back to the arrays, which are still right there. Falling back is the
+   * tempting option and it is the wrong one: it would restore exactly the
+   * silently-capped number this change exists to remove, on the one path nobody
+   * tests. A missing number is visibly missing; a capped one is not.
+   */
+  const summary = usePortfolioSummary(canSeeSupervisor);
+  const metrics = summary.status === "ok" ? summary.metrics : null;
+  const metricsError = summary.status === "error" ? summary.message : "";
+
   // Every hook runs before the restricted-view return below. The early return
   // used to sit above this one, so a user whose companyRole changed between
   // renders changed the hook count for the same component — the condition React
   // reports as "rendered fewer hooks than expected" and then unmounts the tree
   // over. eslint-plugin-react-hooks is not installed in this repo and so did
   // not flag it; see the PR body.
-  const summary = useMemo(() => {
-    const activeSites = sites.filter((site) => site.status === "active").length;
-    return (
-      `${countPhrase(activeSites, "active site", "active sites")} · ` +
-      `${countPhrase(entries.length, "entry", "entries")} · ` +
-      `${countPhrase(diaries.length, "diary", "diaries")}.`
-    );
-  }, [sites, entries, diaries]);
-
+  //
   // The site list IS the body of this screen, so it carries the recency answer
   // and the ordering rather than a separate widget saying when anything
   // happened. Most recent first; a site with no entries sorts to the bottom.
@@ -130,29 +200,102 @@ export default function SupervisorDashboardScreen() {
       {/* No in-body "Dashboard" heading: the native header already says it,
           and the two together cost ~40pt of the first screen. */}
       <Text style={styles.subheading}>Operations overview across all tracked sites and diaries.</Text>
-      <Text style={styles.summary}>{summary}</Text>
+
+      {/* The portal's four cards, in the portal's order, with the portal's
+          labels, accents and icons. Two per row at phone width. */}
+      <View style={styles.metricsGrid}>
+        <MetricCard
+          label="Active Sites"
+          value={metrics?.active ?? "—"}
+          accent={Colors.success}
+          iconBg={Colors.successBg}
+          icon="🏗️"
+          sub={metrics ? `${metrics.completed} completed` : undefined}
+        />
+        <MetricCard
+          label="Total Entries"
+          value={metrics?.entries ?? "—"}
+          accent={Colors.primary}
+          iconBg={Colors.infoBg}
+          icon="📄"
+        />
+        <MetricCard
+          label="Approved Diaries"
+          value={metrics?.approved ?? "—"}
+          accent={Colors.accent}
+          iconBg={Colors.warningBg}
+          icon="✅"
+          sub={metrics ? `${metrics.approvalRate}% approval rate` : undefined}
+        />
+        <MetricCard
+          label="Pending Review"
+          value={metrics?.pending ?? "—"}
+          accent={Colors.warning}
+          iconBg={Colors.warningBg}
+          icon="⏳"
+        />
+      </View>
+
+      {metricsError ? (
+        <Text style={styles.metricsError}>Portfolio totals are unavailable — {metricsError}</Text>
+      ) : null}
+
+      {/* Diary Approval Health, the portal's card, gated the same way: it is
+          shown only when there is a denominator. */}
+      {metrics && metrics.diaries > 0 ? (
+        <View style={styles.healthCard}>
+          <View style={styles.healthRow}>
+            <Text style={styles.healthGlyph}>📊</Text>
+            <Text style={styles.healthTitle}>Diary Approval Health</Text>
+            <Text style={styles.healthPct}>{metrics.approvalRate}%</Text>
+          </View>
+          <ProgressBar value={metrics.approvalRate} color={TONE_COLOR[approvalTone(metrics.approvalRate)]} />
+          <Text style={styles.healthSub}>
+            {metrics.approved} of {metrics.diaries} diaries approved
+          </Text>
+        </View>
+      ) : null}
+
+      {/* The list below is the bootstrap payload, which is capped. Said out
+          loud when the counted total is larger, rather than letting the screen
+          imply these are all of them — the same line the portal's table
+          header carries. */}
+      <View style={styles.listHeaderRow}>
+        <Text style={styles.listHeader}>Site Portfolio</Text>
+        <Text style={styles.listCount}>{metrics?.sites ?? sites.length}</Text>
+        {metrics && metrics.sites > sites.length ? (
+          <Text style={styles.listShowing}>showing {sites.length}</Text>
+        ) : null}
+      </View>
 
       {orderedSites.length === 0 ? (
         <Text style={styles.emptyText}>No sites have been created yet.</Text>
       ) : (
-        orderedSites.map(({ site, latestEntryDate, entryCount }) => (
-          <Pressable
-            key={site.id}
-            style={styles.siteCard}
-            onPress={() => router.push({ pathname: "/site/[id]", params: { id: site.id } })}
-          >
-            <View style={styles.siteCardTop}>
-              <Text style={styles.siteName}>{site.name}</Text>
-              <Text style={styles.siteStatus}>{site.status.toUpperCase()}</Text>
-            </View>
-            <Text style={styles.siteMeta}>{site.client}</Text>
-            <Text style={styles.siteMeta}>{site.address}</Text>
-            <Text style={styles.siteStats}>
-              {recencyLabel(latestEntryDate)}
-              {entryCount > 0 ? ` · ${countPhrase(entryCount, "entry", "entries")}` : ""}
-            </Text>
-          </Pressable>
-        ))
+        orderedSites.map(({ site, latestEntryDate, entryCount }) => {
+          // One decision, in lib/siteStatus.ts, shared with the portal. This
+          // line used to be `site.status.toUpperCase()`, which printed
+          // "ON-HOLD" where every portal surface says "On Hold", in accent
+          // orange whatever the status was.
+          const cfg = siteStatusCfg(site.status);
+          return (
+            <Pressable
+              key={site.id}
+              style={styles.siteCard}
+              onPress={() => router.push({ pathname: "/site/[id]", params: { id: site.id } })}
+            >
+              <View style={styles.siteCardTop}>
+                <Text style={styles.siteName}>{site.name}</Text>
+                <Text style={[styles.siteStatus, { color: cfg.color }]}>{cfg.label}</Text>
+              </View>
+              <Text style={styles.siteMeta}>{site.client}</Text>
+              <Text style={styles.siteMeta}>{site.address}</Text>
+              <Text style={styles.siteStats}>
+                {recencyLabel(latestEntryDate)}
+                {entryCount > 0 ? ` · ${countPhrase(entryCount, "entry", "entries")}` : ""}
+              </Text>
+            </Pressable>
+          );
+        })
       )}
 
       {/* Secondary, and at the bottom. It used to be the only accent-filled
@@ -170,7 +313,62 @@ const styles = StyleSheet.create({
   content: { padding: 16, gap: 14 },
   heading: { fontSize: 24, fontFamily: "Inter_700Bold", color: Colors.text },
   subheading: { fontSize: 14, fontFamily: "Inter_400Regular", color: Colors.textSecondary },
-  summary: { fontSize: 15, fontFamily: "Inter_500Medium", color: Colors.text, marginBottom: 2 },
+
+  // Two cards per row, wrapping. `minWidth` rather than a fixed basis so the
+  // pair still fits on the narrowest phone this app supports.
+  metricsGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  metricCard: {
+    flexGrow: 1,
+    flexBasis: "46%",
+    minWidth: 140,
+    backgroundColor: Colors.surface,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    borderLeftWidth: 4,
+    borderRadius: 14,
+    padding: 12,
+    gap: 2,
+  },
+  metricIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 9,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 4,
+  },
+  metricIconGlyph: { fontSize: 15 },
+  metricValue: { fontSize: 22, fontFamily: "Inter_700Bold", color: Colors.text },
+  metricLabel: { fontSize: 12, fontFamily: "Inter_500Medium", color: Colors.textSecondary },
+  metricSub: { fontSize: 11, fontFamily: "Inter_400Regular", color: Colors.textTertiary },
+  metricsError: { fontSize: 12, fontFamily: "Inter_400Regular", color: Colors.textSecondary },
+
+  healthCard: {
+    backgroundColor: Colors.surface,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    borderRadius: 14,
+    padding: 14,
+    gap: 6,
+  },
+  healthRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  healthGlyph: { fontSize: 15 },
+  healthTitle: { flex: 1, fontSize: 14, fontFamily: "Inter_600SemiBold", color: Colors.text },
+  healthPct: { fontSize: 14, fontFamily: "Inter_700Bold", color: Colors.accent },
+  healthSub: { fontSize: 12, fontFamily: "Inter_400Regular", color: Colors.textTertiary },
+  progressTrack: {
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: Colors.surfaceSecondary,
+    overflow: "hidden",
+  },
+  progressFill: { height: 8, borderRadius: 4 },
+
+  listHeaderRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 2 },
+  listHeader: { fontSize: 15, fontFamily: "Inter_600SemiBold", color: Colors.text },
+  listCount: { fontSize: 13, fontFamily: "Inter_700Bold", color: Colors.accent },
+  listShowing: { fontSize: 12, fontFamily: "Inter_400Regular", color: Colors.textSecondary },
+
   exportButton: {
     marginTop: 6,
     borderWidth: 1,
@@ -197,7 +395,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   siteName: { fontSize: 15, fontFamily: "Inter_600SemiBold", color: Colors.text, flex: 1, marginRight: 8 },
-  siteStatus: { fontSize: 11, fontFamily: "Inter_700Bold", color: Colors.accent },
+  siteStatus: { fontSize: 11, fontFamily: "Inter_700Bold" },
   siteMeta: { fontSize: 13, fontFamily: "Inter_400Regular", color: Colors.textSecondary },
   siteStats: { marginTop: 2, fontSize: 12, fontFamily: "Inter_500Medium", color: Colors.textTertiary },
 });

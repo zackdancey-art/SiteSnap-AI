@@ -1078,6 +1078,120 @@ export async function getScopedBootstrap(actor: Actor) {
   return { sites, entries, diaries };
 }
 
+export type PortfolioCounts = {
+  sites: number;
+  activeSites: number;
+  completedSites: number;
+  onHoldSites: number;
+  entries: number;
+  diaries: number;
+  approvedDiaries: number;
+  draftDiaries: number;
+};
+
+/**
+ * Portfolio totals, counted in the database rather than by measuring a list.
+ *
+ * WHY THIS EXISTS AT ALL — AUDIT L98, and the dashboard half of it.
+ *
+ * `/projects/summary` and the portal dashboard both reported their numbers by
+ * loading rows and taking `.length`, through calls that pass no limit and so
+ * take `listSites`/`listEntries`/`listDiaries`' default `limit = 200`. A company
+ * with five thousand entries was told it had two hundred, and the number looked
+ * entirely plausible, which is why nothing reported it for the life of the
+ * product. The dashboard's derived figures inherited the same ceiling: an
+ * approval rate of `approved / diaries.length` is a percentage of the most
+ * recent two hundred diaries, presented as the percentage of all of them.
+ *
+ * L98's own disposition names the fix and rules out the alternative: *"the right
+ * fix ... removes the cap as a concept instead of raising the number. Raising 200
+ * to some larger number would hide the same defect for longer, which is what
+ * happened the first time."* So this counts in SQL. There is no limit to pass,
+ * no page to forget, and the number cannot be short.
+ *
+ * THE PREDICATE IS THE SAME HELPER THE LISTS USE, NOT A COPY OF IT.
+ *
+ * A count that applies looser scoping than the list it summarises is a leak that
+ * shows up as a number — "47 timesheets" to someone entitled to read three of
+ * them. So the visibility clause comes from `readVisibilitySql`, the same
+ * function `listEntries` and `listDiaries` call, and the in-memory branch asks
+ * `canReadRow`, the same twin they call. Today both return whole-company for all
+ * three kinds (only `timesheet` is a `personal-record`), so the clause is `null`
+ * and adds nothing; it is here so that the day `readVisibility` narrows one of
+ * these kinds, the count narrows on the same commit instead of becoming the one
+ * place that still reports the whole company.
+ *
+ * Status breakdowns are counted in the same pass with FILTER rather than in
+ * three more round trips, and `draftDiaries` is derived by subtraction because
+ * `DiaryStatus` is a closed two-value union — `"draft" | "approved"`. Sites are
+ * NOT derived that way: `SiteStatus` has three members, so `onHoldSites` is
+ * counted and the four site figures are reported independently.
+ */
+export async function getPortfolioCounts(actor: Actor): Promise<PortfolioCounts> {
+  if (!useDatabase()) {
+    await ensureMemoryLoaded();
+    const sites = Array.from(memory.sites.values()).filter((site) => canReadRow(actor, "site", site));
+    const entries = Array.from(memory.entries.values()).filter((entry) => canReadRow(actor, "entry", entry));
+    const diaries = Array.from(memory.diaries.values()).filter((diary) => canReadRow(actor, "diary", diary));
+    const approvedDiaries = diaries.filter((diary) => diary.status === "approved").length;
+    return {
+      sites: sites.length,
+      activeSites: sites.filter((site) => site.status === "active").length,
+      completedSites: sites.filter((site) => site.status === "completed").length,
+      onHoldSites: sites.filter((site) => site.status === "on-hold").length,
+      entries: entries.length,
+      diaries: diaries.length,
+      approvedDiaries,
+      draftDiaries: diaries.length - approvedDiaries,
+    };
+  }
+
+  const siteParams: unknown[] = [actor.companyId];
+  const siteVisibility = readVisibilitySql(actor, "site", siteParams);
+  const entryParams: unknown[] = [actor.companyId];
+  const entryVisibility = readVisibilitySql(actor, "entry", entryParams);
+  const diaryParams: unknown[] = [actor.companyId];
+  const diaryVisibility = readVisibilitySql(actor, "diary", diaryParams);
+
+  const where = (visibility: string | null) =>
+    `WHERE ${["company_id = $1", visibility].filter(Boolean).join(" AND ")}`;
+
+  const [siteRow, entryRow, diaryRow] = await withTenant(actor, async (client) => {
+    const [sites, entries, diaries] = await Promise.all([
+      client.query<{ total: number; active: number; completed: number; on_hold: number }>(
+        `SELECT COUNT(*)::int AS total,
+                (COUNT(*) FILTER (WHERE status = 'active'))::int AS active,
+                (COUNT(*) FILTER (WHERE status = 'completed'))::int AS completed,
+                (COUNT(*) FILTER (WHERE status = 'on-hold'))::int AS on_hold
+           FROM project_sites ${where(siteVisibility)}`,
+        siteParams
+      ),
+      client.query<{ total: number }>(
+        `SELECT COUNT(*)::int AS total FROM project_entries ${where(entryVisibility)}`,
+        entryParams
+      ),
+      client.query<{ total: number; approved: number }>(
+        `SELECT COUNT(*)::int AS total,
+                (COUNT(*) FILTER (WHERE status = 'approved'))::int AS approved
+           FROM project_diaries ${where(diaryVisibility)}`,
+        diaryParams
+      ),
+    ]);
+    return [sites.rows[0], entries.rows[0], diaries.rows[0]] as const;
+  });
+
+  return {
+    sites: siteRow.total,
+    activeSites: siteRow.active,
+    completedSites: siteRow.completed,
+    onHoldSites: siteRow.on_hold,
+    entries: entryRow.total,
+    diaries: diaryRow.total,
+    approvedDiaries: diaryRow.approved,
+    draftDiaries: diaryRow.total - diaryRow.approved,
+  };
+}
+
 export type SupervisorReportRow = {
   siteId: string;
   name: string;
