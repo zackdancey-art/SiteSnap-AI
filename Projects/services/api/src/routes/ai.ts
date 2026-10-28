@@ -5,6 +5,33 @@ import { requireAuth, AuthenticatedRequest } from "../middleware/auth";
 import { rateLimitByCompany, LIMITS } from "../middleware/rateLimit";
 import { getMediaStorage } from "../storage/mediaStorage";
 import { listEntries, listSites } from "../storage/projectsStore";
+import {
+  ReportWindow,
+  anchoredWindow,
+  describeWindow,
+  explicitWindow,
+  filterEntriesByWindow,
+  latestEntryDate,
+  windowLengthInDays,
+} from "../utils/reportWindow";
+import {
+  buildAuthorNameIndex,
+  effectiveEntryNotes,
+  renderSafetyRecord,
+  resolveAuthorName,
+  toolboxTalkFromStoredRow,
+} from "../utils/reportPayload";
+import {
+  describePhotoShortfall,
+  MAX_REPORT_IMAGES,
+  photoCitation,
+  selectPhotographs,
+  summarisePhotoOutcome,
+  type PhotoAccounting,
+  type PhotoDropCounts,
+  type PhotoDropReason,
+} from "../utils/reportPhotos";
+import { listCompanyMembers } from "../storage/authStore";
 import { uploadBelongsToActorCompany } from "../storage/uploadsStore";
 import { Actor } from "../storage/actor";
 import type OpenAI from "openai";
@@ -17,7 +44,25 @@ function extractUploadId(ref: string): string | null {
   return m ? m[1] : null;
 }
 
+/**
+ * The period a report is labelled with. It is now only a LABEL and a default:
+ * what a report actually covers is its `ReportWindow`, a pair of dates. See
+ * utils/reportWindow.ts for why — AUDIT L92.
+ */
 type ReportPeriod = "daily" | "weekly" | "monthly";
+
+/**
+ * The most entries one report may be built from.
+ *
+ * AUDIT L98. The old code called `listEntries` with its default limit of 200
+ * and then filtered by period in JavaScript, so the cap applied to rows the
+ * report was about to discard and the entries it dropped were the ones in the
+ * window. With the window filtered in SQL the cap is a cap on the window, and
+ * when it bites the response says so (`truncatedAtCeiling`) rather than returning a
+ * short report that looks complete. Raising the old 200 was explicitly the
+ * wrong fix: it hides the same defect for longer.
+ */
+const REPORT_ENTRY_CEILING = 500;
 
 const DiaryPhotoSchema = z.object({
   id: z.string().optional(),
@@ -38,6 +83,17 @@ const DiaryEntrySchema = z.object({
   notes: z.string().optional(),
   photos: z.array(DiaryPhotoSchema).optional(),
   timestamp: z.string().optional(),
+  // AUDIT L97. All five are on `EntryRecord`, all five are persisted, all five
+  // are mapped back by `mapEntry`, and none of them was in the object this
+  // route built for the report. They are optional because a client older than
+  // this deploy sends none of them and must keep working — and because the
+  // store branch below fills them from the row regardless of what any client
+  // sends, which is the path that matters for a report of real work.
+  swmsRef: z.string().optional(),
+  hazardNotes: z.string().optional(),
+  toolboxTalk: z.boolean().optional(),
+  notesMode: z.enum(["free", "hourly"]).optional(),
+  hourlyNotes: z.array(z.object({ hour: z.number(), note: z.string() })).optional(),
 });
 
 const GenerateDiaryBodySchema = z.object({
@@ -51,12 +107,86 @@ const GenerateDiaryBodySchema = z.object({
     })
     .optional(),
   period: z.enum(["daily", "weekly", "monthly"]).optional(),
+  // The window the caller is asking for, inclusive, both YYYY-MM-DD. Validated
+  // in `resolveWindow` rather than here so that a bad range comes back as a
+  // sentence a person can act on instead of a zod flatten() blob, and so the
+  // 92-day ceiling lives in one place with the rest of the window rules.
+  //
+  // OPTIONAL, and that is a deploy constraint rather than a preference: the API
+  // ships ahead of the mobile and portal builds, so for the whole gap between
+  // those deploys every caller sends no range and gets the legacy anchored
+  // window. See `anchoredWindow`.
+  from: z.string().optional(),
+  to: z.string().optional(),
   entries: z.array(DiaryEntrySchema).max(50).optional(),
 });
 
 type GenerateDiaryPhoto = z.infer<typeof DiaryPhotoSchema>;
 type GenerateDiaryEntry = z.infer<typeof DiaryEntrySchema>;
+
+/**
+ * An entry as the report sees it: what the request carried, plus the author
+ * name this server resolved for it.
+ *
+ * `authorName` is NOT on `DiaryEntrySchema`, and that is the point. Attribution
+ * in a compliance document must not be settable by the caller — zod strips
+ * unknown keys, so an `authorName` in a request body is dropped before it is
+ * read, and the only writer of this field is `resolveDiaryRequest` resolving
+ * `ownerEmail` against the caller's own company. AUDIT L96.
+ */
+type ReportEntry = GenerateDiaryEntry & { authorName?: string };
 type GenerateDiaryBody = z.infer<typeof GenerateDiaryBodySchema>;
+
+/**
+ * One request, resolved: the site, the window, and the entries inside it.
+ *
+ * `entriesOmitted` and `undatedEntries` are counts the old code had no way to
+ * express. A report built from a truncated list used to be indistinguishable
+ * from a complete one, which is the half of AUDIT L98 that raising the limit
+ * would not have fixed.
+ */
+type ResolvedDiaryRequest = {
+  site: NonNullable<GenerateDiaryBody["site"]>;
+  period: ReportPeriod;
+  window: ReportWindow;
+  entries: ReportEntry[];
+  /**
+   * True when the window held more entries than `REPORT_ENTRY_CEILING` and the
+   * report was built from the first `REPORT_ENTRY_CEILING` of them.
+   *
+   * A BOOLEAN rather than a count, deliberately. The load asks for one row over
+   * the ceiling, so what it learns is "there is at least one more", and naming a
+   * field `entriesOmitted: 1` would be a measured-looking number that is only
+   * ever 1 — the `EXPECTED_WRITE_STEPS = 13` failure mode in a response body.
+   * Counting them properly means a second COUNT(*) query on every report to
+   * serve a case that should not arise; if it starts arising, that is the point
+   * to add the count.
+   */
+  truncatedAtCeiling: boolean;
+  /** Entries skipped because their date is missing or not a real day. */
+  undatedEntries: number;
+  /**
+   * Entries in the report whose author could not be named. AUDIT L96.
+   *
+   * Reported as a count rather than left blank in the document, because the two
+   * are what distinguish "this company records who does what" from "this report
+   * has gaps in it", and only the second is actionable. The reasons are not
+   * broken out: a removed member, a member row with no name, and an entry
+   * predating ownership all read the same from here, and the remedy for each is
+   * the same conversation.
+   */
+  unattributedEntries: number;
+  /**
+   * Display names shared by more than one member of this company, so the caller
+   * can say that attribution in this report is ambiguous rather than present a
+   * collision as fact. Empty on the overwhelming majority of reports.
+   *
+   * KNOWN LIMITATION, not a fix: two people called the same thing still appear
+   * as one name on their entries. Resolving it needs a per-user display handle,
+   * which is a product decision rather than a patch.
+   */
+  ambiguousAuthorNames: string[];
+};
 
 type OpenAIErrorLike = {
   status?: number;
@@ -99,6 +229,13 @@ type DiarySection = {
   materialsUsed: string;
   issues: string;
   photoAnalysis: string;
+  /**
+   * Who recorded the entry this section was built from, or "Not recorded".
+   *
+   * Server-resolved and never taken from the model — see `normalizeSection`.
+   * AUDIT L96.
+   */
+  recordedBy: string;
 };
 
 type DiaryOutput = {
@@ -113,6 +250,14 @@ type DiaryOutput = {
 type GenerationResult = {
   diary: DiaryOutput;
   provenance: DiaryProvenance;
+  /**
+   * What happened to the period's photographs, or null on a path that never
+   * tried to attach any — the template path with no API key. A report whose
+   * images were capped or could not be loaded is the case AUDIT L95 describes
+   * as "indistinguishable from one that was not taken", so this travels out to
+   * the response and the log line rather than staying inside the generator.
+   */
+  photos: PhotoAccounting | null;
 };
 
 /**
@@ -120,7 +265,7 @@ type GenerationResult = {
  * Stamped into every generated diary so a report can be traced to the prompt
  * that wrote it.
  */
-export const PROMPT_VERSION = "2026-09-v1";
+export const PROMPT_VERSION = "2026-10-v3";
 
 const FALLBACK_NOTICE =
   "Written by the built-in template generator, not AI.";
@@ -154,14 +299,19 @@ function formatDisplayDate(dateStr: string) {
   }
 }
 
-function normalizeEntry(entry: GenerateDiaryEntry): DiarySection {
+function normalizeEntry(entry: ReportEntry): DiarySection {
   const photos = Array.isArray(entry.photos) ? entry.photos : [];
   const captionNotes = photos
     .map((p) => String(p.caption || "").trim())
     .filter(Boolean);
 
+  // `effectiveEntryNotes` rather than `entry.notes`. An entry captured hour by
+  // hour has its content in `hourlyNotes` and usually nothing in `notes`, so
+  // reading `notes` alone rendered the whole of that entry's work as the
+  // "Site activities recorded" placeholder below. AUDIT L97.
+  const notes = effectiveEntryNotes(entry);
   const workParts: string[] = [];
-  if (entry.notes?.trim()) workParts.push(entry.notes.trim());
+  if (notes.text) workParts.push(notes.text);
   if (entry.locationAddress?.trim()) workParts.push(`Location: ${entry.locationAddress.trim()}`);
   const workCompleted = workParts.join("\n") || "Site activities recorded. See photo observations for detail.";
 
@@ -170,20 +320,33 @@ function normalizeEntry(entry: GenerateDiaryEntry): DiarySection {
       ? captionNotes.map((c, i) => `Photo ${i + 1}: ${c}`).join("\n")
       : "N/A";
 
+  // This used to be the literal "N/A", sitting on top of three populated
+  // columns. The template generator never invents content, so when nothing was
+  // recorded it still says so — but when something WAS recorded it now says
+  // that instead. AUDIT L97.
+  const safetyRecord = renderSafetyRecord(entry);
+
   return {
     date: String(entry.date ?? new Date().toISOString().slice(0, 10)),
     weather: String(entry.weather ?? "Not recorded"),
     crewCount: String(entry.crewCount ?? "Not recorded"),
     workCompleted,
-    safetyObservations: "N/A",
+    safetyObservations: safetyRecord ?? "N/A",
     materialsUsed: "Refer to site records.",
     issues: "None reported.",
     photoAnalysis,
+    recordedBy: entry.authorName?.trim() || "Not recorded",
   };
 }
 
 function normalizeSection(section: Partial<DiarySection> | undefined, fallback: DiarySection): DiarySection {
   return {
+    // DELIBERATELY NOT `cleanString(section?.recordedBy, ...)`. Every other
+    // field here is prose the model is asked to improve; this one is a fact
+    // about who recorded the entry, and the model has no way to know it beyond
+    // what we told it. Taking it from the model's output would make attribution
+    // in a compliance document a function of generated text. AUDIT L96.
+    recordedBy: fallback.recordedBy,
     date: cleanString(section?.date, fallback.date),
     weather: cleanString(section?.weather, fallback.weather),
     crewCount: cleanString(section?.crewCount, fallback.crewCount),
@@ -195,55 +358,72 @@ function normalizeSection(section: Partial<DiarySection> | undefined, fallback: 
   };
 }
 
-function dateOnly(value: string) {
-  return new Date(`${value}T00:00:00`);
-}
+// `dateOnly` and `formatDateKey` used to live here. They parsed and formatted a
+// report's boundaries in the SERVER's local zone — `new Date(`${d}T00:00:00`)`
+// and `getFullYear/getMonth/getDate` — so which Render instance answered could
+// move a monthly window by a day. Both are gone from this file; the only copies
+// left are the verbatim ones in `utils/reportWindow.test.ts`, where their job is
+// to be the thing the new UTC arithmetic is compared against. Do not reinstate
+// them here: `utils/reportWindow.ts` does this work, in UTC, on strings.
 
-function formatDateKey(date: Date) {
-  const year = date.getFullYear();
-  const month = `${date.getMonth() + 1}`.padStart(2, "0");
-  const day = `${date.getDate()}`.padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
+/**
+ * The window one request covers, and the entries inside it.
+ *
+ * Two paths, and which one ran is recorded on the window itself:
+ *
+ *   explicit  the caller sent `from` and `to`. The window is theirs, the
+ *             report is reproducible, and two reports on the same dates are
+ *             comparable. This is the path AUDIT L92 asked for.
+ *   anchored  the caller sent neither. The window is counted back from the
+ *             latest entry the caller can see, which is what the code did
+ *             before L92 and is kept bug-for-bug — `utils/reportWindow.test.ts`
+ *             asserts the agreement against a verbatim copy of the old filter.
+ *
+ * Returning the window is the other half of the fix. The old code's boundaries
+ * existed for the length of one function call and were never written down, so
+ * nothing in a saved diary said which days it covered.
+ */
+function resolveWindow(
+  body: Pick<GenerateDiaryBody, "period" | "from" | "to">,
+  entries: Array<{ date?: unknown }>
+): { ok: true; window: ReportWindow } | { ok: false; message: string } {
+  const period = normalizePeriod(body.period);
+  const asked = body.from !== undefined || body.to !== undefined;
+  if (asked) return explicitWindow(period, body.from, body.to);
 
-function filterEntriesByPeriod(entries: GenerateDiaryEntry[], period: ReportPeriod) {
-  if (entries.length === 0) return [];
-  const sorted = [...entries].sort(
-    (a, b) => dateOnly(String(a.date || "")).getTime() - dateOnly(String(b.date || "")).getTime()
-  );
-  const latest = dateOnly(String(sorted[sorted.length - 1].date || new Date().toISOString().slice(0, 10)));
-  if (period === "daily") {
-    const key = String(sorted[sorted.length - 1].date || formatDateKey(latest));
-    return sorted.filter((e) => e.date === key);
+  const anchor = latestEntryDate(entries);
+  if (!anchor) {
+    // No usable date anywhere, so there is no window to report on. Previously
+    // this defaulted the anchor to today and produced an empty report for a
+    // period nobody asked about.
+    return {
+      ok: false,
+      message: "No entries with a usable date are available for this site.",
+    };
   }
-  if (period === "weekly") {
-    const start = new Date(latest);
-    start.setDate(start.getDate() - 6);
-    return sorted.filter((e) => {
-      const d = dateOnly(String(e.date || formatDateKey(latest)));
-      return d >= start && d <= latest;
-    });
-  }
-  return sorted.filter((e) => {
-    const d = dateOnly(String(e.date || formatDateKey(latest)));
-    return d.getFullYear() === latest.getFullYear() && d.getMonth() === latest.getMonth();
-  });
+  return { ok: true, window: anchoredWindow(period, anchor) };
 }
 
 function buildFullReport(args: {
   sections: DiarySection[];
   period: ReportPeriod;
+  window?: ReportWindow;
   siteName?: string;
   client?: string;
   address?: string;
   summary?: string;
   safetyChecklist?: string[];
 }) {
-  const { sections, period, siteName, client, address, summary, safetyChecklist } = args;
+  const { sections, period, window, siteName, client, address, summary, safetyChecklist } = args;
   const today = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
 
-  const dateRange =
-    sections.length > 1
+  // The window the report was ASKED for, not the span of the entries that
+  // happened to come back. Those differ exactly when the reader most needs to
+  // know: a monthly report with two entries in it used to print the two dates
+  // as its period, so a near-empty month and a near-empty week looked the same.
+  const dateRange = window
+    ? describeWindow(window)
+    : sections.length > 1
       ? `${formatDisplayDate(sections[0].date)} – ${formatDisplayDate(sections[sections.length - 1].date)}`
       : sections.length === 1
         ? formatDisplayDate(sections[0].date)
@@ -256,6 +436,11 @@ function buildFullReport(args: {
     `Client:       ${client || "—"}`,
     `Site Address: ${address || "—"}`,
     `Report Period: ${period.charAt(0).toUpperCase() + period.slice(1)} — ${dateRange}`,
+    // An anchored window was not asked for, it was inferred, and a compliance
+    // record should not present an inference as a request. AUDIT L92.
+    ...(window?.mode === "anchored"
+      ? [`              Dates derived from the latest recorded entry (${window.anchoredOn}).`]
+      : []),
     `Prepared:     ${today}`,
     "",
   ];
@@ -272,6 +457,7 @@ function buildFullReport(args: {
 
   sections.forEach((section) => {
     lines.push(`DATE: ${formatDisplayDate(section.date)}`);
+    lines.push(`Recorded by: ${section.recordedBy}`);
     lines.push(`Weather Conditions: ${section.weather}`);
     lines.push(`Crew on Site: ${section.crewCount}`);
     lines.push("");
@@ -305,7 +491,28 @@ function buildFullReport(args: {
   return lines.join("\n");
 }
 
-async function normalizeBase64Image(photo: GenerateDiaryPhoto, actor: Pick<Actor, "companyId">) {
+/**
+ * A photograph resolved to an image the model can be shown, or the REASON it
+ * could not be.
+ *
+ * This used to return `string | null`, with five distinct conditions sharing
+ * the one `null` and the caller doing `if (!imageUrl) continue;` for all of
+ * them. A photograph refused by the H7 cross-tenant ownership check produced no
+ * log line, no counter and nothing in the response: the report returned 200 and
+ * read as though those photographs were never taken. AUDIT L95.
+ *
+ * The refusals themselves are unchanged. Every `return` below sends back the
+ * same decision it sent before; the only difference is that the decision now
+ * has a name the caller can count.
+ */
+type NormalizedImage =
+  | { ok: true; imageUrl: string }
+  | { ok: false; reason: PhotoDropReason };
+
+async function normalizeBase64Image(
+  photo: GenerateDiaryPhoto,
+  actor: Pick<Actor, "companyId">
+): Promise<NormalizedImage> {
   const raw = String(photo.base64 || "").trim();
   const mimeType = ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(
     cleanString(photo.mimeType, "image/jpeg")
@@ -316,9 +523,11 @@ async function normalizeBase64Image(photo: GenerateDiaryPhoto, actor: Pick<Actor
   if (raw) {
     if (raw.startsWith("data:")) {
       const [, base64Part] = raw.split(",", 2);
-      return base64Part ? `data:${mimeType};base64,${base64Part}` : null;
+      return base64Part
+        ? { ok: true, imageUrl: `data:${mimeType};base64,${base64Part}` }
+        : { ok: false, reason: "malformed-data-url" };
     }
-    return `data:${mimeType};base64,${raw}`;
+    return { ok: true, imageUrl: `data:${mimeType};base64,${raw}` };
   }
 
   const storageKey = cleanString(photo.storageKey, "");
@@ -332,60 +541,101 @@ async function normalizeBase64Image(photo: GenerateDiaryPhoto, actor: Pick<Actor
     // tenant's file despite passing the check.
     const uploadId = extractUploadId(storageKey);
     const canonical = /^uploads\/\d+-[0-9a-f]+-[A-Za-z0-9._-]+$/.test(storageKey);
-    if (!uploadId || !canonical || !(await uploadBelongsToActorCompany(actor, uploadId))) {
-      return null;
+    // Three separate refusals, in the order the guard evaluates them, each with
+    // its own code. They are not interchangeable: a non-canonical key is a
+    // client sending the wrong shape, while a key the caller's company does not
+    // own is the cross-tenant case H7 exists for, and an operator reading a
+    // report's drop counts needs to be able to tell those apart.
+    if (!uploadId) return { ok: false, reason: "unresolvable-storage-key" };
+    if (!canonical) return { ok: false, reason: "non-canonical-storage-key" };
+    if (!(await uploadBelongsToActorCompany(actor, uploadId))) {
+      return { ok: false, reason: "not-owned-by-company" };
     }
     try {
       const filename = storageKey.slice(`uploads/${uploadId}-`.length);
       const file = await mediaStorage.readFile(storageKey, filename);
-      return `data:${mimeType};base64,${file.toString("base64")}`;
+      return { ok: true, imageUrl: `data:${mimeType};base64,${file.toString("base64")}` };
     } catch (error) {
       console.warn("[ai] Failed to read stored photo for analysis", { storageKey, error });
+      return { ok: false, reason: "storage-read-failed" };
     }
   }
-  return null;
+  return { ok: false, reason: "no-image-data" };
 }
 
-async function buildVisionInputs(entries: GenerateDiaryEntry[], actor: Pick<Actor, "companyId">) {
+/**
+ * The images for one generation, with an account of everything not attached.
+ *
+ * THE NESTED LOOP IS GONE ON PURPOSE. It had a `break` that left only the inner
+ * photo loop, so the outer entry loop kept running after the ceiling was
+ * reached and re-broke once per remaining entry (AUDIT L93's second defect).
+ * There is now one flat pass over a selection made up front, so the condition
+ * that bug lived in no longer exists rather than being corrected.
+ *
+ * Returns the per-entry attached tally as well as the totals, because L94 is
+ * the defect of a payload carrying a total from one place and per-entry counts
+ * from another. Both now come out of this one call.
+ */
+// Exported for the tests only. The drop reasons AUDIT L95 is about are
+// decided inside this function and two of them depend on the uploads store, so
+// the alternative to calling it directly is asserting against a live OpenAI
+// generation — which no test suite can do deterministically.
+export async function buildVisionInputs(entries: GenerateDiaryEntry[], actor: Pick<Actor, "companyId">) {
   const content: OpenAIContentItem[] = [];
-  let includedImages = 0;
-  const maxImages = 12;
+  const selection = selectPhotographs(entries, MAX_REPORT_IMAGES);
+  const droppedByReason: PhotoDropCounts = {};
+  const attachedByEntry = entries.map(() => 0);
 
-  for (const [entryIndex, entry] of entries.entries()) {
-    const photos = Array.isArray(entry.photos) ? entry.photos : [];
-    for (const [photoIndex, photo] of photos.entries()) {
-      if (includedImages >= maxImages) break;
-      const imageUrl = await normalizeBase64Image(photo, actor);
-      if (!imageUrl) continue;
-      includedImages += 1;
-      content.push({
-        type: "input_text",
-        text: JSON.stringify({
-          imageRef: `entry-${entryIndex + 1}-photo-${photoIndex + 1}`,
-          entryDate: entry.date || "",
-          entryLocation: entry.locationAddress || "",
-          photoTimestamp: photo.timestamp || "",
-          userCaption: photo.caption || "",
-          instruction: [
-            "Analyse this construction site photograph thoroughly.",
-            "Describe exactly what is visible: construction stage and progress, structural elements, plant and equipment, scaffolding and access systems, materials on site, PPE and safety compliance, signage, weather conditions, and any visible hazards or issues.",
-            "Write specific professional observations using construction industry terminology.",
-            "Reference this image in the photoAnalysis field as 'Photo " + includedImages + "'.",
-          ].join(" "),
-        }),
-      });
-      content.push({
-        type: "input_image",
-        image_url: imageUrl,
-        detail: "auto",
-      });
+  for (const candidate of selection.selected) {
+    const result = await normalizeBase64Image(candidate.photo, actor);
+    if (!result.ok) {
+      // AUDIT L95: counted by reason instead of silently skipped. The count
+      // reaches the response and the generation log; the reason codes carry no
+      // filename, key or caption.
+      droppedByReason[result.reason] = (droppedByReason[result.reason] ?? 0) + 1;
+      continue;
     }
+    attachedByEntry[candidate.entryIndex] += 1;
+    content.push({
+      type: "input_text",
+      text: JSON.stringify({
+        // The citation the model is told to use, and the only label in here a
+        // reader of the finished report can resolve. AUDIT L93.
+        imageRef: photoCitation(candidate.entryDate, candidate.photoIndex),
+        entryDate: candidate.entryDate,
+        entryLocation: candidate.entryLocation,
+        photoTimestamp: candidate.photo.timestamp || "",
+        userCaption: candidate.photo.caption || "",
+        instruction: [
+          "Analyse this construction site photograph thoroughly.",
+          "Describe exactly what is visible: construction stage and progress, structural elements, plant and equipment, scaffolding and access systems, materials on site, PPE and safety compliance, signage, weather conditions, and any visible hazards or issues.",
+          "Write specific professional observations using construction industry terminology.",
+          `Reference this image in the photoAnalysis field as '${photoCitation(candidate.entryDate, candidate.photoIndex)}'.`,
+        ].join(" "),
+      }),
+    });
+    content.push({
+      type: "input_image",
+      image_url: result.imageUrl,
+      detail: "auto",
+    });
   }
 
-  return { content, imageCount: includedImages };
+  const accounting = summarisePhotoOutcome({
+    available: selection.totalAvailable,
+    selected: selection.selected.length,
+    ceiling: selection.ceiling,
+    droppedByReason,
+  });
+
+  return { content, accounting, attachedByEntry, selection };
 }
 
-export function buildDiaryFromEntries(entries: GenerateDiaryEntry[], period: ReportPeriod = "daily"): DiaryOutput {
+export function buildDiaryFromEntries(
+  entries: ReportEntry[],
+  period: ReportPeriod = "daily",
+  window?: ReportWindow
+): DiaryOutput {
   const sections = entries.map((entry) => normalizeEntry(entry));
   const siteName = "";
 
@@ -409,6 +659,12 @@ export function buildDiaryFromEntries(entries: GenerateDiaryEntry[], period: Rep
   const safetyChecklist: string[] = [];
   for (const entry of entries) {
     const photos = entry.photos ?? [];
+    // Hazard notes need no photograph to qualify. The notes field is general
+    // text, which is why it is admitted only with evidence beside it; a hazard
+    // note is a safety observation by the field it was typed into, and it was
+    // reaching this document nowhere at all. AUDIT L97.
+    const hazards = entry.hazardNotes?.trim();
+    if (hazards) safetyChecklist.push(hazards);
     if (entry.notes?.trim() && photos.length > 0) safetyChecklist.push(entry.notes.trim());
     for (const photo of photos) {
       const caption = (photo as { caption?: string }).caption?.trim();
@@ -418,7 +674,7 @@ export function buildDiaryFromEntries(entries: GenerateDiaryEntry[], period: Rep
 
   return {
     summary,
-    fullReport: buildFullReport({ sections, period, siteName, summary, safetyChecklist }),
+    fullReport: buildFullReport({ sections, period, window, siteName, summary, safetyChecklist }),
     safetyChecklist,
     reportPeriod: period,
     sections,
@@ -430,13 +686,14 @@ export const SYSTEM_PROMPT = `You are a professional quantity surveyor and const
 Your task is to produce a detailed, accurate, and professionally written site diary based on:
 1. Site photographs (your PRIMARY source — analyse each image carefully)
 2. Field notes and captions provided by the site team
-3. Structured entry data (date, weather, crew count, location)
+3. Structured entry data (date, weather, crew count, location, author, safety record)
 
 PHOTO ANALYSIS REQUIREMENTS:
 - Study every photograph in detail before writing
 - Identify and describe: construction stage and structural progress, plant and equipment in use, scaffolding and access systems, materials stored or being installed, ground conditions, weather visibility, PPE compliance among visible workers, safety signage and barriers, any visible defects or concerns
 - Use precise construction industry terminology (e.g. "reinforced concrete pad foundation", "structural steelwork erection", "blockwork cavity wall construction", "formwork striking", "mechanical and electrical first fix")
-- Each photo reference must appear in the photoAnalysis field as "Photo 1:", "Photo 2:", etc.
+- Cite each photograph by the imageRef string supplied with it, which names the entry date and the photograph's position in that entry (for example "2026-03-02 photo 2:"). Do not number the images by the order you were given them: that number means nothing to the reader of the report, who has the dated entries and not this request
+- Describe ONLY the photographs attached to this request. The reportContext states how many photographs were recorded in the period and how many are attached, and those numbers will often differ because one report carries a limited number of images. Never describe, infer, summarise or account for the contents of a photograph that is not attached, and never write as though you have seen more images than you were given
 - Never write "N/A" for photoAnalysis when images have been provided
 
 PROFESSIONAL WRITING STANDARDS:
@@ -446,6 +703,9 @@ PROFESSIONAL WRITING STANDARDS:
 - safetyObservations must detail visible PPE compliance, hazards, barriers, and signage
 - materialsUsed must list specific materials, products, or plant observed or referenced
 - issues must document any concerns, delays, defects, or non-conformances visible or noted
+- safetyObservations must incorporate the entry's own safetyRecord verbatim where one is given — the SWMS reference, the hazards noted, and whether a toolbox talk was held are the recorded facts and must not be paraphrased away or contradicted by what you infer from a photograph
+- an entry whose notesMode is "hourly" has its work recorded hour by hour inside notes; describe the shape of the day it shows, and never treat it as a single undifferentiated block
+- fullReport must attribute each day's record to the recordedBy name given for that entry, and must print "Not recorded" where that is the value — attribution is a recorded fact, so never infer, substitute or omit a name
 - fullReport must be a complete, well-structured report document including all sections
 - summary must be a professional executive paragraph suitable for a project manager or client
 
@@ -602,11 +862,12 @@ function fallbackProvenance(warning: string): DiaryProvenance {
 }
 
 async function tryGenerateWithOpenAI(
-  body: GenerateDiaryBody,
+  body: ResolvedDiaryRequest,
   actor: Pick<Actor, "companyId">
 ): Promise<GenerationResult> {
-  const entries = Array.isArray(body.entries) ? body.entries : [];
-  const period = normalizePeriod(body.period);
+  const entries = body.entries;
+  const period = body.period;
+  const window = body.window;
 
   if (!process.env.OPENAI_API_KEY) {
     // Previously this returned the template output with NO warning at all —
@@ -614,35 +875,79 @@ async function tryGenerateWithOpenAI(
     // error paths below, which at least set one. A missing key is a
     // misconfiguration, not a non-event.
     return {
-      diary: buildDiaryFromEntries(entries, period),
+      diary: buildDiaryFromEntries(entries, period, window),
       provenance: fallbackProvenance(`${FALLBACK_NOTICE} No OpenAI API key is configured.`),
+      // No images were attempted on this path, which is not the same claim as
+      // "none were attached".
+      photos: null,
     };
   }
 
-  const fallback = buildDiaryFromEntries(entries, period);
+  const fallback = buildDiaryFromEntries(entries, period, window);
   const model = resolveModel();
   const client = getOpenAIClient();
 
-  const { content: visionInputs, imageCount } = await buildVisionInputs(entries, actor);
+  const {
+    content: visionInputs,
+    accounting: photoAccounting,
+    attachedByEntry,
+  } = await buildVisionInputs(entries, actor);
+  const photoShortfall = describePhotoShortfall(photoAccounting);
 
   const structuredPayload = {
     reportContext: {
       site: body.site || {},
       period,
+      // The model used to be told the word "monthly" and nothing else, so a
+      // report covering four days of a month was written as a month's report.
+      // AUDIT L92.
+      reportingWindow: { from: window.from, to: window.to, days: windowLengthInDays(window.from, window.to) },
       totalEntries: entries.length,
-      totalPhotosAttached: imageCount,
+      // AUDIT L94. This used to be the attached count sitting beside per-entry
+      // counts that summed higher, with nothing saying which images were
+      // missing — and a model told both was observed describing photographs it
+      // could not see. Every number here comes out of one selection, and the
+      // shortfall is stated in words rather than left to be inferred.
+      totalPhotosAttached: photoAccounting.attached,
+      totalPhotosRecorded: photoAccounting.available,
+      photographsOmittedForLimit: photoAccounting.droppedToCeiling,
+      photographsUnavailable: photoAccounting.droppedTotal,
+      ...(photoShortfall ? { photographNotice: photoShortfall } : {}),
     },
-    entries: entries.map((entry) => ({
-      date: entry.date || "",
-      locationAddress: entry.locationAddress || "",
-      weather: entry.weather || "",
-      crewCount: entry.crewCount || "",
-      notes: entry.notes || "",
-      photoCount: (entry.photos || []).length,
-      photoCaptions: (entry.photos || [])
-        .map((p) => p.caption || "")
-        .filter(Boolean),
-    })),
+    entries: entries.map((entry, entryIndex) => {
+      const notes = effectiveEntryNotes(entry);
+      return {
+        date: entry.date || "",
+        // The name, never the email. An email address is personal content and
+        // this object is sent to OpenAI on every generation. AUDIT L96.
+        recordedBy: entry.authorName || "Not recorded",
+        locationAddress: entry.locationAddress || "",
+        weather: entry.weather || "",
+        crewCount: entry.crewCount || "",
+        // `notes` here is the entry's whole content, hourly log included, not
+        // the free-text column. An hourly entry's free-text column is usually
+        // empty, so this field used to arrive blank and the model wrote a
+        // paragraph of nothing for a day's work. AUDIT L97.
+        notes: notes.text,
+        notesMode: entry.notesMode || "free",
+        hoursRecorded: notes.recordedHours,
+        safetyRecord: renderSafetyRecord(entry) || "",
+        swmsRef: entry.swmsRef || "",
+        hazardNotes: entry.hazardNotes || "",
+        // Three states, kept as three. `null` is "never answered", which is not
+        // the same claim as `false`.
+        toolboxTalk: entry.toolboxTalk ?? null,
+        // Two numbers, not one. `photosRecorded` is what the site team
+        // captured for this day and `photosAttached` is how many of them are in
+        // this request — so a day whose photographs were capped away says so,
+        // instead of the model reconciling the gap for itself. AUDIT L94.
+        photosRecorded: (entry.photos || []).length,
+        photosAttached: attachedByEntry[entryIndex] ?? 0,
+        photoCaptions: (entry.photos || [])
+          .map((p) => p.caption || "")
+          .filter(Boolean),
+      };
+    }),
   };
 
   const userContent: OpenAIContentItem[] = [
@@ -666,6 +971,7 @@ async function tryGenerateWithOpenAI(
     return {
       diary: fallback,
       provenance: fallbackProvenance(`${FALLBACK_NOTICE} The AI returned an empty response.`),
+      photos: photoAccounting,
     };
   }
 
@@ -676,6 +982,7 @@ async function tryGenerateWithOpenAI(
     return {
       diary: fallback,
       provenance: fallbackProvenance(`${FALLBACK_NOTICE} The AI response could not be parsed.`),
+      photos: photoAccounting,
     };
   }
 
@@ -696,6 +1003,7 @@ async function tryGenerateWithOpenAI(
     buildFullReport({
       sections: safeSections,
       period,
+      window,
       siteName: body.site?.name,
       client: body.site?.client,
       address: body.site?.address,
@@ -720,13 +1028,52 @@ async function tryGenerateWithOpenAI(
       generatedAtMs: Date.now(),
       tokenUsage: usage,
     },
+    photos: photoAccounting,
   };
 }
 
-async function resolveDiaryRequest(req: AuthenticatedRequest, body: GenerateDiaryBody) {
+/**
+ * A window the caller could not have meant, reported as a sentence.
+ *
+ * Thrown rather than returned because `resolveDiaryRequest` is called twice —
+ * once on the happy path and once in the catch that builds the template
+ * fallback — and both call sites must refuse the same bad range identically.
+ * The route maps it to a 400.
+ */
+class ReportWindowError extends Error {}
+
+async function resolveDiaryRequest(
+  req: AuthenticatedRequest,
+  body: GenerateDiaryBody
+): Promise<ResolvedDiaryRequest> {
   const period = normalizePeriod(body.period);
+
+  // A client-supplied entries array still displaces the server's own load
+  // (AUDIT L45's note in supervisor-web/lib/api.ts explains why that branch
+  // exists and why the portal no longer takes it). The window is resolved
+  // against that array, so an offline retry from the phone reports the same
+  // dates the server would have.
   if (Array.isArray(body.entries) && body.entries.length > 0) {
-    return { site: body.site || {}, period, entries: filterEntriesByPeriod(body.entries, period) };
+    const resolved = resolveWindow(body, body.entries);
+    if (!resolved.ok) throw new ReportWindowError(resolved.message);
+    const filtered = filterEntriesByWindow(body.entries, resolved.window);
+    return {
+      site: body.site || {},
+      period,
+      window: resolved.window,
+      entries: filtered.entries,
+      truncatedAtCeiling: false,
+      undatedEntries: filtered.undatedCount,
+      // No attribution on this branch, and none invented. The entries came out
+      // of the request, so the only author this server could name is one the
+      // caller told it — which is exactly what must not decide attribution in a
+      // compliance document. This branch is the phone's offline retry; its
+      // report carries "Not recorded" against every entry and the count says
+      // how many. AUDIT L96. The store branch below is where attribution comes
+      // from, because there the owner of each row is a fact the server holds.
+      unattributedEntries: filtered.entries.length,
+      ambiguousAuthorNames: [],
+    };
   }
 
   const siteId = cleanString(body.siteId, "");
@@ -735,19 +1082,80 @@ async function resolveDiaryRequest(req: AuthenticatedRequest, body: GenerateDiar
   }
 
   const actor = { email: req.auth.email, role: req.auth.role, companyId: req.auth.companyId, companyRole: req.auth.companyRole };
-  const [sites, entries] = await Promise.all([listSites(actor), listEntries(actor, siteId)]);
+
+  // An explicit range is resolved BEFORE the load, so the load can filter by it
+  // in SQL (AUDIT L98). An anchored window cannot be: its boundaries are a
+  // function of the latest entry, which is what the load is for — so that path
+  // keeps the old two-step shape, and keeps the old limit with it.
+  let explicitWindowRequested: ReportWindow | null = null;
+  if (body.from !== undefined || body.to !== undefined) {
+    const asked = resolveWindow(body, []);
+    if (!asked.ok) throw new ReportWindowError(asked.message);
+    explicitWindowRequested = asked.window;
+  }
+
+  // One row over the ceiling, so truncation is DETECTED rather than assumed.
+  // `rows.length === limit` cannot tell a full page from an exact fit.
+  const probeLimit = REPORT_ENTRY_CEILING + 1;
+  const [sites, loaded, members] = await Promise.all([
+    listSites(actor),
+    explicitWindowRequested
+      ? listEntries(actor, siteId, probeLimit, 0, {
+          from: explicitWindowRequested.from,
+          to: explicitWindowRequested.to,
+        })
+      : listEntries(actor, siteId, probeLimit, 0),
+    // AUDIT L96. Scoped to the caller's own company by the function itself, so
+    // an entry whose `ownerEmail` belongs to another tenant resolves to no name
+    // rather than to that tenant's member — which is the behaviour a
+    // misfiled row must have, not an accident of this call.
+    listCompanyMembers(actor.companyId),
+  ]);
   const site = sites.find((item) => item.id === siteId);
   if (!site) {
     throw new Error("Site not found.");
   }
 
-  const scopedEntries = filterEntriesByPeriod(
-    entries.map((entry) => ({
+  const truncated = loaded.length > REPORT_ENTRY_CEILING;
+  const rows = truncated ? loaded.slice(0, REPORT_ENTRY_CEILING) : loaded;
+
+  let reportWindow: ReportWindow;
+  if (explicitWindowRequested) {
+    reportWindow = explicitWindowRequested;
+  } else {
+    const anchored = resolveWindow(body, rows);
+    if (!anchored.ok) throw new ReportWindowError(anchored.message);
+    reportWindow = anchored.window;
+  }
+
+  const authorIndex = buildAuthorNameIndex(members);
+
+  const filtered = filterEntriesByWindow(
+    rows.map((entry) => ({
       date: entry.date,
+      authorName: resolveAuthorName(authorIndex, entry.ownerEmail),
       locationAddress: entry.locationAddress,
       weather: entry.weather,
       crewCount: entry.crewCount,
       notes: entry.notes,
+      // AUDIT L97: five fields on the row, five fields the report never saw.
+      //
+      // Two of these five are reachable and three are not. `notesMode` and
+      // `hourlyNotes` are written by the capture form every time an entry is
+      // saved (`apps/mobile/app/new-entry.tsx:553` and `app/entry/[id].tsx:219`)
+      // and are the half of L97 that was losing real recorded content.
+      // `swmsRef`, `hazardNotes` and `toolboxTalk` are accepted and persisted by
+      // `POST /api/projects/entries` but no shipping client sends them, so they
+      // are read here for the day one does rather than claimed as delivered.
+      swmsRef: entry.swmsRef,
+      hazardNotes: entry.hazardNotes,
+      // NOT `entry.toolboxTalk`. The column is NOT NULL DEFAULT false, so a
+      // stored `false` is a default and not an answer — see
+      // `toolboxTalkFromStoredRow` for why that may not become a sentence in
+      // the document.
+      toolboxTalk: toolboxTalkFromStoredRow(entry.toolboxTalk),
+      notesMode: entry.notesMode,
+      hourlyNotes: entry.hourlyNotes,
       photos: Array.isArray(entry.photos)
         ? entry.photos.map((photo) => ({
             id: typeof photo.id === "string" ? photo.id : undefined,
@@ -761,7 +1169,7 @@ async function resolveDiaryRequest(req: AuthenticatedRequest, body: GenerateDiar
         : [],
       timestamp: entry.timestamp,
     })),
-    period
+    reportWindow
   );
 
   return {
@@ -772,7 +1180,17 @@ async function resolveDiaryRequest(req: AuthenticatedRequest, body: GenerateDiar
       startDate: site.startDate,
     },
     period,
-    entries: scopedEntries,
+    window: reportWindow,
+    entries: filtered.entries,
+    // Only claimed on the explicit path: there the ceiling applies to the
+    // window itself, so hitting it means the window really does hold more
+    // entries than one report may carry. On the anchored path the load is
+    // unfiltered, so a truncation says nothing about the window and claiming
+    // otherwise would be the same guess the old code made.
+    truncatedAtCeiling: Boolean(explicitWindowRequested) && truncated,
+    undatedEntries: filtered.undatedCount,
+    unattributedEntries: filtered.entries.filter((entry) => !entry.authorName).length,
+    ambiguousAuthorNames: authorIndex.duplicateNames,
   };
 }
 
@@ -784,9 +1202,11 @@ function logGeneration(
   req: AuthenticatedRequest,
   body: GenerateDiaryBody,
   p: DiaryProvenance,
-  startedAt: number
+  startedAt: number,
+  resolved?: ResolvedDiaryRequest,
+  photos?: PhotoAccounting | null
 ): void {
-  const entries = Array.isArray(body.entries) ? body.entries : [];
+  const entries = resolved ? resolved.entries : Array.isArray(body.entries) ? body.entries : [];
   console.log("[ai] generate-diary", {
     reqid: (req.headers["x-request-id"] as string) || null,
     generator: p.generator,
@@ -798,6 +1218,31 @@ function logGeneration(
     photoCount: entries.reduce((n, e) => n + (Array.isArray(e.photos) ? e.photos.length : 0), 0),
     companyId: req.auth.companyId,
     siteId: cleanString(body.siteId, "") || null,
+    // Identifiers, dates and counts. No note text, no addresses, no captions.
+    // `windowMode` is the one that answers a question the logs could not: how
+    // many reports are still being generated by clients that send no range.
+    windowFrom: resolved?.window.from ?? null,
+    windowTo: resolved?.window.to ?? null,
+    windowMode: resolved?.window.mode ?? null,
+    entriesIncluded: resolved ? resolved.entries.length : null,
+    undatedEntries: resolved?.undatedEntries ?? null,
+    truncatedAtCeiling: resolved?.truncatedAtCeiling ?? null,
+    // A count, not a list of who. AUDIT L96's own note is that the author field
+    // is an email address and this product's logging rule is identifiers and
+    // counts; a display name is personal content by the same argument, so
+    // neither reaches here. What the logs answer is how many entries across all
+    // companies are reaching a compliance document unattributed.
+    unattributedEntries: resolved?.unattributedEntries ?? null,
+    ambiguousAuthorNames: resolved ? resolved.ambiguousAuthorNames.length : null,
+    // AUDIT L95: the rate at which photographs silently fail to reach the model
+    // is the number this product had no way to ask for. Reason CODES and counts
+    // only — never a storage key, which ends in the uploaded filename, and
+    // never a caption.
+    photosRecorded: photos?.available ?? null,
+    photosAttached: photos?.attached ?? null,
+    photosOmittedForLimit: photos?.droppedToCeiling ?? null,
+    photosUnavailable: photos?.droppedTotal ?? null,
+    photoDropReasons: photos && photos.droppedTotal > 0 ? photos.droppedByReason : null,
   });
 }
 
@@ -820,13 +1265,57 @@ aiRouter.post("/generate-diary", requireAuth, rateLimitByCompany("generate-diary
   try {
     const resolved = await resolveDiaryRequest(req as AuthenticatedRequest, body);
     if (resolved.entries.length === 0) {
-      return res.status(400).json({ error: "No entries are available for the selected report period." });
+      return res.status(400).json({
+        // The dates are in the message because the old one — "the selected
+        // report period" — named a window the caller had no way to see and, on
+        // the anchored path, had not chosen. AUDIT L92.
+        error:
+          `No entries are available between ${resolved.window.from} and ${resolved.window.to}.`,
+        reportWindow: resolved.window,
+        undatedEntries: resolved.undatedEntries,
+      });
     }
-    const { diary, provenance } = await tryGenerateWithOpenAI(resolved, (req as AuthenticatedRequest).auth);
-    logGeneration(req as AuthenticatedRequest, body, provenance, startedAt);
+    const { diary, provenance, photos } = await tryGenerateWithOpenAI(
+      resolved,
+      (req as AuthenticatedRequest).auth
+    );
+    logGeneration(req as AuthenticatedRequest, body, provenance, startedAt, resolved, photos);
     return res.json({
       success: true,
       diary,
+      // The window the report actually covers, so the client can label it and a
+      // reader can tell a requested range from an inferred one.
+      reportWindow: resolved.window,
+      entriesIncluded: resolved.entries.length,
+      ...(resolved.undatedEntries > 0 ? { undatedEntries: resolved.undatedEntries } : {}),
+      // Present only when there is something to say. A report in which every
+      // entry is attributed should not carry a zero that invites a reader to
+      // wonder what it means. AUDIT L96.
+      ...(resolved.unattributedEntries > 0
+        ? { unattributedEntries: resolved.unattributedEntries }
+        : {}),
+      ...(resolved.ambiguousAuthorNames.length > 0
+        ? { ambiguousAuthorNames: resolved.ambiguousAuthorNames }
+        : {}),
+      ...(resolved.truncatedAtCeiling ? { truncatedAtCeiling: true, entryCeiling: REPORT_ENTRY_CEILING } : {}),
+      // What happened to the period's photographs, present only when something
+      // did happen to them. A report that attached every photograph recorded
+      // says nothing here; one that capped or failed to load any says which and
+      // how many, because the alternative — the behaviour this replaces — is a
+      // 200 that reads as though those photographs were never taken.
+      // AUDIT L93, L94, L95.
+      ...(photos && (photos.droppedToCeiling > 0 || photos.droppedTotal > 0)
+        ? {
+            photographs: {
+              recorded: photos.available,
+              attached: photos.attached,
+              omittedForLimit: photos.droppedToCeiling,
+              unavailable: photos.droppedTotal,
+              imageCeiling: photos.ceiling,
+              ...(photos.droppedTotal > 0 ? { unavailableByReason: photos.droppedByReason } : {}),
+            },
+          }
+        : {}),
       // Signed so the save request that follows cannot claim a generator that
       // never ran. Surfaced as `warning` too, because existing clients read
       // that field and would otherwise show a degraded run as a clean one.
@@ -834,6 +1323,15 @@ aiRouter.post("/generate-diary", requireAuth, rateLimitByCompany("generate-diary
       warning: provenance.warning ?? undefined,
     });
   } catch (err: unknown) {
+    // A range the caller cannot have meant is a 400 about the request, and it
+    // must not fall through to the template-fallback path below: that path
+    // re-resolves the same request, would throw the same error again, and the
+    // reader would get "Failed to generate diary." for a fixable typo in a
+    // date. Nothing is logged as a generation because none was attempted.
+    if (err instanceof ReportWindowError) {
+      return res.status(400).json({ error: err.message });
+    }
+
     const statusFromOpenAI =
       typeof err === "object" && err !== null
         ? ((err as OpenAIErrorLike).status ?? (err as OpenAIErrorLike).response?.status)
@@ -855,7 +1353,7 @@ aiRouter.post("/generate-diary", requireAuth, rateLimitByCompany("generate-diary
 
     try {
       const resolved = await resolveDiaryRequest(req as AuthenticatedRequest, body);
-      const fallbackDiary = buildDiaryFromEntries(resolved.entries, resolved.period);
+      const fallbackDiary = buildDiaryFromEntries(resolved.entries, resolved.period, resolved.window);
       // A 400 is the provider telling us the REQUEST is wrong — an unsupported
       // parameter, a model name that does not exist, a malformed input. It is a
       // configuration fault on our side and it will repeat on every single
@@ -876,10 +1374,14 @@ aiRouter.post("/generate-diary", requireAuth, rateLimitByCompany("generate-diary
               ? `${FALLBACK_NOTICE} OpenAI quota or credits are exhausted (429).`
               : `${FALLBACK_NOTICE} The AI service was unavailable.`;
       const provenance = fallbackProvenance(warning);
-      logGeneration(req as AuthenticatedRequest, body, provenance, startedAt);
+      logGeneration(req as AuthenticatedRequest, body, provenance, startedAt, resolved);
       return res.json({
         success: true,
         diary: fallbackDiary,
+        reportWindow: resolved.window,
+        entriesIncluded: resolved.entries.length,
+        ...(resolved.undatedEntries > 0 ? { undatedEntries: resolved.undatedEntries } : {}),
+        ...(resolved.truncatedAtCeiling ? { truncatedAtCeiling: true, entryCeiling: REPORT_ENTRY_CEILING } : {}),
         generation: signProvenance(provenance, (req as AuthenticatedRequest).auth.companyId),
         warning,
       });

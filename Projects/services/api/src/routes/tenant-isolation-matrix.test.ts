@@ -67,6 +67,7 @@ import { inspectionsRouter } from "./inspections";
 import { deliveriesRouter } from "./deliveries";
 import { templatesRouter } from "./templates";
 import { locationRouter } from "./location";
+import { clientsRouter } from "./clients";
 import { companyRouter } from "./company";
 
 let server: http.Server;
@@ -536,9 +537,49 @@ const MATRIX: MatrixEntry[] = [
       assert.equal(listRes.status, 200);
       assert.ok(!listRes.body.timecards.map((t) => t.id).includes(tcAId), "Company B must not see Company A's timecard in the list");
 
-      // No PATCH /crew/timecards/:id route exists (verified in routes/crew.ts).
+      // PATCH and the approval route are migration 033's additions. Both are
+      // cross-tenant write surfaces that did not exist when this row was
+      // written — the comment here previously recorded that no PATCH existed,
+      // which is the kind of note that goes stale silently and leaves a new
+      // route untested by a matrix that looks complete.
+      //
+      // 404 and not 403 on both: Company B's actor carries its own company_id,
+      // so the row is not merely refused, it is not visible to look up. A 403
+      // would mean the row had been found first.
+      const patchRes = await req(
+        "PATCH", `/crew/timecards/${tcAId}`,
+        { workerName: "Matrix Worker A", date: "2026-01-06", hoursRegular: 12 },
+        tokenB
+      );
+      assert.equal(patchRes.status, 404, "Company B PATCH on Company A's timecard must 404");
+
+      const apprRes = await req(
+        "POST", `/crew/timecards/${tcAId}/approval`, { status: "approved" }, tokenB
+      );
+      assert.equal(apprRes.status, 404, "Company B must not be able to approve Company A's timecard");
+
       const delRes = await req("DELETE", `/crew/timecards/${tcAId}`, undefined, tokenB);
       assert.equal(delRes.status, 404, "Company B DELETE on Company A's timecard must 404");
+
+      // The positive control for all three refusals, on the same routes in the
+      // same row: Company A's own owner can do each of them. Three 404s alone
+      // would read identically if the routes had been deleted.
+      const ownPatch = await req<{ timecard?: { hoursRegular: number } }>(
+        "PATCH", `/crew/timecards/${tcAId}`,
+        { workerName: "Matrix Worker A", date: "2026-01-06", hoursRegular: 9 },
+        tokenA
+      );
+      assert.equal(ownPatch.status, 200, `positive control: Company A must be able to edit its own timecard: ${JSON.stringify(ownPatch.body)}`);
+      const ownAppr = await req<{ timecard?: { approvalStatus: string } }>(
+        "POST", `/crew/timecards/${tcAId}/approval`, { status: "approved" }, tokenA
+      );
+      assert.equal(ownAppr.status, 200, "positive control: Company A must be able to approve its own timecard");
+      // Reopened so the delete below is not refused by the approval lock — the
+      // thing under test in this row is tenancy, not the approval state.
+      const reopen = await req("POST", `/crew/timecards/${tcAId}/approval`, { status: "pending" }, tokenA);
+      assert.equal(reopen.status, 200, "reopening the row for the delete control failed");
+      const ownDel = await req("DELETE", `/crew/timecards/${tcAId}`, undefined, tokenA);
+      assert.equal(ownDel.status, 200, "positive control: Company A must be able to delete its own timecard");
     },
   },
   {
@@ -587,6 +628,54 @@ const MATRIX: MatrixEntry[] = [
 
       const delRes = await req("DELETE", `/push/tokens/${encodeURIComponent(pushToken)}`, undefined, tokenB);
       assert.equal(delRes.status, 404, "Company B DELETE on Company A's push token must 404");
+    },
+  },
+  {
+    key: "clients",
+    run: async () => {
+      const tokenA = await registerUser("owner-a@clients.matrix.test", "Owner A", "Clients Co A");
+      const tokenB = await registerUser("owner-b@clients.matrix.test", "Owner B", "Clients Co B");
+
+      const made = await req<{ client: { id: string } }>("POST", "/clients", { name: "Matrix Builders A" }, tokenA);
+      assert.equal(made.status, 201, `seed client failed: ${JSON.stringify(made.body)}`);
+      const clientAId = made.body.client.id;
+
+      // Positive control first: an endpoint broken to return [] for EVERY
+      // caller satisfies the negative assertion below and would leave this row
+      // green with isolation untested (docs/VACUITY-AUDIT.md, mutation M6).
+      const ownRes = await req<{ clients: { id: string }[] }>("GET", "/clients", undefined, tokenA);
+      assert.equal(ownRes.status, 200);
+      assert.ok(
+        ownRes.body.clients.map((c) => c.id).includes(clientAId),
+        "positive control: Company A must see its OWN client in the list"
+      );
+
+      const listRes = await req<{ clients: { id: string }[] }>("GET", "/clients", undefined, tokenB);
+      assert.equal(listRes.status, 200);
+      assert.ok(!listRes.body.clients.map((c) => c.id).includes(clientAId), "Company B must not see Company A's client in the list");
+
+      const patchRes = await req("PATCH", `/clients/${clientAId}`, { name: "hijacked" }, tokenB);
+      assert.equal(patchRes.status, 404, "Company B PATCH on Company A's client must 404");
+
+      const delRes = await req("DELETE", `/clients/${clientAId}`, undefined, tokenB);
+      assert.equal(delRes.status, 404, "Company B DELETE on Company A's client must 404");
+
+      // Company A's client survived both, which is what makes the two 404s a
+      // tenancy result rather than a pair of broken routes.
+      const after = await req<{ clients: { id: string; name: string }[] }>("GET", "/clients", undefined, tokenA);
+      const mine = after.body.clients.find((c) => c.id === clientAId);
+      assert.ok(mine, "Company A's client was deleted by Company B");
+      assert.equal(mine.name, "Matrix Builders A", "Company A's client was renamed by Company B");
+
+      // And the filing route: Company B cannot file its own site under Company
+      // A's client, which is the one place a client id crosses into another
+      // table. The control is that A can file its own site with the same id.
+      const siteBId = await createSiteAs(tokenB, "Matrix Site B");
+      const crossFile = await req("PATCH", `/projects/sites/${siteBId}`, { clientId: clientAId }, tokenB);
+      assert.equal(crossFile.status, 400, "Company B filed its site under Company A's client");
+      const siteAId = await createSiteAs(tokenA, "Matrix Site A");
+      const ownFile = await req("PATCH", `/projects/sites/${siteAId}`, { clientId: clientAId }, tokenA);
+      assert.equal(ownFile.status, 200, "Company A cannot file its own site either — the 400 above is not a tenancy result");
     },
   },
 ];
@@ -680,6 +769,55 @@ test(
     );
     assert.equal(bSign.status, 200);
     assert.equal(bSign.body.signed[0].url, null, "Company B must not receive a signed URL for Company A's file");
+
+    // ── The batch form answers each path on its own merits ──────────────────
+    //
+    // /uploads/sign used to run the single-id ownership check once per path
+    // inside a `Promise.all`, i.e. one `withTenant` TRANSACTION per path. It now
+    // asks once with `id = ANY(...)` and reads the answers out of a set, which
+    // introduces a failure mode the old shape could not have: the verdict for
+    // path i no longer comes from a call made for path i, so a filtered-out
+    // element or a mis-zipped index hands one tenant's permission to another
+    // tenant's file. Every assertion above passes a SINGLE path and would read
+    // green against exactly that bug.
+    //
+    // The interleaving is deliberate: the unparseable entry sits BETWEEN two
+    // owned ones, so an implementation that drops it before querying and zips
+    // the results back shifts the third answer onto the second path.
+    const aBatch = await req<{ signed: { path: string; url: string | null; error?: string }[] }>(
+      "POST", "/uploads/sign", { paths: [uploaded.url, "not-an-upload-path", uploaded.url] }, tokenA
+    );
+    assert.equal(aBatch.status, 200);
+    assert.deepEqual(
+      aBatch.body.signed.map((s) => s.path),
+      [uploaded.url, "not-an-upload-path", uploaded.url],
+      "the answers must come back aligned with the paths that were sent"
+    );
+    assert.equal(aBatch.body.signed[1].url, null, "an unparseable path must not be signed");
+    assert.equal(aBatch.body.signed[1].error, "Invalid upload path.");
+    // Positive controls either side of it, in the same response.
+    for (const index of [0, 2]) {
+      assert.ok(
+        typeof aBatch.body.signed[index].url === "string" && aBatch.body.signed[index].url!.includes("sig="),
+        `Company A must receive a signed URL at index ${index}, got ${JSON.stringify(aBatch.body.signed[index])}`
+      );
+    }
+
+    // And the refusal stays attached to the right path when B sends a mixed
+    // batch. The positive control for this is A's batch immediately above, on
+    // the same endpoint in the same test: B owns no file here, so there is
+    // nothing for B to legitimately sign.
+    const bBatch = await req<{ signed: { path: string; url: string | null; error?: string }[] }>(
+      "POST", "/uploads/sign", { paths: ["not-an-upload-path", uploaded.url] }, tokenB
+    );
+    assert.equal(bBatch.status, 200);
+    assert.equal(bBatch.body.signed[0].error, "Invalid upload path.");
+    assert.equal(
+      bBatch.body.signed[1].url,
+      null,
+      "Company B must not receive a signed URL for Company A's file inside a batch"
+    );
+    assert.equal(bBatch.body.signed[1].error, "Not found.");
   }
 );
 
@@ -723,6 +861,7 @@ const KNOWN_ROUTERS: KnownRouter[] = [
   { router: deliveriesRouter, label: "deliveriesRouter", tenantScoped: true, resourceKeys: ["deliveries"] },
   { router: templatesRouter, label: "templatesRouter", tenantScoped: true, resourceKeys: ["entry-templates"] },
   { router: locationRouter, label: "locationRouter", tenantScoped: true, resourceKeys: ["worker-locations"] },
+  { router: clientsRouter, label: "clientsRouter", tenantScoped: true, resourceKeys: ["clients"] },
   {
     router: companyRouter, label: "companyRouter", tenantScoped: false, resourceKeys: [],
     reason: "Company membership/invite management is the tenancy boundary itself, not a scoped 'record' resource in the seed-then-deny sense — exhaustively covered by company-rbac.test.ts (tests 2, 4, 6a, 6b) and invites.test.ts.",

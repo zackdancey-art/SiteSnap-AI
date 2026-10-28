@@ -3,8 +3,7 @@
 # Guard for the workspace-root `test` script.
 #
 # The root script is `pnpm -r --if-present run test`. `--if-present` is there so
-# that packages without tests (mobile, supervisor-web, shared) don't fail the
-# run — but it means the command's success does not depend on any test existing.
+# that packages without tests (now only `shared`) don't fail the run — but it means the command's success does not depend on any test existing.
 # Rename or drop `services-api`'s `test` script and pnpm cheerfully matches zero
 # packages and exits 0. Same failure as the empty file list in
 # services/api/scripts/run-tests.sh: a green result reporting work that never
@@ -20,7 +19,8 @@ cd "$(dirname "$0")/.."
 # Packages expected to declare a "test" script, one per line, sorted.
 # Update this when a package gains or loses a test suite — that is the point.
 EXPECTED="apps-mobile
-services-api"
+services-api
+sitesnap-supervisor-web"
 
 ACTUAL=$(
   for f in package.json shared/package.json services/*/package.json apps/*/package.json; do
