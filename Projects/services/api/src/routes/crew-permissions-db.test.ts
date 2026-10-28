@@ -83,14 +83,13 @@ process.env.AUTH_TOKEN_SECRET = "crew-permissions-secret";
 import assert from "node:assert/strict";
 import { test, before, after } from "node:test";
 import http from "node:http";
-import fs from "node:fs/promises";
-import path from "node:path";
 import type { Pool } from "pg";
 import { createApp } from "../server";
 import { getPgPool } from "../storage/postgres";
 import { deleteUserAccount } from "../storage/authStore";
 import { resetRateLimitStoreForTests } from "../middleware/rateLimit";
 import { verifyAuthToken } from "../utils/authToken";
+import { applyMigrations } from "../storage/testMigrations";
 
 if (!process.env.TEST_DATABASE_URL) {
   test("crew permissions table (skipped: set TEST_DATABASE_URL)", { skip: true }, () => {});
@@ -102,20 +101,6 @@ if (!process.env.TEST_DATABASE_URL) {
   // NODE_ENV === "test", and node:test gives each file its own process.
   process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 
-  const MIGRATIONS_DIR = path.join(process.cwd(), "src", "storage", "migrations");
-  const applyMigrations = async (pool: Pool): Promise<void> => {
-    await pool.query(`CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
-    const applied = new Set((await pool.query<{ version: string }>(`SELECT version FROM schema_migrations`)).rows.map((r) => r.version));
-    for (const file of (await fs.readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith(".sql")).sort()) {
-      const version = file.replace(/\.sql$/, "");
-      if (applied.has(version)) continue;
-      const sql = await fs.readFile(path.join(MIGRATIONS_DIR, file), "utf-8");
-      const client = await pool.connect();
-      try { await client.query("BEGIN"); await client.query(sql); await client.query(`INSERT INTO schema_migrations (version) VALUES ($1)`, [version]); await client.query("COMMIT"); }
-      catch (err) { await client.query("ROLLBACK"); throw new Error(`Migration ${version} failed: ${err instanceof Error ? err.message : String(err)}`); }
-      finally { client.release(); }
-    }
-  };
 
   const runId = Date.now().toString().slice(-7);
   const OWNER = `crew-perm-owner-${runId}@example.test`;
@@ -142,7 +127,12 @@ if (!process.env.TEST_DATABASE_URL) {
   // died there on a client timeout. So step 14 never executed, this assertion
   // was never reached, and this count had never been taken. AUDIT L99.
   const EXPECTED_WRITE_STEPS = 14;
-  const EXPECTED_REFUSALS = 15;
+  // 16, not 15. The sixteenth is voiding an inspection signature (AUDIT L91),
+  // which was decided manager+ and then never built: the route carried only
+  // FIELD_ACCESS — identity, not rank — on main and on every feature branch, so
+  // any crew member with a login could retract any signature in their company.
+  // Measured by running this half; see the probe's own comment below.
+  const EXPECTED_REFUSALS = 16;
   const EXPECTED_FIELD_PROBES = 4;
   /**
    * The two populations the corrected decision added, and the reason the four
@@ -405,7 +395,20 @@ if (!process.env.TEST_DATABASE_URL) {
       await step("send a location ping", "POST", "/location/update", {
         latitude: -36.8485, longitude: 174.7633, accuracy: 5, siteId, userName: who,
       });
-      await step("update site progress", "PATCH", `/projects/sites/${siteId}/progress`, { progressPercent: 42 });
+      const progressed = await step<{ site: { progressPercent?: number } }>(
+        "update site progress", "PATCH", `/projects/sites/${siteId}/progress`, { progressPercent: 42 }
+      );
+      // Not just the status code. This route answered 200 while returning a
+      // site with no progressPercent at all: mapSite never read the
+      // `progress_percent` column, so the Postgres path wrote the value and
+      // never gave it back, and the mobile slider reset to zero on every
+      // reload. A status-code assertion cannot see that — the step above
+      // passed throughout. AUDIT L99 fixed the statement; this is the half of
+      // the same defect that survived it.
+      assert.equal(
+        progressed.body.site?.progressPercent, 42,
+        "PATCH /progress answered 200 but did not return the progress it stored"
+      );
       // Last, because it removes the row the first two steps created.
       await step("delete that entry", "DELETE", `/projects/entries/${entryId ?? "missing"}`);
       return out;
@@ -806,6 +809,30 @@ if (!process.env.TEST_DATABASE_URL) {
     const revokeId = listed.body.invites.find((i) => i.invitedEmail.toLowerCase() === revokeTarget)?.id;
     assert.ok(revokeId, `no revocable invitation to probe with: ${JSON.stringify(listed.body.invites)}`);
 
+    /**
+     * A real inspection with a real signature on it, so the void probe has a
+     * target that exists and the owner control actually voids something rather
+     * than collecting a 404 from the store.
+     *
+     * Both are created BY THE CREW MEMBER on purpose. Crew do the inspecting
+     * and crew sign what they inspected — that is the whole point of the
+     * capture app — and it is the retraction, not the record, that AUDIT L91
+     * moved to manager+. Seeding them as crew asserts that distinction as a
+     * fact of this suite rather than leaving it to the comment.
+     */
+    const inspection = await seed<{ inspection: { id: string } }>(
+      "POST", "/inspections",
+      { siteId, name: `Crew Perm Inspection ${runId}`, date: "2025-01-01" },
+      crewToken
+    );
+    const inspectionId = inspection.body.inspection.id;
+    const signed = await seed<{ signature: { id: string } }>(
+      "POST", `/inspections/${inspectionId}/signatures`,
+      { role: "inspector", signerName: `Crew Perm Inspector ${runId}`, path: "M0 0 L10 10", viewBox: "0 0 100 50" },
+      crewToken
+    );
+    const signatureId = signed.body.signature.id;
+
     const probes: Array<{ label: string; method: string; path: string; body?: unknown }> = [
       // ── Exception 1: crew cannot invite anyone ────────────────────────────
       { label: "invite someone to a site", method: "POST", path: `/projects/sites/${siteId}/invites`, body: { emails: [`crew-perm-probe-${runId}@example.test`], role: "crew" } },
@@ -825,6 +852,12 @@ if (!process.env.TEST_DATABASE_URL) {
       { label: "create a site", method: "POST", path: "/projects/sites", body: { name: `Probe Site ${runId}`, address: "3 Main St", client: "ACME", startDate: "2025-01-01", status: "active" } },
       { label: "delete a site", method: "DELETE", path: `/projects/sites/${disposableId}` },
       { label: "revoke an invitation", method: "DELETE", path: `/projects/sites/${siteId}/invites/${revokeId}` },
+      // ── AUDIT L91: crew cannot retract a signature they may give ─────────
+      // Destructive in the sense that matters here: the owner control is the
+      // only caller of this probe's resource, and it consumes it. Grouped with
+      // the destructive probes for that reason, not because the row is deleted
+      // — voidSignature stamps voided_at and voided_reason and keeps the row.
+      { label: "void a signature", method: "POST", path: `/inspections/${inspectionId}/signatures/${signatureId}/void`, body: { reason: "signed by the wrong person" } },
       // Last of all: the owner control removes the crew member's own site
       // membership, which nothing below may depend on.
       { label: "remove somebody from a site", method: "DELETE", path: `/projects/sites/${siteId}/members/${encodeURIComponent(CREW)}` },

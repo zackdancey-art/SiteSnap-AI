@@ -362,6 +362,22 @@ function ReportsPageInner() {
   // ── Generate panel state ──
   const [genSiteId, setGenSiteId]   = useState<string>(() => searchParams?.get("siteId") ?? "");
   const [genPeriod, setGenPeriod]   = useState<"daily" | "weekly" | "monthly">("daily");
+  /**
+   * The report range — AUDIT L92, portal half.
+   *
+   * EMPTY MEANS "NO RANGE", and that is the default on purpose. The server then
+   * anchors the window on the latest entry it can see, which is exactly what
+   * this page did before the range existed, so the API deploying ahead of this
+   * bundle changes nothing for anyone who does not touch these two fields.
+   *
+   * There is deliberately NO anchored-default or period stepping here, which
+   * the mobile diary screen does have. The reason is not design: this app has
+   * no test script and no tests, so arithmetic added here could not be defended
+   * by one. Two `<input type="date">` fields and two comparisons is the most
+   * this page can carry honestly — see the PR body.
+   */
+  const [genFrom, setGenFrom]       = useState("");
+  const [genTo, setGenTo]           = useState("");
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError]     = useState("");
   const [genSuccess, setGenSuccess] = useState("");
@@ -379,11 +395,56 @@ function ReportsPageInner() {
     // generateDiary in lib/api.ts (AUDIT L45).
     const siteEntries = data?.entries.filter((e) => e.siteId === genSiteId) ?? [];
     if (siteEntries.length === 0) { setGenError("This site has no entries to generate a report from."); return; }
+    // Both dates or neither. The API refuses a half-range rather than guessing
+    // whether a lone `from` meant "the week starting then" or "the week ending
+    // then" — a week apart — and this page asks for the missing one instead of
+    // making the same guess locally.
+    if (Boolean(genFrom) !== Boolean(genTo)) {
+      setGenError("A report range needs both a start and an end date, or neither.");
+      return;
+    }
+    if (genFrom && genTo && genFrom > genTo) {
+      setGenError("A report range must start on or before it ends.");
+      return;
+    }
     setGenerating(true); setGenError(""); setGenSuccess("");
     try {
-      const diary = await generateDiary({ siteId: genSiteId, period: genPeriod });
+      const result = await generateDiary({
+        siteId: genSiteId,
+        period: genPeriod,
+        from: genFrom || undefined,
+        to: genTo || undefined,
+      });
+      const diary = result.diary;
       setLocalDiaries((prev) => [diary, ...(prev.length > 0 ? prev : (bootstrapData?.diaries ?? []))]);
-      setGenSuccess(`✓ ${genPeriod.charAt(0).toUpperCase() + genPeriod.slice(1)} report generated successfully. Scroll down to view it.`);
+      // The DATES, from the server, not the period word. On the no-range path
+      // these are the dates it anchored on, which the user never chose and
+      // previously had no way to see at all.
+      const covered = result.reportWindow
+        ? `${result.reportWindow.from} to ${result.reportWindow.to}`
+        : genPeriod;
+      const notes: string[] = [];
+      if (result.reportWindow?.mode === "anchored") {
+        notes.push(
+          `Dates derived from the latest recorded entry${result.reportWindow.anchoredOn ? ` (${result.reportWindow.anchoredOn})` : ""}.`
+        );
+      }
+      if (result.undatedEntries > 0) {
+        notes.push(
+          `${result.undatedEntries} entr${result.undatedEntries === 1 ? "y has" : "ies have"} no usable date and could not be included.`
+        );
+      }
+      if (result.unattributedEntries > 0) {
+        notes.push(
+          `${result.unattributedEntries} entr${result.unattributedEntries === 1 ? "y" : "ies"} could not be attributed to a named person.`
+        );
+      }
+      if (result.truncatedAtCeiling) {
+        notes.push("This range held more entries than one report can cover; generate it in parts.");
+      }
+      setGenSuccess(
+        `✓ Report generated for ${covered}. Scroll down to view it.${notes.length > 0 ? ` ${notes.join(" ")}` : ""}`
+      );
       setSelectedSite(genSiteId);
       setActiveDiary(diary);
     } catch (err) {
@@ -531,6 +592,34 @@ function ReportsPageInner() {
                     <option value="monthly">Monthly</option>
                   </select>
                 </div>
+                {/* AUDIT L92. The report used to cover a window nobody chose
+                    and nobody was shown: the period word was the whole of the
+                    request, and the server counted back from whatever the
+                    latest entry happened to be. Left empty these two still
+                    produce exactly that, so the control adds a capability
+                    without changing the default. */}
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: "0 0 150px" }}>
+                  <label htmlFor="gen-from" style={{ fontSize: 11, fontWeight: 700, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.05em" }}>From</label>
+                  <input
+                    id="gen-from"
+                    type="date"
+                    value={genFrom}
+                    max={genTo || undefined}
+                    onChange={(e) => setGenFrom(e.target.value)}
+                    style={{ height: 38, fontSize: 13, borderRadius: 8, border: "1.5px solid var(--border)", padding: "0 10px", background: "var(--surface)", color: "var(--text)" }}
+                  />
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: "0 0 150px" }}>
+                  <label htmlFor="gen-to" style={{ fontSize: 11, fontWeight: 700, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.05em" }}>To</label>
+                  <input
+                    id="gen-to"
+                    type="date"
+                    value={genTo}
+                    min={genFrom || undefined}
+                    onChange={(e) => setGenTo(e.target.value)}
+                    style={{ height: 38, fontSize: 13, borderRadius: 8, border: "1.5px solid var(--border)", padding: "0 10px", background: "var(--surface)", color: "var(--text)" }}
+                  />
+                </div>
                 <button
                   onClick={handleGenerate}
                   disabled={generating || !data}
@@ -550,6 +639,11 @@ function ReportsPageInner() {
                   ) : "⚡ Generate Report"}
                 </button>
               </div>
+              {!genFrom && !genTo && (
+                <p style={{ marginTop: 10, fontSize: 12, color: "var(--text-secondary)" }}>
+                  Leave the dates empty to cover the selected period up to the most recent entry.
+                </p>
+              )}
               {genError   && <p style={{ marginTop: 10, fontSize: 13, color: "#EF4444", fontWeight: 600 }}>{genError}</p>}
               {genSuccess && <p style={{ marginTop: 10, fontSize: 13, color: "#22C55E", fontWeight: 600 }}>{genSuccess}</p>}
             </div>

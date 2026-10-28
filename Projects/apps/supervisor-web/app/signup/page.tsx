@@ -23,6 +23,12 @@
  * in its body and never calls setSessionCookie; the portal authenticates by
  * httpOnly cookie, so without the login call the account would exist and the
  * person would still be logged out.
+ *
+ * Step 1 also carries terms and privacy consent, which is recorded against the
+ * pending registration and written into the consent ledger when the account is
+ * created. The portal links to the hosted documents rather than holding copies
+ * of them; lib/legal-versions.ts says why, and names what keeps the version it
+ * sends equal to the text those pages show.
  */
 
 import { useState, Suspense } from "react";
@@ -37,6 +43,12 @@ import {
 } from "@/lib/api";
 import { composeE164, DIALLING_CODES } from "@/lib/phone";
 import { landingPath } from "@/lib/useRole";
+import {
+  PRIVACY_URL,
+  PRIVACY_VERSION,
+  TERMS_URL,
+  TERMS_VERSION,
+} from "@/lib/legal-versions";
 
 type Step = "details" | "emailCode" | "smsCode";
 
@@ -56,6 +68,16 @@ function SignupForm() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  /**
+   * ONE tick for BOTH documents, matching the mobile signup screen.
+   *
+   * Two checkboxes would present a choice that does not exist: declining either
+   * one ends the signup, so offering them separately would be an interface
+   * asking a question it will not accept an answer to. The API still records
+   * them SEPARATELY -- one row per document, each with its own version -- which
+   * is what lets one of them change later without reopening the other.
+   */
+  const [acceptedLegal, setAcceptedLegal] = useState(false);
 
   const normalizedEmail = email.trim().toLowerCase();
 
@@ -70,6 +92,13 @@ function SignupForm() {
       setError("Please choose a password of at least 8 characters.");
       return;
     }
+    // Checked here as well as by the disabled button, because a disabled button
+    // is a presentation decision and somebody will restyle it. This is the
+    // refusal; the button is the hint.
+    if (!acceptedLegal) {
+      setError("Please accept the Terms of Service and the Privacy Policy to continue.");
+      return;
+    }
     setLoading(true);
     try {
       await registerStart({
@@ -79,6 +108,14 @@ function SignupForm() {
         phone: composeE164(phonePrefix, phoneLocal),
         fullName: fullName.trim(),
         password,
+        acceptedTerms: true,
+        acceptedPrivacy: true,
+        // The version of each document THIS BUILD linked to, which is the only
+        // version it can honestly claim was presented. Kept equal to the
+        // canonical markdown by assert_legal_version_constant in
+        // Projects/scripts/ci.sh, so it cannot drift from the text.
+        termsVersion: TERMS_VERSION,
+        privacyVersion: PRIVACY_VERSION,
       });
       setNotice(`We have emailed a 6-digit code to ${normalizedEmail}.`);
       setStep("emailCode");
@@ -256,7 +293,56 @@ function SignupForm() {
                 required
               />
             </div>
-            <button type="submit" className="btn-primary" style={{ width: "100%", height: 46 }} disabled={loading}>
+            {/* The consent control. Links open in a new tab rather than
+                navigating: this form holds a password, a phone number and a
+                name, and leaving the page would discard all three. The hosted
+                pages are the portal's copies of these documents — it has no
+                local ones, deliberately (see lib/legal-versions.ts). */}
+            <label
+              style={{
+                display: "flex",
+                alignItems: "flex-start",
+                gap: 10,
+                fontSize: 13,
+                color: "var(--text-secondary)",
+                lineHeight: 1.45,
+                cursor: "pointer",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={acceptedLegal}
+                onChange={(e) => setAcceptedLegal(e.target.checked)}
+                style={{ width: 18, height: 18, marginTop: 1, flex: "0 0 auto" }}
+              />
+              <span>
+                I have read and accept the{" "}
+                <a
+                  href={TERMS_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ color: "var(--accent)", fontWeight: 600 }}
+                >
+                  Terms of Service
+                </a>{" "}
+                and the{" "}
+                <a
+                  href={PRIVACY_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ color: "var(--accent)", fontWeight: 600 }}
+                >
+                  Privacy Policy
+                </a>
+                .
+              </span>
+            </label>
+            <button
+              type="submit"
+              className="btn-primary"
+              style={{ width: "100%", height: 46, opacity: acceptedLegal ? 1 : 0.55 }}
+              disabled={loading || !acceptedLegal}
+            >
               {loading ? "Sending code…" : "Continue"}
             </button>
           </form>

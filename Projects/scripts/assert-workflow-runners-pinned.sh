@@ -37,7 +37,14 @@ fi
 # This repo has been bitten four times by exactly that shape (AUDIT L36,
 # docs/VACUITY-AUDIT.md M7), so count the population before trusting a clean
 # result, and state what the count was expected to be.
-EXPECTED_WORKFLOWS=3
+# 4, MEASURED on THIS branch: this branch renames deploy-api.yml to
+# api-post-merge-checks.yml AND adds submit-mobile.yml, so the directory
+# holds four files while the line said 3. Red on this branch today, before
+# any merge. EXPECTED_PINNED stays 4: build-mobile.yml dropped a job into
+# submit-mobile.yml, so four files of one job replace three files holding
+# four jobs. Every count and every position:
+# docs/NINE-WORKSTREAMS-HANDOVER.md.
+EXPECTED_WORKFLOWS=4
 FOUND="$(find "$WORKFLOW_DIR" -maxdepth 1 -name '*.yml' -o -maxdepth 1 -name '*.yaml' | sort)"
 COUNT="$(printf '%s\n' "$FOUND" | sed '/^$/d' | wc -l | tr -d ' ')"
 
@@ -81,6 +88,19 @@ fi
 #    supposed to be regulating.
 PINNED="$(grep -rcE '^[[:space:]]*runs-on:[[:space:]]*ubuntu-[0-9]' "$WORKFLOW_DIR" \
           | awk -F: '{n+=$2} END {print n+0}')"
+# 4, MEASURED on the merged tree: four workflow files holding one job each --
+# api-post-merge-checks.yml:39, build-mobile.yml:46, ci.yml:19,
+# submit-mobile.yml:35, all ubuntu-24.04.
+#
+# THIS LINE IS A MERGE-TIME CORRECTION AND GIT COULD NOT HAVE FLAGGED IT. The
+# merge base said 4. main never touched the line. Workstream 8 alone lowered it
+# to 3, because workstream 8 deleted deploy-api.yml and with it the fourth
+# pinned runner. F3 resolves the other way -- workstream 0's renamed
+# api-post-merge-checks.yml is kept -- so the fourth runner is back, but only
+# one side had edited this line, so there was no conflict here to resolve and
+# the auto-merge carried the 3 through silently. An equality check reading 3
+# against a directory of 4 fails closed, which is the only reason this was
+# visible at all.
 EXPECTED_PINNED=4
 if [ "$PINNED" != "$EXPECTED_PINNED" ]; then
   echo "FAIL: matched $PINNED pinned 'runs-on:' lines, expected $EXPECTED_PINNED." >&2

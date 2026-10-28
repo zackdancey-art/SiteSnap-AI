@@ -1,10 +1,18 @@
-import React from "react";
-import { ScrollView, StyleSheet, View } from "react-native";
+import React, { useEffect, useState } from "react";
+import { ActivityIndicator, ScrollView, StyleSheet, View } from "react-native";
 import { router } from "expo-router";
 import { ScreenHeader } from "@/components/ScreenHeader";
 import { SettingsRow, SettingsDivider, SettingsDividerFull } from "@/components/SettingsRow";
 import { SettingsBody, SettingsBodyStrong, SettingsCard, SettingsSection } from "@/components/SettingsSection";
 import Colors from "@/constants/colors";
+import { authedJson } from "@/lib/authed-fetch";
+import { isSessionExpired } from "@/lib/session";
+import {
+  NO_RECORD_MESSAGE,
+  type ConsentLine,
+  type ConsentRecord,
+  summariseConsents,
+} from "@/lib/consent-summary";
 
 /**
  * Data & Privacy detail screen — reached from the Data & Privacy row on Settings.
@@ -19,6 +27,35 @@ import Colors from "@/constants/colors";
  * again is a level of hierarchy that carries no information.
  */
 export default function DataPrivacySettingsScreen() {
+  // null means "not loaded yet"; [] means "loaded, and this account has no
+  // record". The two have to be distinguishable, because telling somebody there
+  // is no record of their acceptance while the request is still in flight would
+  // be the screen asserting something it does not know.
+  const [consentLines, setConsentLines] = useState<ConsentLine[] | null>(null);
+  const [consentFailed, setConsentFailed] = useState(false);
+
+  useEffect(() => {
+    // The one caller of GET /api/auth/consents.
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await authedJson<{ consents: ConsentRecord[] }>("/api/auth/consents");
+        if (!cancelled) setConsentLines(summariseConsents(data.consents ?? []));
+      } catch (err) {
+        // An expired session has already been routed to sign-in by authedFetch;
+        // showing a failure message on a screen that is being replaced would
+        // just flash. Anything else is a real failure and says so, because
+        // "nothing is recorded" and "we could not check" are different answers
+        // and only one of them is about the user.
+        if (isSessionExpired(err)) return;
+        if (!cancelled) setConsentFailed(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <View style={styles.container}>
       <ScreenHeader title="Data & Privacy" paddingBottom={16} homeFallback="/(tabs)/settings" />
@@ -80,6 +117,45 @@ export default function DataPrivacySettingsScreen() {
             <SettingsDivider />
             <SettingsRow icon="document-text-outline" label="Terms of Service" onPress={() => router.push("/terms-of-service")} />
           </SettingsCard>
+          {/*
+            What this account has accepted, from the consent ledger the API
+            keeps (migration 035). It sits directly under the two links so the
+            document and the record of agreeing to it are in one place, which is
+            the whole reason there is no separate Legal screen.
+          */}
+          <SettingsCard style={{ marginTop: 12 }}>
+            <SettingsBody>
+              <SettingsBodyStrong>What you have accepted. </SettingsBodyStrong>
+              {consentFailed
+                ? "This could not be loaded just now. The documents themselves are linked above."
+                : "The version of each document this account agreed to, and when."}
+            </SettingsBody>
+            {!consentFailed && consentLines === null ? (
+              <>
+                <SettingsDividerFull />
+                <View style={styles.consentLoading}>
+                  <ActivityIndicator color={Colors.primary} size="small" />
+                </View>
+              </>
+            ) : null}
+            {!consentFailed && consentLines !== null && consentLines.length === 0 ? (
+              <>
+                <SettingsDividerFull />
+                <SettingsBody>{NO_RECORD_MESSAGE}</SettingsBody>
+              </>
+            ) : null}
+            {!consentFailed && consentLines !== null
+              ? consentLines.map((line) => (
+                  <React.Fragment key={line.label}>
+                    <SettingsDividerFull />
+                    <SettingsBody>
+                      <SettingsBodyStrong>{line.label}. </SettingsBodyStrong>
+                      {line.detail}
+                    </SettingsBody>
+                  </React.Fragment>
+                ))
+              : null}
+          </SettingsCard>
         </SettingsSection>
       </ScrollView>
     </View>
@@ -93,5 +169,9 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     paddingBottom: 48,
+  },
+  consentLoading: {
+    paddingVertical: 12,
+    alignItems: "flex-start",
   },
 });

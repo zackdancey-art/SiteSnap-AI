@@ -26,12 +26,11 @@
 
 import assert from "node:assert/strict";
 import { test, before, after } from "node:test";
-import fs from "node:fs/promises";
-import path from "node:path";
 import { Client } from "pg";
 import type { Pool } from "pg";
 import { getPgPool } from "./postgres";
 import { withTenant } from "./tenant";
+import { applyMigrations } from "./testMigrations";
 
 if (!process.env.TEST_DATABASE_URL) {
   test("RLS integration (skipped: set TEST_DATABASE_URL)", { skip: true }, () => {});
@@ -49,37 +48,7 @@ if (!process.env.TEST_DATABASE_URL) {
   // always runs from the services/api package root (via pnpm), so migrations
   // are read from the *source* tree relative to process.cwd() rather than
   // __dirname.
-  const MIGRATIONS_DIR = path.join(process.cwd(), "src", "storage", "migrations");
 
-  const applyMigrations = async (pool: Pool): Promise<void> => {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS schema_migrations (
-        version TEXT PRIMARY KEY,
-        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
-    const appliedResult = await pool.query<{ version: string }>(`SELECT version FROM schema_migrations`);
-    const applied = new Set(appliedResult.rows.map((r) => r.version));
-
-    const files = (await fs.readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith(".sql")).sort();
-    for (const file of files) {
-      const version = file.replace(/\.sql$/, "");
-      if (applied.has(version)) continue;
-      const sql = await fs.readFile(path.join(MIGRATIONS_DIR, file), "utf-8");
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-        await client.query(sql);
-        await client.query(`INSERT INTO schema_migrations (version) VALUES ($1)`, [version]);
-        await client.query("COMMIT");
-      } catch (err) {
-        await client.query("ROLLBACK");
-        throw new Error(`Migration ${version} failed: ${err instanceof Error ? err.message : String(err)}`);
-      } finally {
-        client.release();
-      }
-    }
-  };
 
   // ── Fixture identifiers (unique per run so re-runs against a persistent
   // TEST_DATABASE_URL don't collide with leftovers from a previous run) ──────

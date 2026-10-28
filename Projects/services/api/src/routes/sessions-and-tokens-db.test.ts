@@ -2,7 +2,7 @@
  * Sessions, revocation and refresh — asserted against real Postgres.
  *
  * THIS IS THE AUTHORITATIVE HALF. `sessions-and-tokens.test.ts` runs the same
- * five scenarios against the in-memory store; that one is what a developer with
+ * scenarios against the in-memory store; that one is what a developer with
  * no local Postgres can run, and this one is what decides whether the behaviour
  * is real. The duplication is deliberate and the two must be changed together —
  * see the long note in the in-memory file for why a comparison is the point.
@@ -37,8 +37,6 @@ import assert from "node:assert/strict";
 import { test, before, after, beforeEach } from "node:test";
 import http from "node:http";
 import crypto from "node:crypto";
-import fs from "node:fs/promises";
-import path from "node:path";
 import type { Pool } from "pg";
 import { createApp } from "../server";
 import { getPgPool } from "../storage/postgres";
@@ -46,6 +44,8 @@ import { createUser, deleteUserAccount, resetSessionIdentityCacheForTests } from
 import { hashPassword } from "../utils/password";
 import { getSessionTimings, AuthClaims, CompanyRole, UserRole } from "../utils/authToken";
 import { resetRateLimitStoreForTests } from "../middleware/rateLimit";
+import { SESSION_COOKIE } from "../utils/sessionCookie";
+import { applyMigrations } from "../storage/testMigrations";
 
 if (!process.env.TEST_DATABASE_URL) {
   test("sessions and tokens against Postgres (skipped: set TEST_DATABASE_URL)", { skip: true }, () => {});
@@ -57,20 +57,6 @@ if (!process.env.TEST_DATABASE_URL) {
   // each file its own process.
   process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 
-  const MIGRATIONS_DIR = path.join(process.cwd(), "src", "storage", "migrations");
-  const applyMigrations = async (pool: Pool): Promise<void> => {
-    await pool.query(`CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
-    const applied = new Set((await pool.query<{ version: string }>(`SELECT version FROM schema_migrations`)).rows.map((r) => r.version));
-    for (const file of (await fs.readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith(".sql")).sort()) {
-      const version = file.replace(/\.sql$/, "");
-      if (applied.has(version)) continue;
-      const sql = await fs.readFile(path.join(MIGRATIONS_DIR, file), "utf-8");
-      const client = await pool.connect();
-      try { await client.query("BEGIN"); await client.query(sql); await client.query(`INSERT INTO schema_migrations (version) VALUES ($1)`, [version]); await client.query("COMMIT"); }
-      catch (err) { await client.query("ROLLBACK"); throw new Error(`Migration ${version} failed: ${err instanceof Error ? err.message : String(err)}`); }
-      finally { client.release(); }
-    }
-  };
 
   const runId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const COMPANY = `sessions-co-${runId}`;
@@ -106,24 +92,33 @@ if (!process.env.TEST_DATABASE_URL) {
     created.push(email);
   };
 
+  /**
+   * The `cookie` argument and the returned `setCookie` exist because the portal
+   * does not send an Authorization header at all — it sends the session cookie,
+   * and `readCredential` accepts both transports. A logout tested only over
+   * bearer leaves the transport the portal actually uses unasserted, which is
+   * the gap L104 records for four other routes.
+   */
   const req = async <T = unknown>(
     method: string,
     path_: string,
     body?: unknown,
-    token?: string
-  ): Promise<{ status: number; body: T }> => {
+    token?: string,
+    cookie?: string
+  ): Promise<{ status: number; body: T; setCookie: string[] }> => {
     const res = await fetch(`${baseUrl}/api${path_}`, {
       method,
       headers: {
         "Content-Type": "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(cookie ? { Cookie: cookie } : {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
     const text = await res.text();
     let parsed: T;
     try { parsed = JSON.parse(text) as T; } catch { parsed = { error: text } as unknown as T; }
-    return { status: res.status, body: parsed };
+    return { status: res.status, body: parsed, setCookie: res.headers.getSetCookie() };
   };
 
   /**
@@ -236,6 +231,99 @@ if (!process.env.TEST_DATABASE_URL) {
     );
     assert.equal(row.rowCount, 1, "the account row disappeared");
     assert.equal(row.rows[0].token_generation, 1, "revoke-all must increment auth_users.token_generation");
+  });
+
+  test("signing out ends the session on the server, not just on the device", async () => {
+    const email = emailFor("logout");
+    await seedUser(email, "Session Owner", "admin", "owner");
+    const acting = await login(email);
+    const otherDevice = signClaims({ email });
+
+    // CONTROL, BEFORE THE SIGN-OUT, on the route the 401s below are read from.
+    // Without it a refusal is satisfied just as well by an /auth/me that has
+    // started refusing everybody.
+    assert.equal(await status(acting), 200, "the acting token must work before the sign-out");
+    assert.equal(await status(otherDevice), 200, "the other device's token must work before the sign-out");
+
+    const signedOut = await req<{ ok?: boolean }>("POST", "/auth/logout", {}, acting);
+    assert.equal(signedOut.status, 200, `logout failed: ${JSON.stringify(signedOut.body)}`);
+    assert.equal(signedOut.body.ok, true);
+
+    // THE DEFECT, ASSERTED — HALF-BUILT-MECHANISMS F5. /auth/logout used to
+    // clear a cookie and revoke nothing, so a bearer client signed out by
+    // forgetting a credential that stayed live on the server for the rest of
+    // its TTL. This is the phone handed back to the hire company.
+    const afterSignOut = await req<{ code?: string }>("GET", "/auth/me", undefined, acting);
+    assert.equal(afterSignOut.status, 401, `the signed-out token still works: ${JSON.stringify(afterSignOut.body)}`);
+    assert.equal(
+      afterSignOut.body.code,
+      "session_expired",
+      "a signed-out token must be indistinguishable from an expired one"
+    );
+
+    // THE SCOPE, ASSERTED RATHER THAN DOCUMENTED. The only revocation mechanism
+    // this product has is per ACCOUNT, so signing out here signs out the other
+    // device too. That is wider than the button's label implies and both
+    // clients say so before they do it; this line is what makes that claim
+    // checkable, and what fails if a later change narrows the scope without
+    // updating the copy.
+    assert.equal(await status(otherDevice), 401, "sign-out must end every session on the account");
+
+    // AND IT CANNOT BE UNDONE BY A REFRESH. /auth/refresh is deliberately not
+    // behind requireAuth (AUDIT L74), so it carries its own generation check;
+    // if that ever stops, a sign-out is one round trip from a live credential.
+    const resurrect = await req<{ code?: string }>("POST", "/auth/refresh", {}, acting);
+    assert.equal(resurrect.status, 401, `a signed-out token refreshed itself: ${JSON.stringify(resurrect.body)}`);
+
+    // POSITIVE CONTROL, SAME ROUTE: the account is signed out, not locked out.
+    assert.equal(await status(await login(email)), 200, "signing in again must work after a sign-out");
+
+    // AND THE COLUMN ACTUALLY MOVED. The reason this half is the authoritative
+    // one: a logout that answered 401 from the identity cache while writing
+    // nothing to the row would satisfy every assertion above and lose the
+    // revocation on the next deploy.
+    const row = await pool.query<{ token_generation: number }>(
+      `SELECT token_generation FROM auth_users WHERE email = $1`, [email]
+    );
+    assert.equal(row.rowCount, 1, "the account row disappeared");
+    assert.equal(row.rows[0].token_generation, 1, "logout must increment auth_users.token_generation");
+  });
+
+  test("signing out works over the cookie transport, and never fails without a credential", async () => {
+    const email = emailFor("logout-cookie");
+    await seedUser(email, "Session Owner", "admin", "owner");
+
+    // The portal's journey: a cookie, no Authorization header anywhere.
+    const signedIn = await req<{ token?: string }>("POST", "/auth/login", { email, password: PASSWORD });
+    assert.equal(signedIn.status, 200, `login failed: ${JSON.stringify(signedIn.body)}`);
+    const cookie = signedIn.setCookie
+      .find((c) => c.startsWith(`${SESSION_COOKIE}=`))
+      ?.split(";")[0];
+    assert.ok(cookie, `login sent no ${SESSION_COOKIE} cookie, so the portal never receives a credential`);
+
+    const control = await req("GET", "/auth/me", undefined, undefined, cookie);
+    assert.equal(control.status, 200, "control: the session cookie must work before the sign-out");
+
+    const signedOut = await req<{ ok?: boolean }>("POST", "/auth/logout", {}, undefined, cookie);
+    assert.equal(signedOut.status, 200, `logout over the cookie transport failed: ${JSON.stringify(signedOut.body)}`);
+
+    // The cookie is dead on the server, which is the half a Set-Cookie header
+    // cannot prove: a browser that ignored the instruction, or any other copy
+    // of that cookie, is refused too.
+    const afterSignOut = await req("GET", "/auth/me", undefined, undefined, cookie);
+    assert.equal(afterSignOut.status, 401, "the signed-out cookie must stop working server-side");
+
+    const row = await pool.query<{ token_generation: number }>(
+      `SELECT token_generation FROM auth_users WHERE email = $1`, [email]
+    );
+    assert.equal(row.rows[0].token_generation, 1, "a cookie logout must increment token_generation too");
+
+    // IT NEVER FAILS. A logout with no credential is not an error — it is the
+    // state the caller is asking for. `requireAuth` here would 401 a dead
+    // cookie and leave it in the browser, the opposite of signing out.
+    const bare = await req<{ ok?: boolean }>("POST", "/auth/logout", {});
+    assert.equal(bare.status, 200, `logout without a credential answered ${bare.status}`);
+    assert.equal(bare.body.ok, true);
   });
 
   test("revocation reaches /auth/refresh, the one route that could have exempted itself", async () => {

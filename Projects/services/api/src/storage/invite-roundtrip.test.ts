@@ -36,38 +36,13 @@ import { withTenant } from "./tenant";
 import { createSiteInvites, acceptSiteInvite, isAcceptInviteSuccess, initProjectSchema } from "./projectsStore";
 import type { Actor } from "./actor";
 import { soloCompanyIdForEmail } from "../utils/authToken";
+import { applyMigrations, MIGRATIONS_DIR } from "./testMigrations";
 
 if (!process.env.TEST_DATABASE_URL) {
   test("invite round-trip (skipped: set TEST_DATABASE_URL)", { skip: true }, () => {});
 } else {
-  const MIGRATIONS_DIR = path.join(process.cwd(), "src", "storage", "migrations");
   const M031 = path.join(MIGRATIONS_DIR, "031_normalise_invite_emails.sql");
 
-  const applyMigrations = async (pool: Pool): Promise<void> => {
-    await pool.query(
-      `CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`
-    );
-    const done = new Set(
-      (await pool.query<{ version: string }>(`SELECT version FROM schema_migrations`)).rows.map((r) => r.version)
-    );
-    for (const file of (await fs.readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith(".sql")).sort()) {
-      const version = file.replace(/\.sql$/, "");
-      if (done.has(version)) continue;
-      const sql = await fs.readFile(path.join(MIGRATIONS_DIR, file), "utf8");
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-        await client.query(sql);
-        await client.query(`INSERT INTO schema_migrations (version) VALUES ($1)`, [version]);
-        await client.query("COMMIT");
-      } catch (e) {
-        await client.query("ROLLBACK");
-        throw new Error(`migration ${file} failed: ${(e as Error).message}`);
-      } finally {
-        client.release();
-      }
-    }
-  };
 
   const runId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const CO_A = `inv-co-a-${runId}`;

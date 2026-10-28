@@ -2,7 +2,6 @@ import { NextFunction, Request, RequestHandler, Response } from "express";
 import {
   AuthClaims,
   CompanyRole,
-  UserRole,
   createAuthToken,
   getSessionTimings,
   verifyAuthToken,
@@ -336,23 +335,5 @@ export function requireCompanyRole(...allowed: CompanyRole[]): RequestHandler {
       return res.status(403).json({ error: "Insufficient permissions." });
     }
     next();
-  };
-}
-
-/**
- * @deprecated Legacy role gate keyed on the pre-company `role` claim. Kept for
- * any route not yet migrated to company roles. New routes should use
- * requireAtLeast / requireCompanyRole instead.
- */
-export function requireRole(...roles: UserRole[]) {
-  return (req: Request, res: Response, next: NextFunction) => {
-    const auth = (req as AuthenticatedRequest).auth;
-    if (!auth) {
-      return res.status(401).json({ error: "Authentication required.", code: AUTH_ERROR_CODES.NO_CREDENTIAL });
-    }
-    if (!roles.includes(auth.role)) {
-      return res.status(403).json({ error: "Insufficient permissions." });
-    }
-    return next();
   };
 }

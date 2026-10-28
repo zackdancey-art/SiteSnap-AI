@@ -1,10 +1,10 @@
 import { Router } from "express";
 import { asyncSafeRouter } from "../middleware/asyncRouter";
 import { z } from "zod";
-import { FIELD_ACCESS, AuthenticatedRequest } from "../middleware/auth";
+import { FIELD_ACCESS, AuthenticatedRequest, requireAtLeast } from "../middleware/auth";
 import { requireOwnRecord } from "../middleware/recordOwnership";
 import {
-  listTemplates, createTemplate, deleteTemplate,
+  listTemplates, createTemplate, deleteTemplate, inspectionTemplateExists,
   listInspections, createInspection, updateInspection, deleteInspection, getInspection,
 } from "../storage/inspectionStore";
 import {
@@ -152,10 +152,25 @@ inspectionsRouter.post("/inspections", async (req, res) => {
     if (!parsed.success) {
       return res.status(400).json({ error: "Invalid inspection payload.", details: parsed.error.flatten() });
     }
-    const inspection = await createInspection(getActor(req), {
-      ...parsed.data,
-      templateId: parsed.data.templateId ?? null,
-    });
+    // `inspections.template_id` is a foreign key into `inspection_templates`
+    // (migration 009), and this route used to store whatever it was handed. An
+    // id that is not a row there is a constraint violation — a 500 against
+    // Postgres and a 201 against the in-memory store, which has no constraints,
+    // so the only environment that reports it is the one nobody runs locally.
+    //
+    // It became reachable when the mobile picker gained the built-in WHS
+    // checklists, which are compiled into this service and are rows in no
+    // table. The client converts a built-in selection to null before sending
+    // (apps/mobile/lib/whs-checklists.ts, templateIdForCreate); this is the
+    // half that does not depend on the client getting it right.
+    const templateId = parsed.data.templateId ?? null;
+    if (templateId && !(await inspectionTemplateExists(getActor(req), templateId))) {
+      return res.status(400).json({
+        error: "That inspection template no longer exists. Choose another, or create the inspection without one.",
+        code: "unknown_inspection_template",
+      });
+    }
+    const inspection = await createInspection(getActor(req), { ...parsed.data, templateId });
     return res.status(201).json({ inspection });
   } catch (err) {
     console.error("[inspections] create failed", err);
@@ -227,7 +242,27 @@ inspectionsRouter.get("/inspections/:id/signatures", async (req, res) => {
   }
 });
 
-inspectionsRouter.post("/inspections/:id/signatures/:sigId/void", async (req, res) => {
+/**
+ * Voiding a signature is manager+. AUDIT L91, the owner's decision.
+ *
+ * Everything else on this router is identity-only on purpose (FIELD_ACCESS
+ * above): capturing an inspection, signing one, listing signatures -- that is
+ * field work and rank has no business in it. Voiding is the one operation here
+ * that destroys evidence rather than recording it. A signature is the claim
+ * that a named person inspected a thing on a date; voiding it retracts that
+ * claim on a document retained for seven years, and until this line existed any
+ * crew member with a login could retract any signature on any inspection in
+ * their company.
+ *
+ * It is a route-level gate rather than a field-level one, unlike the diary
+ * status gate (AUDIT L81), because there is no benign version of this request:
+ * the route does exactly one thing, and that thing is the restricted thing.
+ *
+ * The record survives either way -- voidSignature sets voided_at and
+ * voided_reason, it does not delete the row -- so this gate decides who may
+ * retract, not whether the retraction is auditable.
+ */
+inspectionsRouter.post("/inspections/:id/signatures/:sigId/void", requireAtLeast("manager"), async (req, res) => {
   try {
     const parsed = SignatureVoidSchema.safeParse(req.body ?? {});
     if (!parsed.success) {

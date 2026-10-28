@@ -30,8 +30,25 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
-EXPECTED_TEST_FILES=15
-EXPECTED_TESTS=113
+# 26, MEASURED on the tree this branch merges into -- main plus the PRs
+# ahead of it in the merge order -- not on this branch alone. The number is
+# POSITION-DEPENDENT: 15 on main, +1 clients, +1 whs, +2 storage-ceiling, +1
+# report-periods, +1 photo-viewer, +1 bin-retention, +2 consent-and-native,
+# +2 here = 26. FINAL value: the one PR after this adds a test but no test
+# FILE. Every count and every position: docs/NINE-WORKSTREAMS-HANDOVER.md.
+EXPECTED_TEST_FILES=26
+# 207, MEASURED on the tree this branch merges into -- main plus the ten PRs
+# ahead of it -- not on this branch alone, where the count is 114. The
+# number is POSITION-DEPENDENT: this branch is ELEVENTH AND LAST in the
+# merge order, so 207 is the final union total and this is the branch that
+# carries it. Of the 94 tests the batch adds, 93 come from the ten PRs ahead
+# and 1 from here (lib/permissions.test.ts gained the canVoidSignature test,
+# AUDIT L91, which is why this branch read 114 against main's 113).
+# EXPECTED_TEST_FILES is deliberately LEFT AT 15: this branch adds no test
+# FILE, so the line is left untouched to inherit 26 from
+# feat/branding-and-dashboard-parity (PR 10) with no conflict. Every count
+# and every position: docs/NINE-WORKSTREAMS-HANDOVER.md.
+EXPECTED_TESTS=207
 
 FILE_LIST=$(find dist-test -name '*.test.js' | sort)
 

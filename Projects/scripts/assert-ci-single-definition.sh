@@ -82,5 +82,89 @@ case "$CI_SCRIPT" in
     ;;
 esac
 
+# 5. No OTHER root workflow may run a gate either.
+#
+#    Checks 1-4 all read `ci.yml` or `package.json`, and that is how the gate
+#    acquired a third definition without this script noticing: `deploy-api.yml`
+#    ran its own Typecheck and Tests steps on every push to `main` that touched
+#    the API, under a name that promised a deploy it did not perform -- every
+#    deploy step in it was commented out. A duplicate definition of the gate,
+#    wearing the name of something else.
+#
+#    CORRECTION, and it is recorded rather than quietly fixed because the wrong
+#    version of it was committed here first. An earlier draft of this comment
+#    said those two steps were WORSE than duplicated -- that they were vacuous,
+#    because `pnpm --filter ./services/api` resolves a bare relative path to
+#    nothing and exits 0, so the checks ran nothing at all. That is wrong, and
+#    the demonstration that appeared to prove it was the mistake:
+#
+#      $ pnpm -C Projects --filter ./services/api exec node -e 'console.log(1)'
+#      No projects matched the filters in ".../Projects"
+#      $ echo $?
+#      0
+#
+#    `--filter` with a path resolves against process.cwd(), and `-C` sets the
+#    DIRECTORY PNPM OPERATES ON without moving cwd -- so that invocation, run
+#    from the repo root, matches nothing. The workflow did not run it that way.
+#    It set `defaults: run: working-directory: Projects`, which puts cwd inside
+#    the workspace, and there the same filter resolves and the step does real
+#    work. Verified both ways. So the steps ran: they were duplicated, which is
+#    what this check is about, and not vacuous. Nothing was unverified.
+#
+#    The true hazard the failed demonstration found is worth keeping, because it
+#    is not this workflow's: `pnpm --filter <relative path>` EXITS 0 when it
+#    matches nothing. Any step of this kind is one `working-directory` edit away
+#    from passing while running nothing, and pnpm will not say so.
+#
+#    That workflow is deleted here. This check is what stops the next one,
+#    because the lesson of checks 2 and 3 is that fixing the instance leaves
+#    the class.
+#
+#    build-mobile.yml is exempt and named here rather than pattern-matched. It
+#    runs `pnpm run typecheck` before a release build, which is a duplicate
+#    definition by this script's own standard, but it is also the last gate
+#    before a store submission and consolidating it belongs with the owner's
+#    pending decision on that workflow's release trigger (HALF-BUILT F11). An
+#    exemption with a reason and an expiry beats a check nobody can keep green.
+#
+#    api-post-merge-checks.yml is exempt for the same reason and on the same
+#    terms. It runs `pnpm --filter ./services/api run typecheck` and `... run
+#    test` after a merge to main, which IS a second definition of the gate by
+#    this script's standard. It is exempt rather than deleted because, unlike
+#    the workflow named above, it actually runs: it sets
+#    `defaults.run.working-directory: Projects`, so its relative-path filters
+#    resolve and its steps do real work. Whether a post-merge re-run of the gate
+#    is worth keeping now that `main` requires `validate` to pass pre-merge is
+#    the owner's decision, pending alongside build-mobile.yml's.
+#
+#    That file does not exist on this branch -- it arrives with workstream 0.
+#    The exemption is listed here anyway and is harmless if it never does: the
+#    loop below iterates workflow files that EXIST and skips by basename, so an
+#    exemption naming an absent file matches nothing. Naming it here is what
+#    stops this check going red at the merge that brings the two together.
+EXEMPT_GATE_WORKFLOWS="build-mobile.yml api-post-merge-checks.yml"
+WORKFLOW_DIR="../.github/workflows"
+for wf in "$WORKFLOW_DIR"/*.yml "$WORKFLOW_DIR"/*.yaml; do
+  [ -f "$wf" ] || continue
+  base=$(basename "$wf")
+  [ "$base" = "ci.yml" ] && continue
+  case " $EXEMPT_GATE_WORKFLOWS " in *" $base "*) continue ;; esac
+  OTHER=$(grep -nE '^[[:space:]]*run:.*pnpm' "$wf" \
+          | grep -vE 'pnpm install' \
+          | grep -vE 'pnpm store path' \
+          || true)
+  if [ -n "$OTHER" ]; then
+    echo "FAIL: $base runs pnpm gate steps of its own:" >&2
+    echo "$OTHER" | sed 's/^/    /' >&2
+    echo "" >&2
+    echo "  Every gate step lives in scripts/ci.sh. A workflow that runs its own" >&2
+    echo "  copy is a second definition that drifts silently -- and if it uses a" >&2
+    echo "  --filter that matches nothing, it reports green having run nothing." >&2
+    echo "  Call ./scripts/ci.sh, or add this file to EXEMPT_GATE_WORKFLOWS with" >&2
+    echo "  a reason." >&2
+    FAIL=1
+  fi
+done
+
 [ "$FAIL" = "0" ] || exit 1
 echo "assert-ci-single-definition: ci.yml and package.json both delegate to scripts/ci.sh"

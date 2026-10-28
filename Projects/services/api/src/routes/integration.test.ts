@@ -123,14 +123,47 @@ test("register → verify → login flow", async () => {
   assert.ok(loginRes.body.token);
 });
 
-test("login with wrong password returns 401", async () => {
-  const { status, body } = await req<{ error: string }>(
-    "POST",
-    "/auth/login",
-    { email: "nobody@example.com", password: "wrongpassword" }
+test("an unknown account and a wrong password are answered identically, and a right one still works", async () => {
+  /**
+   * AUDIT L18, and a correction.
+   *
+   * This test was named "login with wrong password returns 401" and asserted
+   * 404 against an email that had never been registered. So it tested neither
+   * thing in its name: not the wrong-password path, and not a 401. What it
+   * actually pinned was the user-enumeration oracle itself -- the 404 that told
+   * an unauthenticated caller "no such account" -- which is why L18 could sit
+   * open under a green suite that looked like it covered login failure.
+   *
+   * It now asserts the property the route is supposed to have. The equivalence
+   * is checked field by field rather than on the status alone, because a
+   * distinguishing `error` string or `code` leaks exactly as much as a
+   * distinguishing status.
+   */
+  await createWorkerToken();
+
+  const wrongPassword = await req<{ error?: string; code?: string }>(
+    "POST", "/auth/login", { email: "worker@example.com", password: "not-the-password" }
   );
-  assert.equal(status, 404);
-  assert.ok((body as { error: string }).error);
+  const noSuchAccount = await req<{ error?: string; code?: string }>(
+    "POST", "/auth/login", { email: "nobody@example.com", password: "not-the-password" }
+  );
+
+  assert.equal(wrongPassword.status, 401, `a wrong password did not answer 401: ${JSON.stringify(wrongPassword.body)}`);
+  assert.equal(noSuchAccount.status, 401, `an unknown account did not answer 401: ${JSON.stringify(noSuchAccount.body)}`);
+  assert.deepEqual(
+    noSuchAccount.body, wrongPassword.body,
+    "the two failures are distinguishable by their bodies, which is the same oracle in a different field"
+  );
+  assert.ok(wrongPassword.body.error, "the refusal carries no message at all");
+
+  // The control. Both assertions above pass equally well against a login route
+  // that refuses everybody -- which would be a worse bug than the oracle, and
+  // is one line away from the change that closed it.
+  const correct = await req<{ ok?: boolean; token?: string }>(
+    "POST", "/auth/login", { email: "worker@example.com", password: "password123" }
+  );
+  assert.equal(correct.status, 200, `the right password was refused: ${JSON.stringify(correct.body)}`);
+  assert.ok(correct.body.token, "a successful login returned no token");
 });
 
 test("auth/me requires valid token", async () => {
@@ -246,6 +279,64 @@ test("delete site removes associated entries", async () => {
 
   const entries = await req<{ entries: unknown[] }>("GET", `/projects/entries?siteId=${siteId}`, undefined, token);
   assert.equal(entries.body.entries.length, 0);
+});
+
+/**
+ * A binned site refuses a NEW entry, rather than accepting it and hiding it.
+ *
+ * The test above is the read half: binning a site takes its entries out of the
+ * listing. This is the write half, and it was the defect. `createEntry` had no
+ * liveness check, so a POST against a binned site inserted the row and answered
+ * 201 — and because `listEntries` filters on site liveness, the row was never
+ * readable again. The caller was told the entry was saved and it was gone.
+ *
+ * That is reached in practice by an offline replay: the field app queues entries
+ * while out of signal, the site is binned meanwhile, and the queue drains on
+ * reconnect. Each 201 clears one entry from the queue as delivered. In a site
+ * diary a visible failure beats a silent success, so the route answers 404 and
+ * the entry stays in the queue with somebody told about it.
+ *
+ * The authoritative version of this is `routes/site-bin-db.test.ts`, against
+ * Postgres, where it also asserts the row is absent from `project_entries`
+ * rather than merely absent from the listing. This copy exists because the
+ * guard has two implementations — `createEntry`'s in-memory branch and its SQL
+ * branch — and the two store paths disagreeing is this repo's most repeated
+ * defect. Both controls are on the same endpoint in the same test.
+ */
+test("a binned site refuses a new entry, and a live one accepts it", async () => {
+  const token = await createWorkerToken();
+
+  const site = await req<{ site: { id: string } }>(
+    "POST",
+    "/projects/sites",
+    { name: "Bin Guard", address: "1 Rd", client: "C", startDate: "2025-01-01", status: "active" },
+    token
+  );
+  const siteId = site.body.site.id;
+
+  // POSITIVE CONTROL, same endpoint, same test: the site is live and the entry
+  // is accepted. Without this, deleting the route outright would pass below.
+  const live = await req<{ entry: { id: string } }>(
+    "POST", "/projects/entries", { siteId, date: "2025-01-01", notes: "while live", photos: [] }, token
+  );
+  assert.equal(live.status, 201, `a live site must accept an entry: ${JSON.stringify(live.body)}`);
+
+  const del = await req<{ ok: boolean }>("DELETE", `/projects/sites/${siteId}`, undefined, token);
+  assert.equal(del.status, 200, "the site must actually reach the bin for the refusal to mean anything");
+
+  const binned = await req<{ error: string }>(
+    "POST", "/projects/entries", { siteId, date: "2025-01-01", notes: "while binned", photos: [] }, token
+  );
+  assert.equal(binned.status, 404, "a binned site must refuse a new entry rather than hide it");
+
+  // And the refusal lifts on restore, so "404" cannot mean the route is simply
+  // broken for this site for ever.
+  const restored = await req<{ ok: boolean }>("POST", `/projects/sites/${siteId}/restore`, undefined, token);
+  assert.equal(restored.status, 200, `restore failed: ${JSON.stringify(restored.body)}`);
+  const after = await req<{ entry: { id: string } }>(
+    "POST", "/projects/entries", { siteId, date: "2025-01-01", notes: "after restore", photos: [] }, token
+  );
+  assert.equal(after.status, 201, "a restored site must accept entries again");
 });
 
 test("pagination limit and offset work", async () => {

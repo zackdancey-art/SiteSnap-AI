@@ -3,20 +3,26 @@
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
-import { logout } from "@/lib/api";
+import { logout, SIGN_OUT_SCOPE_NOTICE } from "@/lib/api";
 import { useRole } from "@/lib/useRole";
 
 /**
- * `hiddenFromCrew` marks a destination a crew member must not be offered.
+ * Two flags, because the two hidden destinations are no longer hidden from the
+ * same people.
  *
- * Two of them: the supervisor dashboard, and Team. Both are crew-specific —
- * a viewer keeps each, because the API routes behind them (GET
- * /projects/reports/supervisor and GET /company/profile) are both viewer+ —
- * which is why the flag is named for the role rather than `managerOnly`, which
- * is what it was called when it meant the dashboard alone and was already
- * inaccurate then.
+ * `hiddenFromCrew` — Team. Crew-specific: a viewer keeps it, because the route
+ * behind it (GET /company/profile) is viewer+, which is why the flag is named
+ * for the role rather than `managerOnly`.
  *
- * It is a field on the item rather than a filter written at the call site so
+ * `managerOnly` — the supervisor dashboard. It used to carry `hiddenFromCrew`
+ * too, on the same reasoning: the route its figures come from
+ * (GET /projects/summary) is viewer+ as well. The dashboard is now a manager+ SCREEN on both surfaces, by
+ * decision, and this flag follows that rather than the route's rank — so the
+ * two names disagree on purpose and each says which thing it mirrors. Without
+ * this, a viewer would keep a sidebar link to a screen that now refuses them,
+ * which is worse than either answer.
+ *
+ * Both are fields on the item rather than a filter written at the call site so
  * that the next entry added has to state which it is, instead of defaulting to
  * visible by omission.
  *
@@ -26,8 +32,15 @@ import { useRole } from "@/lib/useRole";
  * section would be the same overreach in the other direction (AUDIT L79).
  */
 const NAV = [
-  { href: "/dashboard", label: "Dashboard", icon: GridIcon, hiddenFromCrew: true },
+  { href: "/dashboard", label: "Dashboard", icon: GridIcon, managerOnly: true },
   { href: "/sites",     label: "Sites",     icon: BuildingIcon },
+  // Visible to crew, stated rather than omitted. GET /clients is behind
+  // identity and not rank, because the grouped sites list takes its headings
+  // from it; what crew do not get on that page is the add, edit and delete
+  // controls, which `canManageClients` draws and the API enforces at
+  // manager+. Hiding the whole page to withhold three buttons is the
+  // overreach AUDIT L79 was about.
+  { href: "/clients",   label: "Clients",   icon: BriefcaseIcon, hiddenFromCrew: false },
   { href: "/locations", label: "Live Map",  icon: MapPinIcon },
   { href: "/reports",   label: "Reports",   icon: ReportIcon },
   { href: "/activity",  label: "Activity",  icon: ActivityIcon },
@@ -38,15 +51,20 @@ const NAV = [
 export default function Sidebar({ userName }: { userName: string }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { isCrew } = useRole();
+  const { isCrew, canSeeSupervisorDashboard } = useRole();
   // Not rendered rather than rendered-and-disabled: a greyed-out link still
   // names a screen and still carries its href. Hiding it is not the permission
   // either — each page refuses its own URL (app/dashboard/page.tsx,
   // app/team/page.tsx) and the API refuses the route — this is only about not
   // offering somebody a door they cannot open.
-  const nav = NAV.filter((item) => !item.hiddenFromCrew || !isCrew);
+  const nav = NAV.filter((item) => {
+    if (item.hiddenFromCrew && isCrew) return false;
+    if (item.managerOnly && !canSeeSupervisorDashboard) return false;
+    return true;
+  });
 
   const handleLogout = async () => {
+    if (!confirm(SIGN_OUT_SCOPE_NOTICE)) return;
     await logout();
     router.replace("/");
   };
@@ -97,6 +115,14 @@ function MapPinIcon() {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
       <circle cx="12" cy="10" r="3"/>
+    </svg>
+  );
+}
+
+function BriefcaseIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>
     </svg>
   );
 }

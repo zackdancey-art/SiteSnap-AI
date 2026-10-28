@@ -29,6 +29,10 @@
  *    not need replacing.
  *  - The session model: the token proves who you are, the record decides what
  *    you may do (see THE SESSION MODEL in storage/authStore.ts).
+ *  - L104: five routes mint a replacement credential into a `Set-Cookie` and
+ *    four of them had no assertion of any kind on that header, so the portal's
+ *    only way of receiving the credential could have been deleted route by
+ *    route with the suite still green.
  *
  * EVERY TEST CARRIES BOTH CONTROLS, in the same test, on the same route. A
  * refusal test alone passes just as well when the route has been deleted, and
@@ -73,8 +77,9 @@ const SECRET = process.env.AUTH_TOKEN_SECRET || "dev-sitesnap-secret";
  * asserted. Five routes write a `Set-Cookie` — login, refresh, change-password,
  * revoke-all and `/projects/invites/accept` — and before this there was not one
  * `set-cookie` assertion in the suite, so every one of them could have been
- * deleted with the whole suite still green. AUDIT L104 is the standing record of
- * which four are still in that state.
+ * deleted with the whole suite still green. AUDIT L104 is the standing record;
+ * all five are now asserted, change-password below and the other four in the
+ * L104 block at the end of this file.
  *
  * `cookie` is the portal's transport. A test that drives these routes with an
  * `Authorization` header is testing the mobile client's path; the portal's
@@ -236,6 +241,78 @@ test("revoke-all ends another device's session, and the acting device keeps work
   // POSITIVE CONTROL, SAME ROUTE. Without it every assertion above passes
   // against an /auth/me that now refuses everybody.
   assert.equal(await status(replacement), 200, "the replacement credential must work");
+});
+
+test("signing out ends the session on the server, not just on the device", async () => {
+  await seedOwner();
+  const acting = await login();
+  const otherDevice = signClaims({ email: OWNER });
+
+  // CONTROL, BEFORE THE SIGN-OUT, on the route the 401s below are read from.
+  // Without it a refusal is satisfied just as well by an /auth/me that has
+  // started refusing everybody.
+  assert.equal(await status(acting), 200, "the acting token must work before the sign-out");
+  assert.equal(await status(otherDevice), 200, "the other device's token must work before the sign-out");
+
+  const signedOut = await req<{ ok?: boolean }>("POST", "/auth/logout", {}, acting);
+  assert.equal(signedOut.status, 200, `logout failed: ${JSON.stringify(signedOut.body)}`);
+  assert.equal(signedOut.body.ok, true);
+
+  // THE DEFECT, ASSERTED — HALF-BUILT-MECHANISMS F5. /auth/logout used to clear
+  // a cookie and revoke nothing, so a bearer client signed out by forgetting a
+  // credential that stayed live on the server for the rest of its TTL. This is
+  // the phone handed back to the hire company.
+  const afterSignOut = await req<{ code?: string }>("GET", "/auth/me", undefined, acting);
+  assert.equal(afterSignOut.status, 401, `the signed-out token still works: ${JSON.stringify(afterSignOut.body)}`);
+  assert.equal(afterSignOut.body.code, "session_expired", "a signed-out token must be indistinguishable from an expired one");
+
+  // THE SCOPE, ASSERTED RATHER THAN DOCUMENTED. The only revocation mechanism
+  // this product has is per ACCOUNT, so signing out here signs out the other
+  // device too. That is wider than the button's label implies and the clients
+  // say so before they do it; this line is what makes the claim checkable, and
+  // what will fail if a later change narrows the scope without updating them.
+  assert.equal(await status(otherDevice), 401, "sign-out must end every session on the account");
+
+  // AND IT CANNOT BE UNDONE BY A REFRESH. /auth/refresh is deliberately not
+  // behind requireAuth (AUDIT L74), so it carries its own generation check; if
+  // that ever stops, a sign-out is a round trip to a fresh credential.
+  const resurrect = await req<{ code?: string }>("POST", "/auth/refresh", {}, acting);
+  assert.equal(resurrect.status, 401, `a signed-out token refreshed itself: ${JSON.stringify(resurrect.body)}`);
+
+  // POSITIVE CONTROL, SAME ROUTE: the account is signed out, not locked out.
+  assert.equal(await status(await login()), 200, "signing in again must work after a sign-out");
+});
+
+test("signing out clears the portal's cookie, and answers 200 with no credential at all", async () => {
+  await seedOwner();
+
+  // The portal's journey: a cookie, no Authorization header anywhere.
+  const signedIn = await req<{ token?: string }>("POST", "/auth/login", { email: OWNER, password: PASSWORD });
+  assert.equal(signedIn.status, 200, `login failed: ${JSON.stringify(signedIn.body)}`);
+  const cookie = sessionCookieFrom(signedIn.headers, "login");
+  assert.equal(await cookieStatus(cookie), 200, "control: the session cookie works before the sign-out");
+
+  const signedOut = await req<{ ok?: boolean }>("POST", "/auth/logout", {}, undefined, cookie);
+  assert.equal(signedOut.status, 200, `logout over the cookie transport failed: ${JSON.stringify(signedOut.body)}`);
+
+  // The browser is told to drop it — asserted on the header rather than through
+  // sessionCookieFrom, because a cleared cookie and a minted one are the same
+  // shape to that helper and only the expiry tells them apart.
+  const cleared = (signedOut.headers["set-cookie"] ?? []).find((c) => c.startsWith(`${SESSION_COOKIE}=`));
+  assert.ok(cleared, `logout sent no ${SESSION_COOKIE} cookie, so a browser keeps the one it has`);
+  assert.match(cleared as string, /Expires=Thu, 01 Jan 1970/, `logout did not expire the cookie: ${cleared}`);
+
+  // ...and the cookie itself is dead on the server, which is the half that a
+  // Set-Cookie header cannot prove: a browser that ignored the instruction, or
+  // any other copy of that cookie, is refused too.
+  assert.equal(await cookieStatus(cookie), 401, "the signed-out cookie must stop working server-side");
+
+  // IT NEVER FAILS. A logout with no credential is not an error — it is the
+  // state the caller is asking for. `requireAuth` here would 401 a dead cookie
+  // and leave it in the browser, which is the opposite of signing out.
+  const bare = await req<{ ok?: boolean }>("POST", "/auth/logout", {});
+  assert.equal(bare.status, 200, `logout without a credential answered ${bare.status}`);
+  assert.equal(bare.body.ok, true);
 });
 
 test("revocation reaches /auth/refresh, the one route that could have exempted itself", async () => {
@@ -442,5 +519,212 @@ test("authority comes from the user row, so the token's claims can neither grant
   assert.ok(
     listed.body.members?.some((m) => m.email === CREW),
     `the company was taken from the claim, not the row: ${JSON.stringify(listed.body)}`
+  );
+});
+
+/* ─── L104: the cookie transport, on the four routes that write it uncovered ───
+ *
+ * Five routes call `setSessionCookie`. Before this block exactly one of them —
+ * change-password, above — had a `set-cookie` assertion anywhere in the suite,
+ * so the other four could each have had their `setSessionCookie(res, token)`
+ * line deleted with every test still green. AUDIT L104 is the standing record.
+ *
+ * The defect shape L104 names is specific: *a route hands back a replacement
+ * credential and one transport never picks it up*. It is invisible to a bearer
+ * test, because a bearer client reads the token out of the body and does not
+ * care what the headers said. The portal's cookie is httpOnly; it cannot read
+ * the body. So for the portal, "the replacement arrived" and "a Set-Cookie was
+ * sent" are the same sentence, and nothing below drives these routes with an
+ * Authorization header unless the test is specifically about what a bearer
+ * caller must NOT receive.
+ *
+ * Every test here probes with `cookieStatus`, which sends no Authorization
+ * header at all, and every one carries its positive control on that same
+ * endpoint — because `/auth/me` refusing every cookie it is ever sent would
+ * satisfy each of the 401s on its own.
+ */
+
+test("login sends a session cookie that authenticates on its own, and a forged one does not", async () => {
+  await seedOwner();
+
+  const signedIn = await req<{ token?: string }>("POST", "/auth/login", { email: OWNER, password: PASSWORD });
+  assert.equal(signedIn.status, 200, `login failed: ${JSON.stringify(signedIn.body)}`);
+  const cookie = sessionCookieFrom(signedIn.headers, "login");
+
+  // THE ASSERTION. No Authorization header is sent, so a 200 here can only have
+  // come from the cookie. This is the portal's entire sign-in: if login stopped
+  // setting the cookie, nobody could use the portal at all, and until now no
+  // test in this suite would have said so.
+  assert.equal(await cookieStatus(cookie), 200, "the cookie login minted must authenticate with no bearer token");
+
+  // POSITIVE CONTROL'S OTHER HALF, same endpoint: /auth/me is not simply
+  // accepting any cookie-shaped string. The payload is the real one and the
+  // signature is garbage, so this isolates verification rather than parsing.
+  const forged = `${SESSION_COOKIE}=${cookie.split("=")[1].split(".")[0]}.not-a-real-signature`;
+  assert.equal(await cookieStatus(forged), 401, "a cookie with a forged signature must be refused");
+});
+
+test("refresh renews the portal's cookie, which is the portal's only recovery from an expired session", async () => {
+  await seedOwner();
+  const { tokenTtlSeconds } = getSessionTimings();
+  const now = Math.floor(Date.now() / 1000);
+
+  // The exact state a portal tab is in after sitting open overnight: the cookie
+  // is still in the browser (its max age is 30 days) and the token inside it
+  // expired hours ago. Built with signClaims rather than by moving the clock,
+  // because this is the shape the browsers are actually holding.
+  const stale = `${SESSION_COOKIE}=${signClaims({
+    email: OWNER,
+    iat: now - tokenTtlSeconds - 60,
+    exp: now - 60,
+  })}`;
+
+  // Precondition, not decoration: if this were 200 the test below would prove
+  // nothing, because there would have been nothing to recover from.
+  assert.equal(await cookieStatus(stale), 401, "an expired cookie must be refused on an ordinary request");
+
+  // L74 plus L104 together. Refresh reads `readCredential`, which accepts the
+  // cookie as well as the bearer header — so this call is reachable at all —
+  // and then has to hand the replacement back over the SAME transport.
+  const refreshed = await req<{ token?: string }>("POST", "/auth/refresh", {}, undefined, stale);
+  assert.equal(refreshed.status, 200, `refresh refused the portal's expired cookie: ${JSON.stringify(refreshed.body)}`);
+
+  // THE ASSERTION THIS TEST EXISTS FOR. Without the Set-Cookie the portal's tab
+  // keeps the dead cookie, the next request 401s, and the user is bounced to
+  // the login screen by a route whose entire purpose was to prevent that. The
+  // 200 above would not have noticed.
+  const renewed = sessionCookieFrom(refreshed.headers, "refresh");
+  assert.notEqual(renewed, stale, "refresh echoed the expired cookie back instead of minting a replacement");
+  assert.equal(await cookieStatus(renewed), 200, "the renewed cookie must keep the portal signed in");
+});
+
+test("revoke-all signs the portal's other tabs out and replaces the acting cookie", async () => {
+  await seedOwner();
+
+  const signedIn = await req<{ token?: string }>("POST", "/auth/login", { email: OWNER, password: PASSWORD });
+  assert.equal(signedIn.status, 200, `login failed: ${JSON.stringify(signedIn.body)}`);
+  const acting = sessionCookieFrom(signedIn.headers, "login");
+  // Another browser, signed in earlier. signClaims rather than a second login
+  // so it cannot be byte-identical to `acting` — two logins in the same second
+  // mint the same claims, and then "the other one was revoked" and "the acting
+  // one was revoked" would be the same assertion wearing two names.
+  const otherBrowser = `${SESSION_COOKIE}=${signClaims({ email: OWNER })}`;
+
+  // BOTH CONTROLS, BEFORE. Either 401 below is satisfied by a cookie the server
+  // never accepted in the first place.
+  assert.equal(await cookieStatus(acting), 200, "control: the acting cookie works before the revocation");
+  assert.equal(await cookieStatus(otherBrowser), 200, "control: the other browser's cookie works before the revocation");
+
+  const revoked = await req<{ token?: string }>("POST", "/auth/revoke-all", {}, undefined, acting);
+  assert.equal(revoked.status, 200, `revoke-all over the cookie transport failed: ${JSON.stringify(revoked.body)}`);
+
+  // The sign-out half. This is what the button in the portal's settings page
+  // claims to do.
+  assert.equal(await cookieStatus(otherBrowser), 401, "revoke-all must sign the other browser out");
+  assert.equal(await cookieStatus(acting), 401, "revoke-all must revoke the cookie that pressed the button");
+
+  // THE L104 HALF, and the reason the two 401s above are not the whole test.
+  // "All" includes the acting credential, so without a Set-Cookie the portal
+  // signs the user out of their own session the moment they use this feature —
+  // the body token is no help, because an httpOnly cookie client cannot read
+  // it. This is also the positive control the two refusals need.
+  const replacement = sessionCookieFrom(revoked.headers, "revoke-all");
+  assert.notEqual(replacement, acting, "revoke-all returned the revoked cookie rather than a replacement");
+  assert.equal(await cookieStatus(replacement), 200, "the replacement cookie must keep the acting tab signed in");
+});
+
+test("accepting an invitation refreshes a cookie caller's credential and leaves a bearer caller's alone", async () => {
+  await seedOwner();
+  const ownerToken = await login();
+
+  const site = await req<{ site?: { id: string } }>(
+    "POST",
+    "/projects/sites",
+    { name: "Cookie Transport Site", address: "1 Main St", client: "ACME", startDate: "2025-01-01", status: "active" },
+    ownerToken
+  );
+  assert.equal(site.status, 201, `site creation failed: ${JSON.stringify(site.body)}`);
+  const siteId = site.body.site?.id as string;
+
+  const COOKIE_INVITEE = "sessions-cookie-invitee@example.test";
+  const BEARER_INVITEE = "sessions-bearer-invitee@example.test";
+  const invited = await req<{ results?: { email: string; status: string }[] }>(
+    "POST",
+    `/projects/sites/${siteId}/invites`,
+    { emails: [COOKIE_INVITEE, BEARER_INVITEE], role: "crew" },
+    ownerToken
+  );
+  assert.equal(invited.status, 201, `invite creation failed: ${JSON.stringify(invited.body)}`);
+  assert.deepEqual(
+    invited.body.results?.map((r) => r.status),
+    ["sent", "sent"],
+    `both invitations must have been sent: ${JSON.stringify(invited.body)}`
+  );
+
+  // The accept tokens come from the LIST route, not from the create response:
+  // the create response reports delivery status and deliberately does not echo
+  // the credential it minted. Read here rather than hand-made because an invite
+  // token this test invented would prove nothing about the one a real invitee
+  // receives.
+  const listed = await req<{ invites?: { invitedEmail: string; token?: string }[] }>(
+    "GET",
+    `/projects/sites/${siteId}/invites`,
+    undefined,
+    ownerToken
+  );
+  assert.equal(listed.status, 200, `listing invites failed: ${JSON.stringify(listed.body)}`);
+  const inviteTokenFor = (email: string): string => {
+    const hit = listed.body.invites?.find((i) => i.invitedEmail === email);
+    assert.ok(hit?.token, `no invite token was minted for ${email}: ${JSON.stringify(listed.body)}`);
+    return hit.token as string;
+  };
+
+  const hash = await hashPassword(PASSWORD);
+  await createUser(COOKIE_INVITEE, hash, nextPhone(), "Cookie Invitee", "worker", COMPANY, "crew");
+  await createUser(BEARER_INVITEE, hash, nextPhone(), "Bearer Invitee", "worker", COMPANY, "crew");
+
+  // (1) THE PORTAL'S JOURNEY. Signed in by cookie, accepting by cookie.
+  const portalSignIn = await req<{ token?: string }>("POST", "/auth/login", { email: COOKIE_INVITEE, password: PASSWORD });
+  assert.equal(portalSignIn.status, 200, `invitee login failed: ${JSON.stringify(portalSignIn.body)}`);
+  const inviteeCookie = sessionCookieFrom(portalSignIn.headers, "login");
+
+  const cookieAccept = await req<{ siteId?: string }>(
+    "POST",
+    "/projects/invites/accept",
+    { token: inviteTokenFor(COOKIE_INVITEE) },
+    undefined,
+    inviteeCookie
+  );
+  assert.equal(cookieAccept.status, 200, `accept over the cookie transport failed: ${JSON.stringify(cookieAccept.body)}`);
+  assert.equal(cookieAccept.body.siteId, siteId, "accept attached the invitee to a different site");
+
+  const refreshedCookie = sessionCookieFrom(cookieAccept.headers, "invites/accept");
+  assert.equal(
+    await cookieStatus(refreshedCookie),
+    200,
+    "the cookie accept handed back must keep the invitee signed in"
+  );
+
+  // (2) THE BEARER CALLER, on the same route, in the same test. The route sets
+  // the cookie only for `authTransport === "cookie"`, deliberately: a device
+  // holding both a body token and a cookie holds two credentials at two
+  // generations. So this is a negative assertion with its positive control
+  // sitting directly above it — delete the transport check and (1) still
+  // passes while this fails, which is the only arrangement that can tell the
+  // difference between "sets it for the portal" and "sets it for everyone".
+  const bearerSignIn = await req<{ token?: string }>("POST", "/auth/login", { email: BEARER_INVITEE, password: PASSWORD });
+  assert.equal(bearerSignIn.status, 200, `invitee login failed: ${JSON.stringify(bearerSignIn.body)}`);
+  const bearerAccept = await req<{ token?: string }>(
+    "POST",
+    "/projects/invites/accept",
+    { token: inviteTokenFor(BEARER_INVITEE) },
+    bearerSignIn.body.token as string
+  );
+  assert.equal(bearerAccept.status, 200, `accept over the bearer transport failed: ${JSON.stringify(bearerAccept.body)}`);
+  assert.ok(bearerAccept.body.token, "accept must still hand a bearer caller its replacement in the body");
+  const sent = bearerAccept.headers["set-cookie"] ?? [];
+  assert.ok(
+    !sent.some((c) => c.startsWith(`${SESSION_COOKIE}=`)),
+    `accept set a session cookie for a bearer caller, leaving the device holding two credentials: ${JSON.stringify(sent)}`
   );
 });
