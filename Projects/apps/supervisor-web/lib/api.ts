@@ -19,7 +19,55 @@ export type Site = {
   status: string;
   startDate?: string;
 };
-export type EntryPhoto = { uri: string; caption?: string };
+/**
+ * One photograph on a diary entry, as the API already sends it.
+ *
+ * NO endpoint changed to provide any of this. `project_entries.photos_json` is
+ * JSONB and the store treats it as opaque — `photos: Array<Record<string,
+ * unknown>>` at `services/api/src/storage/projectsStore.ts:49`, written with
+ * `JSON.stringify(entry.photos)` at `:533` and read straight back out as
+ * `photos: row.photos_json` at `:319`. There is no validation, no allowlist and
+ * no stripping anywhere on that path, so every field the mobile client writes
+ * onto a photograph arrives here intact. This type was simply narrower than the
+ * payload, so the fields arrived and were discarded unread.
+ *
+ * Every field below is optional, and that is a statement about the data rather
+ * than about the server: the writer is a client, older rows predate most of
+ * these keys, and an entry queued offline can reach the server before some of
+ * them are known. Absence is therefore a real state that the rules in
+ * `photo-capture-time.ts` and `photo-provenance.ts` are built to report
+ * honestly, not a gap to fill in with a plausible stand-in.
+ *
+ * Fields mobile also stores and this deliberately omits: `base64`, `mimeType`,
+ * `storagePath`, `storageKey` and `annotationVector`. The portal has no use for
+ * any of them — it signs by `uri` and does not re-render strokes — and a type
+ * that claims a field nothing reads is an invitation to render it.
+ */
+export type EntryPhoto = {
+  uri: string;
+  caption?: string;
+  /**
+   * The photograph's own identity, which `derivedFromId` points at. Optional
+   * because a row written before ids were assigned has none; a viewer that
+   * needs an identity falls back to `uri`, which is already this surface's key
+   * for a photograph.
+   */
+  id?: string;
+  /** When the RECORD was created. Not when the photograph was taken. */
+  timestamp?: string;
+  /** When the photograph was taken, if that was ever established. */
+  capturedAt?: string;
+  /** How `capturedAt` was established. Without this, `capturedAt` is not a capture time. */
+  captureTimeSource?: "camera" | "exif" | "unknown";
+  latitude?: number;
+  longitude?: number;
+  /** `annotated` means this is a derived copy; the original is still stored separately. */
+  kind?: "original" | "annotated";
+  /** On an `annotated` copy, the `id` of the original it was drawn over. */
+  derivedFromId?: string;
+  /** On an `annotated` copy, the account that drew it. Self-asserted by the client. */
+  annotatedBy?: string;
+};
 /**
  * A diary entry as `/api/projects/bootstrap` already sends it.
  *
@@ -402,6 +450,44 @@ export async function fetchDeliveries(siteId: string): Promise<Delivery[]> {
 export async function approveDiary(diaryId: string): Promise<Diary> {
   const data = await request<{ diary: Diary }>("PATCH", `/api/projects/diaries/${diaryId}`, { status: "approved" });
   return data.diary;
+}
+
+/**
+ * Replace the photographs array on one diary entry.
+ *
+ * This is the save path for a portal annotation, and it uses an endpoint that
+ * already existed — `PATCH /api/projects/entries/:id`, defined at
+ * services/api/src/routes/projects.ts:243. NO ROUTE WAS ADDED OR WIDENED for
+ * annotation, and in particular the `Cross-Origin-Resource-Policy: same-site`
+ * scope on the media route (routes/uploads.ts:160-215) is untouched: the portal
+ * draws a vector overlay in the DOM and stores coordinates, so it never needs to
+ * read the image's pixels back and never needs a CORS-enabled image load.
+ *
+ * Why the whole array rather than one photograph: `photos` on that route is
+ * `z.array(z.record(z.unknown()))` (projects.ts:56-73) and the store writes it
+ * with `JSON.stringify` as opaque JSONB, so there is no per-photograph
+ * addressing to use. The caller therefore sends the complete set, which is
+ * exactly what `buildAnnotationDerivative` returns — original included.
+ *
+ * THE RACE THIS CANNOT WIN, stated rather than hidden: a whole-array write is
+ * last-write-wins. If someone annotates on mobile while someone annotates the
+ * same entry on the portal, the second save drops the first annotation. The
+ * endpoint offers no version or ETag to send, so there is nothing to build on
+ * here; the honest mitigation is that the caller re-reads the entry immediately
+ * after saving, so the losing client at least sees the true stored set rather
+ * than its own optimistic copy. A real fix is a server-side append, and it is
+ * flagged rather than improvised.
+ */
+export async function updateEntryPhotos(
+  entryId: string,
+  photos: EntryPhoto[]
+): Promise<Entry> {
+  const data = await request<{ entry: Entry }>(
+    "PATCH",
+    `/api/projects/entries/${entryId}`,
+    { photos }
+  );
+  return data.entry;
 }
 
 /**
