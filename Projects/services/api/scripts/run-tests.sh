@@ -65,7 +65,13 @@ cd "$(dirname "$0")/.."
 # 21 on this branch, MEASURED: chore/pr0-clear-the-queue adds
 # routes/signup-company-transaction-db.test.ts, the Postgres half of L105's
 # fix. 20 was the previous batch's final value and is now main's count.
-EXPECTED_DB_SUITES=21
+#
+# 22 on feat/pr2-job-number, MEASURED: + routes/job-number-db.test.ts, the
+# Postgres half of the job-number field. The branches in this batch STACK, so
+# this is measured at its real position in the stack (PR 0 -> PR 1 -> PR 2) and
+# needs no back-porting when the ones ahead of it land -- which is the whole
+# reason for stacking them, after six wrong pinned counts last batch.
+EXPECTED_DB_SUITES=22
 
 # How many individual TESTS are gated on REDIS_TEST_URL.
 #

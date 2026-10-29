@@ -307,6 +307,16 @@ module.exports = {
       //                   for a site that was sitting there intact. This rule is
       //                   what caught that. Exact filename again.
         "services/api/src/routes/clients-db.test.ts",
+      //   routes/job-number-db.test.ts
+      //                   migrations and the drain, and nothing else - the same
+      //                   two uses as clients-db.test.ts above, for the same
+      //                   reason. Every read behind the route in that file goes
+      //                   through withTenant: project_sites is FORCE ROW LEVEL
+      //                   SECURITY (migration 032), so a bare pool query would
+      //                   have matched zero rows and every "the job number did
+      //                   not change" assertion would have been satisfied by a
+      //                   table the test could not see. Exact filename again.
+        "services/api/src/routes/job-number-db.test.ts",
       //   routes/inspection-template-id-db.test.ts
       //                   migrations and the drain as above, plus one read no
       //                   store can give it: whether inspections.template_id

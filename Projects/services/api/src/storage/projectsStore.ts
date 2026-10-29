@@ -80,6 +80,28 @@ export type SiteRecord = {
    * storage/clientsStore.ts.
    */
   clientId?: string | null;
+  /**
+   * The contractor's own reference for the job. Free text, optional, NOT
+   * unique — contractors reuse a number across years and across clients, and
+   * an index that refused the second one would refuse the real world.
+   *
+   * THE COLUMN WAS ALREADY THERE AND NOTHING HAD EVER READ IT (AUDIT L118).
+   * `011_job_numbers_time_codes.sql` added `job_number TEXT NOT NULL DEFAULT
+   * ''` to project_sites in a migration renumbered across from another branch,
+   * and from that day to this no store, route, schema or client touched it.
+   * The mobile site screen rendered `Job #` behind a type assertion —
+   * `(site as { jobNumber?: string }).jobNumber` — which is why the compiler
+   * could not report the missing field: the cast asserted a property this type
+   * did not have, and it was `undefined` on every site in production.
+   *
+   * ABSENCE IS THE EMPTY STRING, NOT NULL. The column is NOT NULL DEFAULT ''
+   * and every existing row therefore already holds ''. Making it nullable
+   * would create two spellings of "no job number" that every reader would have
+   * to handle, so the empty string is the single absence state and the clients
+   * test for it with `hasJobNumber` rather than with `!= null`. That is why
+   * this is `string` and not `string | null`, and why PR 2 adds no migration.
+   */
+  jobNumber: string;
   // Phase 6. This field used to be declared here, be written by nothing, and
   // have no column behind it — which is how a `deleted_at IS NULL` predicate
   // came to sit in `updateSiteProgress` against a column that did not exist
@@ -325,6 +347,7 @@ function mapSite(row: {
   address: string;
   client: string;
   client_id: string | null;
+  job_number?: string | null;
   start_date: string;
   status: SiteStatus;
   created_at: Date;
@@ -342,6 +365,14 @@ function mapSite(row: {
     // reads back as NULL on every pre-existing row, and the two clients branch
     // on `clientId == null` to render the Unfiled group.
     clientId: row.client_id ?? null,
+    /**
+     * `?? ""` for the same reason `progress_percent` below carries `?? 0`: the
+     * column is NOT NULL in the schema, but this row shape is shared with
+     * statements that select a narrower set, and a NULL arriving from a
+     * narrower select must not become the string "null" downstream. The
+     * absence state is "" everywhere above the mapper — see SiteRecord.
+     */
+    jobNumber: row.job_number ?? "",
     startDate: row.start_date,
     status: row.status,
     createdAt: row.created_at.toISOString(),
@@ -443,6 +474,7 @@ type SiteRow = {
   address: string;
   client: string;
   client_id: string | null;
+  job_number: string;
   start_date: string;
   status: SiteStatus;
   created_at: Date;
@@ -483,6 +515,10 @@ export async function createSite(
     companyId: actor.companyId,
     createdAt: new Date().toISOString(),
     ...payload,
+    // After the spread, not before it: a caller that omits the key at runtime
+    // (the type requires it, JavaScript does not) must get "" and not
+    // undefined, because "" is the single absence state this field has.
+    jobNumber: payload.jobNumber ?? "",
   };
   if (!useDatabase()) {
     await ensureMemoryLoaded();
@@ -492,11 +528,16 @@ export async function createSite(
   }
   const result = await withTenant(actor, (client) =>
     client.query<SiteRow>(
-      `INSERT INTO project_sites (id, owner_email, company_id, name, address, client, ${SITE_CLIENT_COLUMN}, start_date, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      // `job_number` is written with `?? ''` rather than being left to the
+      // column default, so the two store paths agree about a site created with
+      // no job number: the in-memory twin above spreads the payload verbatim,
+      // and a payload without the key would leave `jobNumber` undefined there
+      // while Postgres returned ''. One absence state, both paths.
+      `INSERT INTO project_sites (id, owner_email, company_id, name, address, client, ${SITE_CLIENT_COLUMN}, job_number, start_date, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
        RETURNING *`,
       [site.id, actor.email, actor.companyId, site.name, site.address, site.client,
-       site.clientId ?? null, site.startDate, site.status]
+       site.clientId ?? null, site.jobNumber ?? "", site.startDate, site.status]
     )
   );
   return mapSite(result.rows[0]);
@@ -2247,6 +2288,56 @@ export async function updateSiteClient(
         WHERE id = $1 AND company_id = $4
         RETURNING *`,
       [siteId, filing.clientId, filing.clientId ? filing.clientName ?? null : null, actor.companyId]
+    )
+  );
+  if (result.rowCount === 0) return null;
+  return mapSite(result.rows[0]);
+}
+
+/**
+ * Change a site's job number, or clear it.
+ *
+ * WHY THIS IS ITS OWN FUNCTION AND ITS OWN ROUTE, rather than a second field on
+ * `updateSiteClient` or a general site PATCH: `SiteFilingSchema` is `.strict()`
+ * with one field and says in its own comment that it is deliberately not the
+ * missing general site-edit route. Widening it would make it one, quietly, and
+ * a `requireAtLeast("manager")` patch that accepts the whole site is exactly
+ * the surface that comment warns about. So this follows `updateSiteProgress`:
+ * one attribute, one statement, one meaning.
+ *
+ * The empty string CLEARS it. There is no separate "unset" — see SiteRecord for
+ * why the absence state is "" rather than NULL.
+ *
+ * Normalisation happens at the route boundary (zod `.trim()` and a length cap),
+ * not here, so that an over-long value is REFUSED with a message rather than
+ * silently truncated by the store.
+ */
+export async function updateSiteJobNumber(
+  actor: Actor,
+  siteId: string,
+  jobNumber: string
+): Promise<SiteRecord | null> {
+  if (!useDatabase()) {
+    await ensureMemoryLoaded();
+    const existing = memory.sites.get(siteId);
+    if (!existing || existing.companyId !== actor.companyId) return null;
+    // A site in the bin takes no edits, the same as updateSiteProgress. The
+    // Postgres path gets this from `liveOnly("project_sites")` below; without
+    // the line here the two paths would disagree, which is AUDIT L88's shape.
+    if (existing.deletedAt) return null;
+    const updated: SiteRecord = { ...existing, jobNumber };
+    memory.sites.set(siteId, updated);
+    await persistMemory();
+    return updated;
+  }
+  const result = await withTenant(actor, (client) =>
+    client.query<SiteRow>(
+      `UPDATE project_sites
+          SET job_number = $2,
+              updated_at = NOW()
+        WHERE id = $1 AND company_id = $3 AND ${liveOnly("project_sites")}
+        RETURNING *`,
+      [siteId, jobNumber, actor.companyId]
     )
   );
   if (result.rowCount === 0) return null;

@@ -36,6 +36,7 @@ import {
   updateDiary,
   updateEntry,
   updateSiteProgress,
+  updateSiteJobNumber,
   updateSiteClient,
   updateTemplate,
   restoreSite,
@@ -50,6 +51,24 @@ function parsePagination(query: Record<string, unknown>) {
   const offset = Math.max(Number(query.offset) || 0, 0);
   return { limit, offset };
 }
+
+/**
+ * The job-number length cap, and the only place in this service that states it.
+ *
+ * 40 is a judgement, not a requirement from anywhere: the column is TEXT and
+ * unbounded, and an unbounded free-text field reachable by any manager is a row
+ * that can be made arbitrarily large. The longest real job reference shape I
+ * can find in the product is of the form "2024-NW-00123-R2", so 40 leaves room
+ * for a prefix and a revision suffix and still refuses a pasted paragraph.
+ *
+ * It exists ONCE on this side and once on the client side
+ * (apps/mobile/lib/job-number.ts and its portal twin, inside the shared-logic
+ * markers). `assert_job_number_cap_agrees` in Projects/scripts/ci.sh asserts
+ * the two numbers are equal, so the client's input `maxLength` cannot drift
+ * away from the value this schema refuses -- which would show up as a form that
+ * accepts a value and a save that 400s.
+ */
+const JOB_NUMBER_MAX_LENGTH = 40;
 
 const SiteSchema = z.object({
   name: z.string().min(1),
@@ -67,6 +86,26 @@ const SiteSchema = z.object({
   // Optional and nullable: a site created before the clients UI ships, or by a
   // client that never sends it, is Unfiled rather than rejected.
   clientId: z.string().min(1).nullish(),
+  // The contractor's own reference. Optional, free text, NEVER unique --
+  // contractors reuse a number across years and across clients.
+  //
+  // `.trim()` then `.max()` then `.default("")`, in that order, and each one is
+  // load-bearing:
+  //   * `.trim()` because "  12-4  " and "12-4" are one job number, and the
+  //     search box on both clients does a substring match that would otherwise
+  //     miss one of them.
+  //   * `.max(JOB_NUMBER_MAX_LENGTH)` REFUSES an over-long value with a 400
+  //     rather than letting the store truncate it. A truncated reference is
+  //     worse than a rejected one: the contractor cannot tell it happened, and
+  //     the number they then quote to a client does not exist in the system.
+  //   * `.default("")` so a client that has not shipped the field yet creates
+  //     sites exactly as before. Every pre-existing row already holds '' (the
+  //     column is NOT NULL DEFAULT '' -- see below), so this is the same
+  //     absence state the database already has, not a second one.
+  //
+  // NO MIGRATION. `011_job_numbers_time_codes.sql` added the column and nothing
+  // ever read it -- AUDIT L118.
+  jobNumber: z.string().trim().max(JOB_NUMBER_MAX_LENGTH).default(""),
 });
 
 /**
@@ -83,6 +122,19 @@ const SiteSchema = z.object({
  */
 const SiteFilingSchema = z.object({
   clientId: z.string().min(1).nullable(),
+}).strict();
+
+/**
+ * Changing a site's job number. One field, `.strict()`, same shape and same
+ * reasoning as SiteFilingSchema above.
+ *
+ * NOT `.default("")` like the create schema's copy: on create, an absent key
+ * means "this client does not send job numbers" and must succeed. On this
+ * route an absent key means the caller sent `{}` to an endpoint whose only
+ * purpose is to set the field, which is a bug in the caller and gets a 400.
+ */
+const JobNumberSchema = z.object({
+  jobNumber: z.string().trim().max(JOB_NUMBER_MAX_LENGTH),
 }).strict();
 
 const EntrySchema = z.object({
@@ -629,6 +681,35 @@ projectsRouter.patch("/projects/sites/:id/progress", async (req, res) => {
     return res.status(400).json({ error: "progressPercent must be a number between 0 and 100." });
   }
   const site = await updateSiteProgress(actor, req.params.id, pct);
+  if (!site) return res.status(404).json({ error: "Site not found." });
+  return res.json({ site });
+});
+
+/**
+ * Change a site's job number, or clear it. Manager+, matching POST and the
+ * filing PATCH.
+ *
+ * WHY MANAGER+ AND NOT OPEN TO CREW, when `/progress` next door takes any role:
+ * progress is a field observation -- the person standing on the site is the one
+ * who knows it is 60% done -- and RECORD_CLASS calls it a
+ * `shared-site-attribute`. A job number is administrative: it is the reference
+ * the contractor quotes on an invoice, it comes off a contract rather than off
+ * the site, and the clients grouping and the client-facing reports print it. So
+ * it is gated with filing, which is the attribute it most resembles.
+ *
+ * Sending "" CLEARS it, deliberately, so the one route both sets and unsets and
+ * there is no DELETE to forget to gate.
+ */
+projectsRouter.patch("/projects/sites/:id/job-number", requireAtLeast("manager"), async (req, res) => {
+  const actor = getActor(req as unknown as AuthenticatedRequest);
+  const parsed = JobNumberSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: `jobNumber must be a string of at most ${JOB_NUMBER_MAX_LENGTH} characters.`,
+      details: parsed.error.flatten(),
+    });
+  }
+  const site = await updateSiteJobNumber(actor, req.params.id, parsed.data.jobNumber);
   if (!site) return res.status(404).json({ error: "Site not found." });
   return res.json({ site });
 });

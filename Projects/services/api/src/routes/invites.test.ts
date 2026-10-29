@@ -663,6 +663,7 @@ test("ceiling (store-level): a crew member who owns a site cannot grant a compan
   const crewActor: Actor = { email: "crew-owner5@example.com", role: "worker", companyId, companyRole: "crew" };
   const crewSite = await createSiteRecord(crewActor, {
     name: "Crew-owned site", address: "9 Crew Rd", client: "Crew Client", startDate: "2026-01-01", status: "active",
+    jobNumber: "",
   });
 
   // The crew member CAN manage their own site: inviting crew succeeds (returns

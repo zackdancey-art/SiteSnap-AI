@@ -78,8 +78,19 @@ if (!process.env.TEST_DATABASE_URL) {
     );
 
     // A site is the FK parent for entries/diaries/timecards/deliveries/inspections.
+    //
+    // `jobNumber` is a NON-EMPTY value here on purpose. This guard exists to
+    // prove a store's full-column INSERT survives a real schema, and
+    // `job_number` is the column that showed what it cannot prove: the column
+    // shipped in migration 011 and no store wrote it, so this test round-tripped
+    // happily for months while a schema column had no store behind it (AUDIT
+    // L118). The `as Parameters<...>` cast below is the other half of that --
+    // it silences exactly the compiler error a missing payload field would
+    // otherwise produce. Writing a real value and asserting it comes back is
+    // the only part of this that would have failed.
     const site = await S.createSite(actor, {
       name: "RT Site", address: "1 Test Rd", client: "RT Client", startDate: "2026-01-01", status: "active",
+      jobNumber: "RT-2026-0001",
     } as Parameters<typeof S.createSite>[1]);
     siteId = site.id;
   });
@@ -93,6 +104,11 @@ if (!process.env.TEST_DATABASE_URL) {
     const row = sites.find((s) => s.id === siteId);
     assert.ok(row, "created site not read back");
     assert.equal(row!.name, "RT Site");
+    // The positive control for the job-number column, in the same test: a
+    // non-empty value written through createSite's INSERT and read back
+    // through listSites' SELECT and mapSite. Before PR 2 this read "" no
+    // matter what was written, because mapSite dropped the column.
+    assert.equal(row!.jobNumber, "RT-2026-0001");
     assert.equal(row!.client, "RT Client");
   });
 
@@ -270,7 +286,7 @@ if (!process.env.TEST_DATABASE_URL) {
     );
     const site = await S.createSite(who, {
       name: `PC Site ${tag}`, address: "2 Count Rd", client: "PC Client",
-      startDate: "2026-01-01", status: "active",
+      startDate: "2026-01-01", status: "active", jobNumber: "",
     } as Parameters<typeof S.createSite>[1]);
     for (let i = 0; i < entryCount; i += 1) {
       await S.createEntry(who, {
