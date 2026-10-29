@@ -11,6 +11,7 @@ import { getSavedUser, listClients } from "@/lib/api";
 import type { Client, Site } from "@/lib/api";
 import { useBootstrap } from "@/lib/useBootstrap";
 import { groupSitesByClient, shouldShowGroupHeadings } from "@/lib/site-grouping";
+import { formatJobNumber, matchesJobNumber } from "@/lib/job-number";
 import {
   SITE_STATUS_FILTERS,
   canonicalSiteStatus,
@@ -123,7 +124,14 @@ function SitesPageInner() {
         s.name.toLowerCase().includes(q) ||
         s.client?.toLowerCase().includes(q) ||
         clientName?.toLowerCase().includes(q) ||
-        s.address?.toLowerCase().includes(q);
+        s.address?.toLowerCase().includes(q) ||
+        // Searchable, which is half of what the field is for: a job number
+        // nobody can find is a reference the contractor still looks up
+        // somewhere else. `matchesJobNumber` is the shared rule rather than
+        // another inline `.includes()`, so this box and the phone's cannot
+        // come to disagree about case or padding -- CI holds the two copies
+        // byte-identical (assert_shared_logic_copies in Projects/scripts/ci.sh).
+        matchesJobNumber(s.jobNumber, q);
       const matchStatus = matchesSiteStatusFilter(s.status, filterStatus);
       // An unresolvable ?clientId= still filters. It must not fall through to
       // an unfiltered list that looks exactly like a page with no filter on
@@ -175,6 +183,9 @@ function SitesPageInner() {
     // on the card even inside a client's own group: the grouping is a heading
     // somebody may have scrolled past.
     const clientLabel = (site.clientId ? nameById.get(site.clientId) : undefined) || site.client;
+    // Null for an absence, never "", so the row below is a single truthiness
+    // check and "Job #" with nothing after it is not constructible.
+    const jobLabel = formatJobNumber(site.jobNumber);
     return (
       <Link key={site.id} href={`/sites/${site.id}`} style={{ textDecoration: "none" }}>
       <div className="card" style={{ display: "flex", flexDirection: "column", cursor: "pointer", transition: "box-shadow 0.15s" }}>
@@ -189,8 +200,19 @@ function SitesPageInner() {
             </p>
           )}
           {site.address && (
-            <p style={{ fontSize: 12, color: "var(--text-tertiary)", margin: "0 0 12px", display: "flex", alignItems: "center", gap: 5 }}>
+            <p style={{ fontSize: 12, color: "var(--text-tertiary)", margin: jobLabel ? "0 0 3px" : "0 0 12px", display: "flex", alignItems: "center", gap: 5 }}>
               📍 {site.address}
+            </p>
+          )}
+          {/* Only when there is one, and `formatJobNumber` returns null rather
+              than "" for every form of absence -- so this branch cannot print
+              a bare "Job #". Most sites have none: every site created before
+              PR 2 reads back as "". The 12px that separates this block from
+              the counters sits on whichever row is last, which is why the
+              address row's margin above reads off `jobLabel`. */}
+          {jobLabel && (
+            <p style={{ fontSize: 12, color: "var(--text-tertiary)", margin: "0 0 12px", display: "flex", alignItems: "center", gap: 5 }}>
+              🏷️ {jobLabel}
             </p>
           )}
           <div style={{ display: "flex", gap: 16, marginBottom: 12 }}>

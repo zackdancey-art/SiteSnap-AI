@@ -102,6 +102,18 @@ interface DataContextType {
   deleteClient: (id: string) => Promise<number>;
   /** File a site under a client, or pass null to unfile it. */
   fileSite: (siteId: string, clientId: string | null) => Promise<void>;
+  /**
+   * Set or clear a site's job number. The empty string CLEARS it; there is no
+   * separate "clear" call, because "" is the only spelling of absence the
+   * column has (`job_number TEXT NOT NULL DEFAULT ''`, migration 011).
+   *
+   * Online-only, like fileSite above and for the same reason: a job number
+   * comes off a contract in the office, not off the site, and the offline
+   * queue's op types are a closed set of five that this is deliberately not
+   * joining. A failure surfaces to the caller as a refusal rather than a
+   * pending op.
+   */
+  setSiteJobNumber: (siteId: string, jobNumber: string) => Promise<void>;
 
   /**
    * The sites in the bin, newest first, with the number of days each has been
@@ -855,6 +867,31 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     }
   }, [authLoading, isAuthenticated, user?.email, token]);
 
+  /**
+   * PATCH /projects/sites/:id/job-number -- the client call that makes that
+   * route exist.
+   *
+   * Its own endpoint rather than a field on PATCH /projects/sites/:id, because
+   * that route's SiteFilingSchema is `.strict()` with one key and says in its
+   * own comment that it is deliberately not the missing general site-edit
+   * route; widening it would quietly make it one. See the note above
+   * updateSiteJobNumber in services/api/src/storage/projectsStore.ts.
+   *
+   * No optimistic local write. The route trims and length-checks the value, so
+   * the row the server returns is the authority on what was stored -- writing
+   * a guess into state first and reconciling after would make a trimmed value
+   * flicker.
+   */
+  const setSiteJobNumber = async (siteId: string, jobNumber: string): Promise<void> => {
+    const resp = await apiJson<{ site: Site }>(`/projects/sites/${siteId}/job-number`, {
+      method: "PATCH",
+      body: JSON.stringify({ jobNumber }),
+    });
+    const updatedSites = sites.map((s) => (s.id === siteId ? resp.site : s));
+    setSites(updatedSites);
+    await persistCache(user?.email, updatedSites, entries, diaries);
+  };
+
   const addSite = async (siteData: Omit<Site, "id" | "createdAt">) => {
     try {
       const response = await apiJson<{ site: Site }>("/projects/sites", {
@@ -1346,6 +1383,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         updateClient,
         deleteClient,
         fileSite,
+        setSiteJobNumber,
         listBinnedSites,
         restoreSite,
         addEntry,

@@ -17,6 +17,7 @@ import Colors from "@/constants/colors";
 import { Site } from "@/lib/types";
 import { groupSitesByClient, shouldShowGroupHeadings } from "@/lib/site-grouping";
 import { siteStatusCfg } from "@/lib/siteStatus";
+import { formatJobNumber, matchesJobNumber } from "@/lib/job-number";
 import { TabScreenInsets, useTabScreenInsets } from "@/lib/useScreenInsets";
 
 function SiteCard({ site }: { site: Site }) {
@@ -28,6 +29,10 @@ function SiteCard({ site }: { site: Site }) {
   // status it does not recognise — while every portal surface shows "Complete"
   // in accent orange. Same site, two surfaces, different word and colour.
   const { color: statusColor, label: statusLabel } = siteStatusCfg(site.status);
+
+  // Null for an absence, never "", so the row below cannot render a bare
+  // "Job #". See lib/job-number.ts.
+  const jobNumberLabel = formatJobNumber(site.jobNumber);
 
   return (
     <Pressable
@@ -54,6 +59,16 @@ function SiteCard({ site }: { site: Site }) {
           <Ionicons name="location-outline" size={14} color={Colors.textTertiary} />
           <Text style={styles.cardDetailText} numberOfLines={1}>{site.address}</Text>
         </View>
+        {/* Only when there is one. Most sites have no job number -- every site
+            created before PR 2 has none -- so an empty row here would be the
+            common case, and `formatJobNumber` returns null rather than "" for
+            exactly that branch. */}
+        {jobNumberLabel !== null && (
+          <View style={styles.cardDetail}>
+            <Ionicons name="pricetag-outline" size={14} color={Colors.textTertiary} />
+            <Text style={styles.cardDetailText} numberOfLines={1}>{jobNumberLabel}</Text>
+          </View>
+        )}
         <View style={styles.cardFooter}>
           <View style={styles.cardDetail}>
             <Ionicons name="calendar-outline" size={14} color={Colors.textTertiary} />
@@ -120,6 +135,12 @@ function SitesContent() {
         s.name.toLowerCase().includes(q) ||
         s.client.toLowerCase().includes(q) ||
         s.address.toLowerCase().includes(q) ||
+        // Searchable, which is half of what PR 2 asked for -- a job number
+        // nobody can find is a reference the contractor still has to look up
+        // somewhere else. `matchesJobNumber` is the shared rule rather than
+        // another `.toLowerCase().includes()` here, so the portal's search box
+        // cannot come to disagree with this one about case or padding.
+        matchesJobNumber(s.jobNumber, q) ||
         (s.clientId ? (nameById.get(s.clientId) ?? "").includes(q) : false)
     );
   }, [sites, clients, search]);

@@ -23,6 +23,29 @@ export interface Site {
    * who may read one. See services/api/src/storage/clientsStore.ts.
    */
   clientId?: string | null;
+  /**
+   * The contractor's own reference for the job, or "" for none.
+   *
+   * NOT optional, and not nullable, unlike `clientId` above. The column has
+   * been `job_number TEXT NOT NULL DEFAULT ''` since migration 011, so the API
+   * cannot return null for it and the store normalises a missing row value to
+   * "" (`mapSite` in services/api/src/storage/projectsStore.ts). One spelling
+   * of absence means every reader can call `.trim()` without a guard, and
+   * `hasJobNumber` in lib/job-number.ts is the one place that decides what
+   * counts as absent.
+   *
+   * It arrived in the schema long before anything read it: from migration 011
+   * until PR 2 no store, route, schema or client touched the column, and this
+   * screen's `Job #` line was rendered through a `(site as { jobNumber?:
+   * string })` cast — which is exactly why the compiler never reported the
+   * missing field. AUDIT L118. The cast is gone; a cached site from a build
+   * older than PR 2 has no such key, so `formatJobNumber` and `hasJobNumber`
+   * both take `string | null | undefined` rather than `string`.
+   *
+   * Free text and deliberately NOT unique: contractors reuse a job number
+   * across sites, and the field is a reference, never an identity.
+   */
+  jobNumber: string;
   startDate: string;
   status: "active" | "completed" | "on-hold";
   createdAt: string;

@@ -189,6 +189,25 @@ export function canFileSiteUnderClient(companyRole: string | null | undefined): 
 }
 
 /**
+ * Whether this role may set or clear a site's job number.
+ *
+ * Its own predicate again, and the same two roles. It answers to PATCH
+ * /projects/sites/:id/job-number, which carries requireAtLeast("manager").
+ *
+ * WHY MANAGER AND NOT CREW. Progress is a field observation -- a crew member
+ * standing on the site is the person who knows it -- and PATCH
+ * /projects/sites/:id/progress is open accordingly. A job number is
+ * administrative: it is the reference the contractor quotes on an invoice, it
+ * comes off a contract rather than off the site, and a crew member changing it
+ * would change what a document says about a job they are not billing. So it is
+ * gated with filing, which is the attribute it most resembles. Stated in PR
+ * 2's body as a reversible decision rather than a requirement.
+ */
+export function canSetSiteJobNumber(companyRole: string | null | undefined): boolean {
+  return CLIENT_MANAGERS.includes(companyRole ?? "");
+}
+
+/**
  * Whether this role may approve, send back, or reopen a crew timecard.
  *
  * The same two refused roles as diary approval, and for a stronger reason than
@@ -274,6 +293,7 @@ export function useRole() {
     canApproveDiary: canApproveDiary(user?.companyRole),
     canManageClients: canManageClients(user?.companyRole),
     canFileSiteUnderClient: canFileSiteUnderClient(user?.companyRole),
+    canSetSiteJobNumber: canSetSiteJobNumber(user?.companyRole),
     canApproveTimesheet: canApproveTimesheet(user?.companyRole),
     isCrew: isCrew(user?.companyRole),
   };

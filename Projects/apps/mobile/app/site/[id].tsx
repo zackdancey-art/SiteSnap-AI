@@ -24,6 +24,8 @@ import {
   describeFailure,
 } from "@/lib/permissions";
 import { ClientPicker } from "@/components/ClientPicker";
+import { JobNumberEditor } from "@/components/JobNumberEditor";
+import { formatJobNumber } from "@/lib/job-number";
 import { DailyEntry, SiteMember } from "@/lib/types";
 import { authedFetch } from "@/lib/authed-fetch";
 import { isSessionExpired } from "@/lib/session";
@@ -104,8 +106,16 @@ const PROGRESS_STEPS = [0, 25, 50, 75, 100];
 export default function SiteDetailScreen() {
   const insets = useSafeAreaInsets();
   const { id } = useLocalSearchParams<{ id?: string }>();
-  const { getSite, getSiteEntries, deleteSite, getSiteMembers, removeSiteMember, clients, fileSite } =
-    useData();
+  const {
+    getSite,
+    getSiteEntries,
+    deleteSite,
+    getSiteMembers,
+    removeSiteMember,
+    clients,
+    fileSite,
+    setSiteJobNumber,
+  } = useData();
   const { user } = useAuth();
 
   const site = getSite(id);
@@ -116,6 +126,8 @@ export default function SiteDetailScreen() {
   const [membersLoaded, setMembersLoaded] = useState(false);
   const [showClientPicker, setShowClientPicker] = useState(false);
   const [filing, setFiling] = useState(false);
+  const [showJobNumber, setShowJobNumber] = useState(false);
+  const [savingJobNumber, setSavingJobNumber] = useState(false);
 
   const entries = useMemo(() => {
     if (!search.trim()) return allEntries;
@@ -143,6 +155,26 @@ export default function SiteDetailScreen() {
    * delete control above came to consult no permission at all.
    */
   const canFile = canFileSiteUnderClient(user?.companyRole);
+  /**
+   * The same predicate as filing, deliberately, and said once here rather than
+   * reused from `canFile` above.
+   *
+   * PATCH /projects/sites/:id/job-number is gated requireAtLeast("manager") --
+   * the filing gate, not the progress one. Progress is a field observation a
+   * crew member makes standing on the site; a job number comes off a contract
+   * and is what the contractor quotes on an invoice. They agree today, as
+   * canInvite and canFile do, and are written separately for the same reason:
+   * collapsing predicates that answer to different routes is how the delete
+   * control on this screen came to consult no permission at all.
+   */
+  const canEditJobNumber = canFileSiteUnderClient(user?.companyRole);
+
+  /**
+   * Null for every form of absence, never the empty string -- so the header
+   * branches on the LABEL and the string "Job #" with nothing after it is not
+   * constructible. See lib/job-number.ts.
+   */
+  const jobNumberLabel = formatJobNumber(site?.jobNumber);
 
   /**
    * Filing requires connectivity, like the other three client calls, and
@@ -167,6 +199,31 @@ export default function SiteDetailScreen() {
       );
     } finally {
       setFiling(false);
+    }
+  };
+
+  /**
+   * The caller for PATCH /projects/sites/:id/job-number.
+   *
+   * Online-only, like handleFile above and for the reason stated there: the
+   * offline queue's op types are a closed set of five, and this is office work
+   * rather than something done standing on the site. A failure surfaces as a
+   * refusal, not a pending op.
+   */
+  const handleJobNumber = async (next: string) => {
+    if (!site) return;
+    setSavingJobNumber(true);
+    try {
+      await setSiteJobNumber(site.id, next);
+      setShowJobNumber(false);
+    } catch (err) {
+      if (isSessionExpired(err)) return;
+      Alert.alert(
+        "Could not save the job number",
+        describeFailure(err, "Could not save the job number for this site.")
+      );
+    } finally {
+      setSavingJobNumber(false);
     }
   };
 
@@ -358,11 +415,41 @@ export default function SiteDetailScreen() {
             <Ionicons name="location-outline" size={14} color="rgba(255,255,255,0.6)" />
             <Text style={styles.headerDetailText}>{site.address}</Text>
           </View>
-          {!!(site as { jobNumber?: string }).jobNumber && (
-            <View style={styles.headerDetail}>
+          {/*
+            * The two `(site as { jobNumber?: string })` casts that used to be
+            * here are what hid AUDIT L118: `Site` had no such field, the API
+            * never sent one, and this line could therefore never render --
+            * but a cast is an instruction to the compiler not to check, so
+            * nothing reported it for the months the column sat unread. The
+            * field is real now (lib/types.ts), and `formatJobNumber` returns
+            * null for every form of absence rather than the empty string, so
+            * the branch is on the LABEL and cannot produce "Job #".
+            */}
+          {canEditJobNumber ? (
+            /* Drawn even when there is no job number, because otherwise there
+               is nowhere to ADD one -- the empty state is the affordance. A
+               viewer who cannot edit gets the row only when there is something
+               to read, below. */
+            <Pressable
+              style={({ pressed }) => [styles.headerDetail, pressed && { opacity: 0.7 }]}
+              onPress={() => setShowJobNumber(true)}
+              disabled={savingJobNumber}
+              hitSlop={8}
+              testID="site-job-number"
+            >
               <Ionicons name="pricetag-outline" size={14} color="rgba(255,255,255,0.6)" />
-              <Text style={styles.headerDetailText}>Job #{(site as { jobNumber?: string }).jobNumber}</Text>
-            </View>
+              <Text style={styles.headerDetailText}>
+                {savingJobNumber ? "Saving…" : jobNumberLabel ?? "Add job number"}
+              </Text>
+              <Ionicons name="chevron-forward" size={13} color="rgba(255,255,255,0.6)" />
+            </Pressable>
+          ) : (
+            jobNumberLabel !== null && (
+              <View style={styles.headerDetail}>
+                <Ionicons name="pricetag-outline" size={14} color="rgba(255,255,255,0.6)" />
+                <Text style={styles.headerDetailText}>{jobNumberLabel}</Text>
+              </View>
+            )
           )}
         </View>
 
@@ -539,6 +626,21 @@ export default function SiteDetailScreen() {
             setShowClientPicker(false);
             router.push("/clients");
           }}
+        />
+      )}
+
+      {/* Mounted only when the viewer may change it, the same as ClientPicker
+          above. A crew member sees the job number on the header row and gets no
+          editor -- and the gate that actually matters is the route's
+          requireAtLeast("manager"), which routes/job-number.test.ts proves with
+          a crew token. */}
+      {canEditJobNumber && (
+        <JobNumberEditor
+          visible={showJobNumber}
+          value={site.jobNumber}
+          onSave={handleJobNumber}
+          onClose={() => setShowJobNumber(false)}
+          saving={savingJobNumber}
         />
       )}
     </View>

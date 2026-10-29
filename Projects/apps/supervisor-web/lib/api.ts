@@ -16,6 +16,19 @@ export type Site = {
   client: string;
   clientId?: string | null;
   address: string;
+  /**
+   * The contractor's own reference for the job, or "" for none.
+   *
+   * Required and not nullable, unlike `clientId` above: the column is
+   * `job_number TEXT NOT NULL DEFAULT ''` (migration 011) and the API's
+   * `mapSite` normalises a missing row value to "", so "" is the only spelling
+   * of absence and every reader can trim without a guard. `hasJobNumber` in
+   * lib/job-number.ts is the one place that decides what counts as absent.
+   *
+   * The column shipped in migration 011 and nothing read it until PR 2 --
+   * no store, route, schema or client. AUDIT L118.
+   */
+  jobNumber: string;
   status: string;
   startDate?: string;
 };
@@ -817,5 +830,27 @@ export async function fileSiteUnderClient(
   const data = await request<{ site: Site }>("PATCH", `/api/projects/sites/${siteId}`, {
     clientId,
   });
+  return data.site;
+}
+
+/**
+ * Set or clear a site's job number. The empty string CLEARS it.
+ *
+ * Its own endpoint rather than a field on PATCH /api/projects/sites/:id,
+ * because that route's SiteFilingSchema is `.strict()` with one key and says
+ * in its own comment that it is deliberately not the missing general
+ * site-edit route -- widening it would quietly make it one. See the note above
+ * updateSiteJobNumber in services/api/src/storage/projectsStore.ts.
+ *
+ * Returns the site as the server now has it: the route TRIMS the value and
+ * refuses one over the cap with a 400, so the response is the authority on
+ * what was stored rather than what was typed.
+ */
+export async function setSiteJobNumber(siteId: string, jobNumber: string): Promise<Site> {
+  const data = await request<{ site: Site }>(
+    "PATCH",
+    `/api/projects/sites/${siteId}/job-number`,
+    { jobNumber }
+  );
   return data.site;
 }

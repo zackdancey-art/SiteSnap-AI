@@ -36,6 +36,8 @@
     "lib/photo-provenance.ts",
     "lib/photo-provenance.test.ts",
     "lib/photo-viewer-set.ts",
-    "lib/photo-viewer-set.test.ts"
+    "lib/photo-viewer-set.test.ts",
+    "lib/job-number.ts",
+    "lib/job-number.test.ts"
   ]
 }

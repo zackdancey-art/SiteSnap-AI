@@ -27,6 +27,9 @@ function site(id: string, clientId: string | null, client = ""): Site {
     address: "1 Example Street",
     client,
     clientId,
+    // Required on Site since PR 2, and "" here on purpose: grouping does not
+    // read it, so a real value would suggest it does.
+    jobNumber: "",
     startDate: "2026-01-05",
     status: "active",
     createdAt: "2026-01-05T00:00:00.000Z",

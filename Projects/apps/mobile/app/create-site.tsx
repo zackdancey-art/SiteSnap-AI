@@ -18,6 +18,7 @@ import { useData } from "@/lib/data-context";
 import { useAuth } from "@/lib/auth-context";
 import { canFileSiteUnderClient } from "@/lib/permissions";
 import { ClientPicker } from "@/components/ClientPicker";
+import { JOB_NUMBER_MAX_LENGTH, normaliseJobNumber } from "@/lib/job-number";
 import Colors from "@/constants/colors";
 import { AddressSuggestion, fetchAddressSuggestions } from "@/lib/geo";
 import { useUnsavedChangesGuard } from "@/lib/useUnsavedChangesGuard";
@@ -31,6 +32,13 @@ export default function CreateSiteScreen() {
   const [addressSuggestions, setAddressSuggestions] = useState<AddressSuggestion[]>([]);
   const [addressLoading, setAddressLoading] = useState(false);
   const [client, setClient] = useState("");
+  /**
+   * OPTIONAL, and never validated. `validate()` below deliberately does not
+   * mention it: every site created before PR 2 has no job number and must stay
+   * valid, so requiring one here would make the field a gate on a screen it is
+   * an annotation on.
+   */
+  const [jobNumber, setJobNumber] = useState("");
   /**
    * The CLIENT ID is separate from the client LABEL above, and both are sent.
    *
@@ -109,6 +117,14 @@ export default function CreateSiteScreen() {
         client: client.trim(),
         startDate,
         status: "active",
+        // SENT ALWAYS, and as "" when empty -- not omitted the way clientId is
+        // below. The two fields spell absence differently: clientId is
+        // nullable, so an absent key and a null agree; job_number is
+        // `TEXT NOT NULL DEFAULT ''` (migration 011), so "" is its only
+        // absence and sending it keeps this payload -- which the offline queue
+        // stores and replays -- a complete Site rather than one the replay has
+        // to guess at.
+        jobNumber: normaliseJobNumber(jobNumber),
         // Omitted rather than sent as null when nothing is picked. An absent
         // key and a null both mean unfiled to SiteSchema (`.nullish()`), and
         // the payload is also what the offline queue stores and replays, so
@@ -246,6 +262,30 @@ export default function CreateSiteScreen() {
             onChangeText={(t) => { setClient(t); setErrors((e) => ({ ...e, client: "" })); }}
           />
           {!!errors.client && <Text style={styles.errorText}>{errors.client}</Text>}
+        </View>
+
+        {/* JOB NUMBER. No `errors.jobNumber` and no inputError style, because
+            there is nothing to be wrong: it is optional, it is free text, and
+            it is not unique -- contractors reuse a job number across sites.
+
+            `maxLength` comes off the shared constant rather than a literal, so
+            the input stops at the same boundary the route refuses past.
+            ci.sh's assert_job_number_cap_agrees proves the two are equal; them
+            disagreeing is what produces "it won't save" with a message naming
+            a limit the field did not enforce. */}
+        <View style={styles.formGroup}>
+          <Text style={styles.label}>Job Number</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="Optional — e.g. 2026-NW-00123"
+            placeholderTextColor={Colors.textTertiary}
+            value={jobNumber}
+            onChangeText={setJobNumber}
+            autoCapitalize="characters"
+            autoCorrect={false}
+            maxLength={JOB_NUMBER_MAX_LENGTH}
+            testID="create-site-job-number"
+          />
         </View>
 
         {/* FILING. Drawn only for a manager or owner, and only when there is at

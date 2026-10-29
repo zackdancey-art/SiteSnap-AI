@@ -55,8 +55,16 @@ cd "$(dirname "$0")/.."
 # passes having run the new tests nowhere. AUDIT L115, where exactly that
 # happened on the mobile side. The equality further down closes it, by deriving
 # the population from the SOURCE tree rather than from this number.
-EXPECTED_TEST_FILES=4
-EXPECTED_TESTS=36
+#
+# 5 on feat/pr2-job-number, MEASURED: +1 for lib/job-number.test.ts, the portal
+# half of the job-number rule. This is also the first file added to this package
+# since the L115 guard below was ported to it -- so the guard's first real job
+# was refusing the commit that registered the file in tsconfig.test.json but
+# had not yet raised this number.
+EXPECTED_TEST_FILES=5
+#
+# 43 on feat/pr2-job-number, MEASURED: 36 + 7 from lib/job-number.test.ts.
+EXPECTED_TESTS=43
 
 FILE_LIST=$(find dist-test -name '*.test.js' | sort)
 

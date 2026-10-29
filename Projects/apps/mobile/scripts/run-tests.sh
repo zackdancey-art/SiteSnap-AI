@@ -42,11 +42,17 @@ cd "$(dirname "$0")/.."
 # omitted from it emits nothing, the count stays where it was and the counter
 # passes. AUDIT L115. The equality below closes that, by deriving the
 # population from the SOURCE tree rather than from this number.
-EXPECTED_TEST_FILES=27
+#
+# 28 on feat/pr2-job-number, MEASURED: +1 for lib/job-number.test.ts. The
+# branches in this batch STACK, so this is measured at its real position in the
+# stack and needs no back-porting when the branches ahead of it land.
+EXPECTED_TEST_FILES=28
 # 214, MEASURED on this branch: 207 on main, +7 from
 # lib/client-site-counts.test.ts. The historical derivation of the 207 is in
 # docs/NINE-WORKSTREAMS-HANDOVER.md.
-EXPECTED_TESTS=214
+#
+# 221 on feat/pr2-job-number, MEASURED: 214 + 7 from lib/job-number.test.ts.
+EXPECTED_TESTS=221
 
 FILE_LIST=$(find dist-test -name '*.test.js' | sort)
 

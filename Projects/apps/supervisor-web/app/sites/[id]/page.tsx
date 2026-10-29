@@ -9,7 +9,7 @@ import { siteStatusCfg } from "@/lib/siteStatus";
 import {
   fetchBootstrap, getSavedUser, isAuthenticated,
   fetchTimecards, fetchIncidents, fetchInspections, fetchDeliveries,
-  approveDiary, signUploadPaths, listClients, fileSiteUnderClient,
+  approveDiary, signUploadPaths, listClients, fileSiteUnderClient, setSiteJobNumber,
   setTimecardApproval, updateEntryPhotos,
 } from "@/lib/api";
 import type {
@@ -26,6 +26,7 @@ import {
   type TimecardApprovalStatus,
 } from "@/lib/timecard-approval";
 import { describeCaptureTime } from "@/lib/photo-capture-time";
+import { JOB_NUMBER_MAX_LENGTH, normaliseJobNumber } from "@/lib/job-number";
 import {
   describePhotoAuthor, describePhotoDerivation, describePhotoPlace,
   describePhotoRecord, stepPhotoIndex,
@@ -997,6 +998,93 @@ function ClientFilingCell({
   );
 }
 
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  THE JOB-NUMBER ROW OF THE SITE INFORMATION TABLE
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * Read-only for everyone, an input with a Save for a manager — the same shape
+ * as ClientFilingCell above and for the same reason: the words a crew member
+ * reads and the words a manager reads should not be able to drift apart.
+ *
+ * WHAT IT SHOWS WHEN THERE IS NONE. "—", not an empty cell and not "N/A".
+ * Every site created before PR 2 has no job number, so the empty case is the
+ * common one; an empty cell reads as a page that failed to load the value.
+ *
+ * THE DRAFT IS LOCAL AND THE SAVE IS THE CALLER'S. Save is disabled while the
+ * trimmed draft equals the stored value, padding included, because the route
+ * trims too — so " A-1 " over "A-1" would be a request that changes nothing.
+ *
+ * `maxLength` comes off the shared constant rather than a literal typed here.
+ * The route REFUSES an over-long value with a 400 rather than truncating it,
+ * so without the cap on the input a person types a 60-character reference and
+ * is told it is invalid after the fact. assert_job_number_cap_agrees in
+ * Projects/scripts/ci.sh proves this number equals the route's.
+ */
+function JobNumberCell({
+  site, canEdit, saving, error, onSave,
+}: {
+  site: { id: string; jobNumber: string };
+  canEdit: boolean;
+  saving: boolean;
+  error: string | null;
+  onSave: (jobNumber: string) => void;
+}) {
+  const stored = normaliseJobNumber(site.jobNumber);
+  const [draft, setDraft] = useState(stored);
+
+  /**
+   * Re-seed from the server's value when IT changes, not on every render.
+   *
+   * `stored` is the authority after a save — the route trims — so a successful
+   * write has to be reflected here or the input would keep showing the
+   * untrimmed draft. Keyed on `stored` rather than on a saving flag so that a
+   * change made in another session and picked up by a reload also lands.
+   */
+  useEffect(() => { setDraft(stored); }, [stored]);
+
+  if (!canEdit) {
+    // `formatJobNumber` returns null for an absence, so the "Job #" prefix
+    // cannot be printed with nothing after it. The prefix is dropped here
+    // because the row is already labelled "Job Number".
+    return <span>{stored || "—"}</span>;
+  }
+
+  const next = normaliseJobNumber(draft);
+  const unchanged = next === stored;
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+      <input
+        type="text"
+        value={draft}
+        disabled={saving}
+        maxLength={JOB_NUMBER_MAX_LENGTH}
+        onChange={(e) => setDraft(e.target.value)}
+        placeholder="Optional — e.g. 2026-NW-00123"
+        aria-label="Job number for this site"
+        style={{ height: 34, fontSize: 13, maxWidth: 260, padding: "0 10px" }}
+      />
+      <button
+        type="button"
+        className="btn btn-sm"
+        disabled={saving || unchanged}
+        onClick={() => onSave(next)}
+      >
+        {saving ? "Saving…" : next ? "Save" : "Remove"}
+      </button>
+      {error && (
+        <span style={{ fontSize: 12, color: "var(--error, #ef4444)" }}>{error}</span>
+      )}
+      {!saving && !error && (
+        <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
+          Free text, and not unique — contractors reuse a job number across sites.
+        </span>
+      )}
+    </div>
+  );
+}
+
 export default function SiteDetailPage() {
   const router = useRouter();
   const { id: siteId } = useParams<{ id: string }>();
@@ -1085,10 +1173,12 @@ export default function SiteDetailPage() {
    * select. The label below still shows what the site is filed under, because
    * that comes from the site itself.
    */
-  const { canFileSiteUnderClient } = useRole();
+  const { canFileSiteUnderClient, canSetSiteJobNumber } = useRole();
   const [clients, setClients] = useState<Client[]>([]);
   const [filing, setFiling] = useState(false);
   const [filingError, setFilingError] = useState<string | null>(null);
+  const [savingJobNumber, setSavingJobNumber] = useState(false);
+  const [jobNumberError, setJobNumberError] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -1120,6 +1210,32 @@ export default function SiteDetailPage() {
       setFilingError(msg);
     } finally {
       setFiling(false);
+    }
+  };
+
+  /**
+   * The caller for PATCH /api/projects/sites/:id/job-number — apps/supervisor-web
+   * is one of the two shipping clients that make that route exist, the other
+   * being apps/mobile/app/site/[id].tsx.
+   */
+  const handleJobNumber = async (jobNumber: string) => {
+    if (!site) return;
+    setSavingJobNumber(true);
+    setJobNumberError(null);
+    try {
+      const updated = await setSiteJobNumber(site.id, jobNumber);
+      // The SERVER's site, not a local merge: the route trims the value, so
+      // what came back is what is stored and a merge of what we sent would
+      // show the untrimmed version until the next full load.
+      setBootstrap((prev) => prev ? {
+        ...prev,
+        sites: prev.sites.map((x) => x.id === updated.id ? updated : x),
+      } : prev);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Could not save the job number.";
+      setJobNumberError(msg);
+    } finally {
+      setSavingJobNumber(false);
     }
   };
 
@@ -1519,6 +1635,16 @@ export default function SiteDetailPage() {
                           filing={filing}
                           error={filingError}
                           onFile={handleFile}
+                        />],
+                        // The second row that is not a string, which is what
+                        // the note on the Client row above anticipated.
+                        ["Job Number", <JobNumberCell
+                          key="job-number"
+                          site={site}
+                          canEdit={canSetSiteJobNumber}
+                          saving={savingJobNumber}
+                          error={jobNumberError}
+                          onSave={handleJobNumber}
                         />],
                         ["Address", site.address || "—"],
                         ["Start Date", localDate(site.startDate)],
