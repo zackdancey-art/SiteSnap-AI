@@ -3,7 +3,7 @@ import { asyncSafeRouter } from "../middleware/asyncRouter";
 import { createHash, randomBytes, randomInt } from "crypto";
 import { z } from "zod";
 import {
-  createCompany,
+  createCompanyWithOwner,
   createPasswordResetToken,
   createUser,
   deletePasswordResetToken,
@@ -456,6 +456,8 @@ router.post("/auth/register/verify", async (req, res) => {
     // company; (2) explicit companyName (web) or none (mobile) → new solo company.
     let companyId: string;
     let companyRole: "owner" | "manager" | "viewer" | "crew";
+    /** Set only on the solo-signup path; see below for why it is deferred. */
+    let companyToCreate: { id: string; name: string } | null = null;
 
     if (inviteToken) {
       // Create the user first (crew placeholder, no company), then let
@@ -465,8 +467,13 @@ router.post("/auth/register/verify", async (req, res) => {
     } else {
       companyId = soloCompanyIdForEmail(email);
       companyRole = "owner";
-      const resolvedName = companyName || `${fullName}'s Company`;
-      await createCompany({ id: companyId, name: resolvedName, ownerEmail: email });
+      // The company is NOT created here. It used to be, and committing it
+      // before the user row is L105: `createUser` below can fail on the unique
+      // phone index and leave a company owned by nobody, permanently. Both
+      // writes now happen together at the `createCompanyWithOwner` call, which
+      // is also where they have to happen if consent is to keep preceding the
+      // user row (see the long comment there).
+      companyToCreate = { id: companyId, name: companyName || `${fullName}'s Company` };
     }
 
     // TEST_PHONE_NUMBERS: a listed number is exempt from the uniqueness index
@@ -517,7 +524,24 @@ router.post("/auth/register/verify", async (req, res) => {
       );
     }
 
-    await createUser(email, passwordHash, phoneToStore, fullName, legacyRole, companyId, companyRole);
+    if (companyToCreate) {
+      // One transaction, per L105: the company and its owner commit together or
+      // neither does. The pending row is still deleted only afterwards, so a
+      // failure here leaves the signup retryable.
+      await createCompanyWithOwner(
+        { id: companyToCreate.id, name: companyToCreate.name, ownerEmail: email },
+        {
+          email,
+          passwordHash,
+          phone: phoneToStore,
+          fullName,
+          role: legacyRole,
+          companyRole,
+        }
+      );
+    } else {
+      await createUser(email, passwordHash, phoneToStore, fullName, legacyRole, companyId, companyRole);
+    }
     await deletePendingRegistration(email);
 
     // Invited join: consume the invite now that the user row exists.

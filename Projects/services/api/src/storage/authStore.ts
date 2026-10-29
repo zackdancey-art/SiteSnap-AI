@@ -1,8 +1,18 @@
 import crypto from "crypto";
 import path from "path";
+import type { Pool, PoolClient } from "pg";
 import { getPgPool } from "./postgres";
 import { FileBackedStore } from "./fileStore";
 import { CompanyRole, soloCompanyIdForEmail } from "../utils/authToken";
+
+/**
+ * Anything that can run a statement: the pool, or one client inside a
+ * transaction. Writers that may need to participate in somebody else's
+ * transaction take one of these and default to the pool, so the single-write
+ * callers are unchanged and `createCompanyWithOwner` below can hand both
+ * writes the same client. See L105 in docs/AUDIT.md.
+ */
+type Queryable = Pool | PoolClient;
 
 export type AuthUser = {
   email: string;
@@ -555,7 +565,13 @@ export async function createUser(
   fullName: string,
   role: "worker" | "supervisor" | "admin",
   companyId: string,
-  companyRole: CompanyRole
+  companyRole: CompanyRole,
+  /**
+   * The transaction to insert in, when the caller has one. Omitted everywhere
+   * but `createCompanyWithOwner`, which needs this INSERT and the companies
+   * INSERT to stand or fall together.
+   */
+  exec?: Queryable
 ) {
   if (!useDatabase()) {
     await ensureMemoryLoaded();
@@ -583,7 +599,7 @@ export async function createUser(
     return;
   }
 
-  await getPgPool().query(
+  await (exec ?? getPgPool()).query(
     `
     INSERT INTO auth_users (email, password_hash, phone, full_name, role, company_id, company_role)
     VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -1103,9 +1119,13 @@ function mapCompany(row: {
 
 const memoryCompanies = new Map<string, CompanyRecord>();
 
-export async function createCompany(input: {
-  id: string; name: string; country?: string; ownerEmail: string;
-}): Promise<CompanyRecord> {
+export async function createCompany(
+  input: {
+    id: string; name: string; country?: string; ownerEmail: string;
+  },
+  /** See `createUser`'s `exec`. */
+  exec?: Queryable
+): Promise<CompanyRecord> {
   const record: CompanyRecord = {
     id: input.id,
     name: input.name,
@@ -1118,7 +1138,7 @@ export async function createCompany(input: {
     memoryCompanies.set(record.id, record);
     return record;
   }
-  const result = await getPgPool().query<{
+  const result = await (exec ?? getPgPool()).query<{
     id: string; name: string; country: string; owner_email: string | null;
     status: "active" | "suspended" | "cancelled";
   }>(
@@ -1129,6 +1149,103 @@ export async function createCompany(input: {
     [record.id, record.name, record.country, record.ownerEmail]
   );
   return mapCompany(result.rows[0]);
+}
+
+/**
+ * Create a company and its owner as one unit, or create neither.
+ *
+ * WHY THIS EXISTS (L105)
+ * `POST /auth/register/verify` used to call `createCompany` and then
+ * `createUser` as two separate statements on the pool, each its own implicit
+ * transaction. `auth_users` has a unique partial index on `phone`
+ * (utils/phoneNumbers.ts), so the second call can fail after the first has
+ * already committed -- two people signing up with the same number, or one
+ * person retrying a signup from a new address. The company row then exists
+ * with an `owner_email` pointing at a user that was never created, and nothing
+ * in the product ever deletes it: the route 500s, the person retries with a
+ * different number, `soloCompanyIdForEmail` derives the same id, and
+ * `ON CONFLICT (id) DO UPDATE` quietly adopts the orphan. Every row created
+ * before the eventual success is unreachable and permanent.
+ *
+ * The invited-join path does not come through here. It creates no company at
+ * all and lets `acceptSiteInvite` stamp the invite's company transactionally,
+ * which is where this shape was already correct.
+ *
+ * The transaction has to live in this file rather than in the route: the
+ * eslint `no-restricted-imports` rule in Projects/.eslintrc.js forbids
+ * importing `storage/postgres` outside `storage/`, so a route cannot hold a
+ * client. It also keeps the single production `INSERT INTO auth_users` single
+ * -- `createUser` is still the only writer, now optionally inside somebody
+ * else's transaction.
+ */
+export async function createCompanyWithOwner(
+  company: { id: string; name: string; country?: string; ownerEmail: string },
+  owner: {
+    email: string;
+    passwordHash: string;
+    phone: string | null;
+    fullName: string;
+    role: "worker" | "supervisor" | "admin";
+    companyRole: CompanyRole;
+  }
+): Promise<void> {
+  if (!useDatabase()) {
+    await ensureMemoryLoaded();
+    // The in-memory store has no transactions, so this compensates by hand.
+    // `memoryCompanies` is not part of the persisted JSON (see the store
+    // serializer above -- it writes users, pending, resetTokens and consents),
+    // so restoring the map is the whole of the rollback and there is nothing
+    // to re-persist. `prior` rather than an unconditional delete because
+    // createCompany is an upsert: a second signup for an existing id must not
+    // be able to delete the company it found.
+    const prior = memoryCompanies.get(company.id);
+    await createCompany(company);
+    try {
+      await createUser(
+        owner.email,
+        owner.passwordHash,
+        owner.phone,
+        owner.fullName,
+        owner.role,
+        company.id,
+        owner.companyRole
+      );
+    } catch (err) {
+      if (prior) {
+        memoryCompanies.set(company.id, prior);
+      } else {
+        memoryCompanies.delete(company.id);
+      }
+      throw err;
+    }
+    return;
+  }
+
+  const client = await getPgPool().connect();
+  try {
+    await client.query("BEGIN");
+    await createCompany(company, client);
+    await createUser(
+      owner.email,
+      owner.passwordHash,
+      owner.phone,
+      owner.fullName,
+      owner.role,
+      company.id,
+      owner.companyRole,
+      client
+    );
+    await client.query("COMMIT");
+  } catch (err) {
+    // Swallowing a ROLLBACK failure deliberately: if the rollback itself
+    // fails the connection is already broken and release() below discards it,
+    // and the error worth reporting to the caller is the original one, not the
+    // rollback's.
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 export async function getCompany(companyId: string): Promise<CompanyRecord | null> {

@@ -61,7 +61,11 @@ cd "$(dirname "$0")/.."
 # suite, and this branch is the last of the six, so 20 is both this tree's
 # count and main's count once the batch has landed. Every count and every
 # position: docs/NINE-WORKSTREAMS-HANDOVER.md.
-EXPECTED_DB_SUITES=20
+#
+# 21 on this branch, MEASURED: chore/pr0-clear-the-queue adds
+# routes/signup-company-transaction-db.test.ts, the Postgres half of L105's
+# fix. 20 was the previous batch's final value and is now main's count.
+EXPECTED_DB_SUITES=21
 
 # How many individual TESTS are gated on REDIS_TEST_URL.
 #

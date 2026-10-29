@@ -358,6 +358,24 @@ module.exports = {
       //                   to set; every row the file writes through the product
       //                   goes through authStore. Exact filename again.
         "services/api/src/routes/signup-consent-db.test.ts",
+      //   routes/signup-company-transaction-db.test.ts
+      //                   migrations and the drain as above, plus two reads no
+      //                   store can give it. L105's whole subject is what
+      //                   COMMITS: a signup refused on the unique phone index
+      //                   must leave no company row, and `getCompany` returning
+      //                   null does not distinguish "no row" from "a row this
+      //                   session cannot see". It also counts rows by
+      //                   `owner_email` rather than by the derived id, which is
+      //                   a query no store exposes and is deliberately a
+      //                   different key from the one the product writes --
+      //                   an orphan written under some other id would escape a
+      //                   read keyed on `soloCompanyIdForEmail`. `companies`
+      //                   is the tenant table itself rather than a tenanted
+      //                   one, so there is no company_id for withTenant to set
+      //                   while asking whether a company exists; every row the
+      //                   file creates goes through authStore and the product's
+      //                   own routes. Exact filename again.
+        "services/api/src/routes/signup-company-transaction-db.test.ts",
       ],
       rules: {
         "no-restricted-imports": [
