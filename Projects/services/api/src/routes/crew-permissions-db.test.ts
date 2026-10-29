@@ -117,7 +117,14 @@ if (!process.env.TEST_DATABASE_URL) {
    * number here is changing what "crew can do their job" means, so it has to
    * happen in the same commit as the route that moved.
    */
-  const EXPECTED_READS = 15;
+  // 16, not 15. The sixteenth is GET /clients, which crew must KEEP: the
+  // client list supplies the headings of their own site list. The route is
+  // deliberately identity-only (clientsRouter.use("/clients", ...FIELD_ACCESS)
+  // at routes/clients.ts:43) while its three writes are manager+, so this is
+  // the row whose absence mattered most — the plausible wrong fix is adding a
+  // `canSeeClients` gate, and before this row nothing in the table went red
+  // when someone did. AUDIT L107, surface 1.
+  const EXPECTED_READS = 16;
   // 14, not 13. The sequence has contained fourteen steps since 897fc80, the
   // commit that introduced this pin — so the number was wrong at birth rather
   // than made wrong by a later change, and nothing had ever caught it because
@@ -132,7 +139,16 @@ if (!process.env.TEST_DATABASE_URL) {
   // FIELD_ACCESS — identity, not rank — on main and on every feature branch, so
   // any crew member with a login could retract any signature in their company.
   // Measured by running this half; see the probe's own comment below.
-  const EXPECTED_REFUSALS = 16;
+  //
+  // 22, not 16. Six rows added for AUDIT L107's four uncovered surfaces: the
+  // three /clients writes, timesheet approval, the site bin and site restore.
+  // Each gate was already tested in its own workstream's suite -- these are
+  // not routes that shipped untested. What was missing was their place in the
+  // TABLE: a per-route test proves one gate, and this file is the only thing
+  // that measures the crew-facing surface as a POPULATION. For those four,
+  // the completeness claim this pin makes was untrue and the file read green
+  // saying so.
+  const EXPECTED_REFUSALS = 22;
   const EXPECTED_FIELD_PROBES = 4;
   /**
    * The two populations the corrected decision added, and the reason the four
@@ -153,6 +169,23 @@ if (!process.env.TEST_DATABASE_URL) {
    */
   const EXPECTED_PARITY_KINDS = 5;
   const EXPECTED_OWNERSHIP_PROBES = 20;
+  /**
+   * The seventh population: refusals that are blind to rank.
+   *
+   * An approved timecard is refused to EVERY role -- the row's state is what
+   * refuses, not the caller's seniority, and a manager wanting to correct one
+   * reopens it first (routes/crew.ts's `sendWriteResult`, and
+   * TIMECARD_EDITABLE_STATUSES in storage/crewStore.ts). It cannot live in
+   * REFUSALS, whose blanket claim is that the OWNER is admitted to every row
+   * in it, and that claim is what makes a 403 there a refusal rather than a
+   * deleted route. So it gets its own population and its own control: reopen
+   * the card, and both roles write again.
+   *
+   * 2: the author and the owner, on the same route and the same row. AUDIT
+   * L107 calls this "the one refusal in the API that a rank-shaped test cannot
+   * express".
+   */
+  const EXPECTED_RANK_BLIND_REFUSALS = 2;
 
   let server: http.Server;
   let baseUrl: string;
@@ -234,6 +267,10 @@ if (!process.env.TEST_DATABASE_URL) {
    */
   type GateRow = Row & { crewAllowed: boolean };
   const OWNERSHIP: GateRow[] = [];
+
+  /** The seventh: refused to both roles, and allowed to both after a reopen. */
+  type LockedRow = Row & { afterReopen: number };
+  const LOCKED: LockedRow[] = [];
 
   const ok = (status: number) => status >= 200 && status < 300;
   const idsOf = (rows: Array<{ id: string }> | undefined) => (rows ?? []).map((r) => r.id).sort();
@@ -319,6 +356,10 @@ if (!process.env.TEST_DATABASE_URL) {
       ["location — live map", "/location/workers"],
       ["push tokens", "/push/tokens"],
       ["account settings (personal, not company)", "/account/settings"],
+      // AUDIT L107, surface 1. Identity-only on purpose: a crew member's site
+      // list is grouped under client headings, so refusing this route would
+      // break the screen they open first.
+      ["clients — the headings of the crew member's own site list", "/clients"],
     ];
     assert.equal(reads.length, EXPECTED_READS, "the operational read population changed — see EXPECTED_READS");
 
@@ -833,6 +874,32 @@ if (!process.env.TEST_DATABASE_URL) {
     );
     const signatureId = signed.body.signature.id;
 
+    // ── AUDIT L107's four surfaces need four more seeds ──────────────────────
+    //
+    // Two clients, because the owner control on DELETE consumes its target and
+    // the PATCH control must still have one to rename. Names carry runId
+    // because the store refuses a duplicate name with a 409, and a 409 where
+    // this test expects the owner's 200 would read as a missing gate.
+    const clientFor = async (label: string): Promise<string> => {
+      const made = await seed<{ client: { id: string } }>(
+        "POST", "/clients", { name: `Crew Perm ${label} ${runId}` }, ownerToken
+      );
+      return made.body.client.id;
+    };
+    const patchClientId = await clientFor("Patch Client");
+    const deleteClientId = await clientFor("Delete Client");
+
+    // A timecard for the approval probe, authored by the crew member because
+    // that is whose hours a manager approves. Its own card rather than one of
+    // the timesheet test's, because the owner control APPROVES it and an
+    // approved card is no longer editable -- nothing else may depend on it.
+    const approvalCard = await seed<{ timecard: { id: string } }>(
+      "POST", "/crew/timecards",
+      { siteId, workerName: `approval probe ${runId}`, date: TODAY, startTime: "07:00", endTime: "15:30", breakMinutes: 30, hoursRegular: 8 },
+      crewToken
+    );
+    const approvalCardId = approvalCard.body.timecard.id;
+
     const probes: Array<{ label: string; method: string; path: string; body?: unknown }> = [
       // ── Exception 1: crew cannot invite anyone ────────────────────────────
       { label: "invite someone to a site", method: "POST", path: `/projects/sites/${siteId}/invites`, body: { emails: [`crew-perm-probe-${runId}@example.test`], role: "crew" } },
@@ -845,12 +912,37 @@ if (!process.env.TEST_DATABASE_URL) {
       { label: "read the company profile", method: "GET", path: "/company/profile" },
       { label: "change the company profile", method: "PATCH", path: "/company/profile", body: { name: `Crew Perm Co ${runId}` } },
       { label: "change somebody's company role", method: "PATCH", path: `/company/members/${encodeURIComponent(CREW)}/role`, body: { companyRole: "crew" } },
+      // ── AUDIT L107 surface 1: the client WRITES are manager+ ──────────────
+      // The read above is crew's to keep; these three are not. Three rows and
+      // not one, because they carry three separate `requireAtLeast("manager")`
+      // calls (routes/clients.ts:84, :107, :131) and a gate removed from one
+      // of them is invisible in a table that probes only another.
+      { label: "create a client", method: "POST", path: "/clients", body: { name: `Crew Perm Probe Client ${runId}` } },
+      { label: "rename a client", method: "PATCH", path: `/clients/${patchClientId}`, body: { name: `Crew Perm Patch Client ${runId} renamed` } },
+      // ── AUDIT L107 surface 2: approving a timesheet is manager+ ───────────
+      // This is a pay control. The owner control approves the card, which
+      // locks it -- see the rank-blind test below for what that then refuses.
+      { label: "approve somebody's timesheet", method: "POST", path: `/crew/timecards/${approvalCardId}/approval`, body: { status: "approved", note: `probe ${runId}` } },
+      // ── AUDIT L107 surface 3: the site bin is manager+ ───────────────────
+      // Whoever can bin a site can see what is in the bin. Crew can do
+      // neither, and the DELETE row below is the other half of that pair.
+      { label: "read the site bin", method: "GET", path: "/projects/sites/bin" },
       // ── The supervisor dashboard ──────────────────────────────────────────
       { label: "the supervisor dashboard's own route", method: "GET", path: "/projects/reports/supervisor" },
       { label: "the supervisor summary aggregate", method: "GET", path: "/projects/summary" },
       // ── Exception 2: crew cannot remove a site. Also creating one. ────────
       { label: "create a site", method: "POST", path: "/projects/sites", body: { name: `Probe Site ${runId}`, address: "3 Main St", client: "ACME", startDate: "2025-01-01", status: "active" } },
+      { label: "delete a client", method: "DELETE", path: `/clients/${deleteClientId}` },
       { label: "delete a site", method: "DELETE", path: `/projects/sites/${disposableId}` },
+      // ── AUDIT L107 surface 4: restore is manager+ ────────────────────────
+      // Deliberately the SAME site the row above just binned, and deliberately
+      // after it: restore is the undo of the one destructive operation in the
+      // product, so probing it against a site that is really in the bin is the
+      // only version of this row worth having -- against a site that is not,
+      // both roles would collect a 404 and the 403 would prove nothing. Of the
+      // four surfaces this is the one whose gate being wrong is least likely
+      // to be noticed and most likely to matter.
+      { label: "restore a binned site", method: "POST", path: `/projects/sites/${disposableId}/restore` },
       { label: "revoke an invitation", method: "DELETE", path: `/projects/sites/${siteId}/invites/${revokeId}` },
       // ── AUDIT L91: crew cannot retract a signature they may give ─────────
       // Destructive in the sense that matters here: the owner control is the
@@ -874,7 +966,61 @@ if (!process.env.TEST_DATABASE_URL) {
     }
   });
 
-  test("the measured table is complete, and all six rows hold", () => {
+  test("an approved timecard refuses every rank, and reopening it restores the write", async () => {
+    /**
+     * AUDIT L107, the half of surface 2 that REFUSALS cannot hold.
+     *
+     * `requireAtLeast` refuses by rank, and every row in REFUSALS is a 403 for
+     * crew against a 2xx for the owner -- that owner control is what makes the
+     * 403 a refusal rather than a deleted route. An approved timecard refuses
+     * on the ROW'S STATE instead: 409 for its author and 409 for the owner,
+     * with no rank in the company that opens it. Putting that row in REFUSALS
+     * would have broken the blanket claim the other sixteen depend on.
+     *
+     * 409 and not 403 is deliberate and recorded at routes/crew.ts's
+     * `sendWriteResult`: 403 would say the caller lacks the rank, and the fix
+     * here is to reopen the card rather than to find somebody more senior.
+     *
+     * The control is the reopen, on the same route and the same row. Without
+     * it a PATCH route that had stopped working altogether -- or a card that
+     * was never approved and 404ing instead -- would read identically.
+     */
+    const card = await seed<{ timecard: { id: string } }>(
+      "POST", "/crew/timecards",
+      { siteId, workerName: `locked probe ${runId}`, date: TODAY, startTime: "07:00", endTime: "15:30", breakMinutes: 30, hoursRegular: 8 },
+      crewToken
+    );
+    const cardId = card.body.timecard.id;
+
+    // Approved by the owner, which is the only role that can.
+    await seed("POST", `/crew/timecards/${cardId}/approval`, { status: "approved" }, ownerToken);
+
+    const edit = (token: string, hours: number) =>
+      req<{ error?: string; code?: string }>("PATCH", `/crew/timecards/${cardId}`, { hoursRegular: hours }, token);
+
+    const crewLocked = await edit(crewToken, 6);
+    const ownerLocked = await edit(ownerToken, 6);
+    assert.equal(crewLocked.status, 409, `the author must be refused an approved card: ${crewLocked.status} ${JSON.stringify(crewLocked.body)}`);
+    assert.equal(ownerLocked.status, 409, `the OWNER must be refused it too -- that is the whole point of the row: ${ownerLocked.status} ${JSON.stringify(ownerLocked.body)}`);
+    // Keyed on the code rather than the sentence, because the sentence is
+    // surfaced to users and will be reworded.
+    assert.equal(crewLocked.body.code, "timecard_approved");
+    assert.equal(ownerLocked.body.code, "timecard_approved");
+
+    // THE CONTROL, same route, same row: reopened, both roles write again.
+    await seed("POST", `/crew/timecards/${cardId}/approval`, { status: "pending" }, ownerToken);
+    const crewReopened = await edit(crewToken, 7);
+    const ownerReopened = await edit(ownerToken, 9);
+    assert.ok(ok(crewReopened.status), `the author cannot edit a reopened card, so the 409 above may be a broken route: ${crewReopened.status} ${JSON.stringify(crewReopened.body)}`);
+    assert.ok(ok(ownerReopened.status), `the owner cannot edit a reopened card, so the 409 above may be a broken route: ${ownerReopened.status} ${JSON.stringify(ownerReopened.body)}`);
+
+    LOCKED.push(
+      { label: "the author edits an approved card", route: "PATCH /crew/timecards/:id", crew: crewLocked.status, owner: 0, afterReopen: crewReopened.status },
+      { label: "the OWNER edits an approved card", route: "PATCH /crew/timecards/:id", crew: 0, owner: ownerLocked.status, afterReopen: ownerReopened.status }
+    );
+  });
+
+  test("the measured table is complete, and all seven rows hold", () => {
     /**
      * Two distinct failures, two distinct messages.
      *
@@ -907,6 +1053,7 @@ if (!process.env.TEST_DATABASE_URL) {
     // that must NOT match. Counting it here is what stops it being dropped.
     complete("read-parity", PARITY, EXPECTED_PARITY_KINDS + 1, "EXPECTED_PARITY_KINDS + 1");
     complete("ownership", OWNERSHIP, EXPECTED_OWNERSHIP_PROBES, "EXPECTED_OWNERSHIP_PROBES");
+    complete("rank-blind refusal", LOCKED, EXPECTED_RANK_BLIND_REFUSALS, "EXPECTED_RANK_BLIND_REFUSALS");
 
     const lines: string[] = [];
     const emit = (heading: string, rows: Row[]) => {
@@ -921,6 +1068,12 @@ if (!process.env.TEST_DATABASE_URL) {
     emit("the exceptions — crew must be refused", REFUSALS);
     emit("the diary status field — crew allowed and refused on the same route", FIELD);
     emit("the ownership gate — crew edit only what they wrote", OWNERSHIP);
+    // Printed with its own heading because 0 here means "not probed as this
+    // role", not "no answer": each row is one role against one locked card.
+    lines.push("\n  rank-blind refusals — an approved timecard refuses everyone  (crew / owner / after reopen)");
+    for (const r of LOCKED) {
+      lines.push(`    ${String(r.crew).padEnd(4)} ${String(r.owner).padEnd(4)} ${String(r.afterReopen).padEnd(4)}  ${r.route}  — ${r.label}`);
+    }
     // Printed differently because it is the only population whose measurement
     // is not a status code. Row counts and whether the id sets matched.
     lines.push("\n  what each role RECEIVED, by id  (crew rows / owner rows / same?)");
@@ -956,6 +1109,19 @@ if (!process.env.TEST_DATABASE_URL) {
     assert.ok(shared.length === EXPECTED_PARITY_KINDS, "the parity population lost a row");
     assert.ok(shared.every((r) => r.same), "crew and the owner did not receive the same rows for a shared record type");
     assert.ok(PARITY.some((r) => !r.same), "every population matched, including timesheets — the carve-out is not applied");
+
+    // The seventh row, both directions. Each probe was refused 409 as the role
+    // it ran as, and each succeeded after the reopen -- the second half is what
+    // stops a PATCH route that refused everybody from passing the first.
+    assert.ok(
+      LOCKED.every((r) => (r.crew || r.owner) === 409),
+      "a rank-blind probe did not answer 409 — an approved timecard is editable by somebody"
+    );
+    assert.ok(
+      LOCKED.every((r) => ok(r.afterReopen)),
+      "a rank-blind probe stayed refused after the reopen, so its 409 is not about approval"
+    );
+    assert.ok(LOCKED.some((r) => r.owner === 409), "the owner was never probed against an approved card — the rank-blind claim is untested");
   });
 
 }
