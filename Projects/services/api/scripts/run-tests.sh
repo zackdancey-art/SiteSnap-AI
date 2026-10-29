@@ -254,7 +254,10 @@ if [ "$MODE" = "db" ] && [ "$#" -ne "$EXPECTED_DB_SUITES" ]; then
 fi
 
 if [ "$MODE" = "db" ]; then
-  exec env NODE_ENV=test node --require ./dist/test-setup.js "$CONCURRENCY" --test "$@"
+  # --test-reporter=tap explicit, per AUDIT L110 — see the note at the piped
+  # invocation below. This path parses nothing itself, but it must agree with
+  # the other two or the same command reports differently depending on mode.
+  exec env NODE_ENV=test node --require ./dist/test-setup.js "$CONCURRENCY" --test-reporter=tap --test "$@"
 fi
 
 # Memory and redis modes run through `tee` so the skip count can be checked afterwards
@@ -279,8 +282,16 @@ OUT=$(mktemp)
 STATUS_FILE=$(mktemp)
 trap 'rm -f "$OUT" "$STATUS_FILE"' EXIT
 
+# --test-reporter=tap is EXPLICIT, not decorative (AUDIT L110). node picks its
+# default reporter from whether stdout is a TTY, and the non-TTY default changed
+# between node 20 (`tap`) and node 24 (`spec`). Every summary parser below greps
+# for TAP counter lines such as "# pass 12", which node 24's spec reporter
+# writes as "ℹ pass 12" instead. CI pins node 20 so CI never saw it; a local run
+# on 24 fails with "could not find a '# pass' line" and looks like a broken
+# parser rather than a reporter change. Passing it explicitly is correct under
+# BOTH versions, so this is backward-safe, not a node-24 workaround.
 set +e
-{ env NODE_ENV=test node --require ./dist/test-setup.js ${CONCURRENCY:+"$CONCURRENCY"} --test "$@"; echo "$?" > "$STATUS_FILE"; } | tee "$OUT"
+{ env NODE_ENV=test node --require ./dist/test-setup.js ${CONCURRENCY:+"$CONCURRENCY"} --test-reporter=tap --test "$@"; echo "$?" > "$STATUS_FILE"; } | tee "$OUT"
 set -e
 
 STATUS=$(cat "$STATUS_FILE")
@@ -352,10 +363,32 @@ if [ "$MODE" = "redis" ] || [ "$MODE" = "openai" ]; then
     EXPECTED_PASSES=$EXPECTED_LIVE_OPENAI_TESTS; COUNTER_NAME=EXPECTED_LIVE_OPENAI_TESTS; TARGET="the live OpenAI API"
   fi
   PASSED=$(awk '/^# pass /{print $3}' "$OUT" | tail -1)
-  if [ "${PASSED:-0}" -ne "$EXPECTED_PASSES" ]; then
+  # Fail closed on an UNPARSEABLE summary, and say so — the three sibling
+  # parsers in these two scripts all do this and this one did not (AUDIT L110).
+  #
+  # What the old `${PASSED:-0}` actually did, stated precisely because the
+  # first write-up of this overstated it: with EXPECTED_PASSES non-zero (4 and
+  # 3 today) an empty PASSED became 0, compared unequal, and exited 1 — so it
+  # failed closed, but reported "passed 0 test(s)", which sends you looking for
+  # a selector that matched nothing instead of a reporter whose format changed.
+  # It fails OPEN only if a counter is ever legitimately 0, at which point
+  # "unparseable" and "zero passes" become the same answer. One of those is a
+  # wrong diagnosis today and the other is a silent green later.
+  if [ -z "$PASSED" ]; then
     {
       echo ""
-      echo "ERROR: $MODE run passed ${PASSED:-0} test(s), expected $EXPECTED_PASSES."
+      echo "ERROR: could not find a '# pass' line in the $MODE test output." >&2
+      echo "  The runner's summary format changed; update this parser rather than" >&2
+      echo "  dropping the check. If you are on node 24 or newer, check that" >&2
+      echo "  --test-reporter=tap is still passed at the invocation above." >&2
+      echo ""
+    } >&2
+    exit 1
+  fi
+  if [ "$PASSED" -ne "$EXPECTED_PASSES" ]; then
+    {
+      echo ""
+      echo "ERROR: $MODE run passed $PASSED test(s), expected $EXPECTED_PASSES."
       echo ""
       echo "  Update $COUNTER_NAME in the same commit that adds or removes such a"
       echo "  test. If you did not change one, tests stopped being selected —"

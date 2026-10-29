@@ -101,8 +101,16 @@ OUT=$(mktemp)
 STATUS_FILE=$(mktemp)
 trap 'rm -f "$OUT" "$STATUS_FILE"' EXIT
 
+# --test-reporter=tap is EXPLICIT, not decorative (AUDIT L110). node picks its
+# default reporter from whether stdout is a TTY, and the non-TTY default changed
+# between node 20 (`tap`) and node 24 (`spec`). Every summary parser below greps
+# for TAP counter lines such as "# pass 12", which node 24's spec reporter
+# writes as "ℹ pass 12" instead. CI pins node 20 so CI never saw it; a local run
+# on 24 fails with "could not find a '# pass' line" and looks like a broken
+# parser rather than a reporter change. Passing it explicitly is correct under
+# BOTH versions, so this is backward-safe, not a node-24 workaround.
 set +e
-{ node --require ./dist-test/lib/test-setup.js --test "$@"; echo "$?" > "$STATUS_FILE"; } | tee "$OUT"
+{ node --require ./dist-test/lib/test-setup.js --test-reporter=tap --test "$@"; echo "$?" > "$STATUS_FILE"; } | tee "$OUT"
 set -e
 
 STATUS=$(cat "$STATUS_FILE")
