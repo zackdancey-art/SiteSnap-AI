@@ -26,6 +26,7 @@ import {
   resetRateLimitStoreForTests,
   getRateLimiterStatus,
   redactRedisUrl,
+  warmRateLimiterBackendAtBoot,
 } from "../middleware/rateLimit";
 import { resetFakeSendsForTests } from "../services/notificationService";
 
@@ -75,6 +76,34 @@ async function req<T = unknown>(method: string, path: string, body?: unknown): P
     if (payload) r.write(payload);
     r.end();
   });
+}
+
+/**
+ * Wait for a limiter reading the event loop has not produced yet.
+ *
+ * The boot-arming tests below assert on work that happens off the back of a
+ * socket event and a timer rather than inside an awaited request, so there is
+ * no promise belonging to the subject to await. Polling with a deadline fails
+ * loudly with the last reading attached, which a bare setTimeout would not.
+ */
+type LimiterStatus = ReturnType<typeof getRateLimiterStatus>;
+async function waitForLimiter(
+  predicate: (status: LimiterStatus) => boolean,
+  what: string,
+  timeoutMs = 5000
+): Promise<LimiterStatus> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const status = getRateLimiterStatus();
+    if (predicate(status)) return status;
+    if (Date.now() > deadline) {
+      throw new Error(`${what} never happened within ${timeoutMs}ms; last reading: ${JSON.stringify(status)}`);
+    }
+    await new Promise<void>((resolve) => {
+      const t = setTimeout(resolve, 10);
+      t.unref?.();
+    });
+  }
 }
 
 before(async () => {
@@ -194,4 +223,89 @@ test("/health/ready reports the backend actually in use, not the one configured"
   // Degraded counting is not an outage. Locking the whole service out over a
   // rate limiter would be a worse failure than the one it reports.
   assert.notEqual(getRateLimiterStatus().state, "connected");
+});
+
+test("an idle service alarms on an unreachable Redis, without a request to trip it", async () => {
+  // M2 / L113. Everything that reports a dead Redis — the `error` handler and
+  // the grace timer — used to be created inside getRedisClient(), which only
+  // the counter path calls. So a service that had not yet served a
+  // rate-limited request sat silent with an unreachable Redis: no console line,
+  // no Sentry event, and /health/ready saying "configured". The alarm was armed
+  // by the first victim rather than at boot.
+  //
+  // This test issues NO HTTP request before the assertion. The only statement
+  // between the two readings below is the boot call.
+  const idle = getRateLimiterStatus();
+  // CONTROL, and the exact shape of the defect: with REDIS_URL set and nothing
+  // having connected, the limiter reports the configuration rather than the
+  // backend and has announced nothing. This reading is what production showed.
+  assert.equal(idle.state, "configured", "precondition: nothing has connected yet");
+  assert.equal(idle.degradationReports, 0, "precondition: nothing has been announced yet");
+
+  warmRateLimiterBackendAtBoot();
+
+  const alarmed = await waitForLimiter(
+    (status) => status.degradationReports > 0,
+    "the boot-armed degradation alarm"
+  );
+  assert.equal(
+    alarmed.degradationReports, 1,
+    "boot must announce the dead Redis exactly once, with no request having been made"
+  );
+  assert.equal(alarmed.state, "degraded", "and /health/ready must stop saying \"configured\"");
+  assert.match(String(alarmed.lastError), /.+/, "the reason must be recorded, or the alert says nothing actionable");
+
+  // POSITIVE CONTROL that the announcement really did precede all counting, and
+  // that arming at boot did not consume anybody's allowance: the full
+  // per-identifier allowance (2) is still available after the alarm. If the
+  // alarm had come from the request path — the pre-L113 behaviour — the first
+  // of these would already have been counted.
+  const statuses: number[] = [];
+  for (let i = 0; i < 3; i++) {
+    statuses.push((await req("POST", "/auth/forgot-password", {
+      identifier: "boot-armed@example.com", channel: "sms",
+    })).status);
+  }
+  assert.deepEqual(
+    statuses, [200, 200, 429],
+    `the allowance must be untouched at the moment of the alarm, and still enforced after it, got ${statuses}`
+  );
+  assert.equal(
+    getRateLimiterStatus().degradationReports, 1,
+    "and the three requests must not re-announce what boot already announced"
+  );
+});
+
+test("a memory-only deployment is not alarmed at boot", async () => {
+  // The other half of the decision: arming at boot must not turn "we have not
+  // configured Redis" — a deliberate choice that logRateLimiterBackendAtBoot
+  // already warns about in plain words — into a Sentry incident on every boot
+  // of every deployment that does not use it.
+  const configured = process.env.REDIS_URL;
+  // Assign, never delete: server.ts calls dotenv.config() on import and dotenv
+  // repopulates an ABSENT key while leaving an empty one alone.
+  process.env.REDIS_URL = "";
+  try {
+    warmRateLimiterBackendAtBoot();
+    await new Promise<void>((resolve) => {
+      const t = setTimeout(resolve, 100);
+      t.unref?.();
+    });
+    const quiet = getRateLimiterStatus();
+    assert.equal(quiet.degradationReports, 0, "an unconfigured limiter is a decision, not an incident");
+    assert.equal(quiet.state, "disabled", "and it must report disabled, not degraded");
+  } finally {
+    process.env.REDIS_URL = configured ?? "";
+  }
+
+  // POSITIVE CONTROL, same test: with the URL restored the identical call DOES
+  // announce. Without this, a warm function that had been reduced to `return;`
+  // would pass the three assertions above having proved nothing.
+  resetRateLimitStoreForTests();
+  warmRateLimiterBackendAtBoot();
+  const alarmed = await waitForLimiter(
+    (status) => status.degradationReports > 0,
+    "the boot-armed alarm with REDIS_URL restored"
+  );
+  assert.equal(alarmed.state, "degraded", "the same call must still announce when Redis IS configured");
 });

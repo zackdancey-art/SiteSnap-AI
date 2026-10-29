@@ -401,15 +401,53 @@ export function logRateLimiterBackendAtBoot(): void {
     );
     return;
   }
-  // Says "configured", not "using". At this point nothing has connected: the
-  // client opens lazily on the first rate-limited request, so this line has no
-  // evidence for "using" at the moment it prints, and the previous wording
-  // contradicted /health/ready for as long as the service was idle.
+  // Says "configured", not "using". At this point nothing has connected, so
+  // this line has no evidence for "using" at the moment it prints, and the
+  // previous wording contradicted /health/ready for as long as the service was
+  // idle. warmRateLimiterBackendAtBoot() opens the socket immediately after
+  // this line; /health/ready is where the outcome shows up.
   console.log(
     `[ratelimit] REDIS_URL is configured (${redactRedisUrl(process.env.REDIS_URL)}). ` +
-      `The connection opens on the first rate-limited request — check /health/ready ` +
-      `for the live backend; this line does not mean Redis is in use yet.`
+      `The connection is opened now, at boot — check /health/ready for the live ` +
+      `backend; this line does not mean Redis is in use yet.`
   );
+}
+
+/**
+ * Open the Redis connection at boot rather than on the first rate-limited
+ * request. See L113 in docs/AUDIT.md.
+ *
+ * WHY this exists as a separate call. Everything that reports a dead Redis —
+ * the `error` handler that calls markDegraded, and the grace timer that
+ * announces when the socket never becomes ready — is created inside
+ * getRedisClient(). getRedisClient() is called from exactly two places, both on
+ * the counter path. So on a service that had not yet served a rate-limited
+ * request, an unreachable Redis produced no console line, no Sentry event and a
+ * /health/ready state of "configured": the alarm was armed by the first victim
+ * rather than at boot, and "nobody has tried yet" and "it is broken" were the
+ * same reading.
+ *
+ * Fire and forget, deliberately. Boot must not wait on a Redis handshake —
+ * getRedisClient() blocks its first caller for up to REDIS_READY_TIMEOUT_MS so
+ * that caller's count lands in Redis, and a boot has no count to place. The
+ * work this call wants done is synchronous anyway: the client, the error
+ * handler and the grace timer all exist before the first await.
+ *
+ * It changes nothing about the request path. getRedisClient() sets
+ * redisConnectAttempted synchronously, so the first real request takes the
+ * already-attempted branch and awaits the same handshake promise it would have
+ * created itself.
+ */
+export function warmRateLimiterBackendAtBoot(): void {
+  // Not configured is a decision, not an incident. logRateLimiterBackendAtBoot
+  // above has already said so in the log, and arming an alarm for a backend
+  // nobody asked for would make that decision look like a fault.
+  if (!process.env.REDIS_URL) return;
+  // getRedisClient() handles its own failures and the promise it returns
+  // settles on error as well as on ready, so this cannot reject. The catch is
+  // here so that a future change inside it cannot turn a boot into an
+  // unhandled rejection.
+  void getRedisClient().catch(() => {});
 }
 
 async function getRedisClient(): Promise<unknown | null> {

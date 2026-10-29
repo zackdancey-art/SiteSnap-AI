@@ -3473,7 +3473,7 @@ to sign in — ending every session is the point of a reset.
 
 ---
 
-### L105 — `createCompany` commits before `createUser` with no transaction around the pair, so a signup that fails the phone-uniqueness index leaves a company with no member — MEDIUM (write atomicity, signup path; QUEUED, first after the eleven-workstream merge lands and before any real signup)
+### L105 — `createCompany` commits before `createUser` with no transaction around the pair, so a signup that fails the phone-uniqueness index leaves a company with no member — MEDIUM (write atomicity, signup path; FIXED on `chore/pr0-clear-the-queue`, 29 October 2026)
 
 **How this was found.** Not by reading the signup path. A production read of `companies` on
 27 October 2026 returned **two** rows where one account exists: `company_2b7f006b…` (7 August,
@@ -3532,6 +3532,27 @@ this is a compliance-evidence product and the owner decides what happens to reco
 a transaction around the two writes, and it is first in the queue once the eleven-workstream
 merge has landed.
 
+**Disposition:** FIXED on `chore/pr0-clear-the-queue`, 29 October 2026, commit `db83849`. The
+two writes now run inside one transaction in `storage/authStore.ts` →
+`createCompanyWithOwner(company, owner)`, which `routes/auth.ts` calls on the solo-signup path in
+place of `createCompany` + `createUser`. The transaction had to live in the store, not the route,
+because `.eslintrc.js` forbids a route importing `storage/postgres`; `createCompany` and
+`createUser` took an optional executor parameter so that both writes can be handed the same
+client, and `createUser` remains the only production inserter into `auth_users`. The in-memory
+store has no transaction, so the same function compensates by hand there — restoring the prior
+`memoryCompanies` entry rather than deleting unconditionally, because `createCompany` is an
+upsert. `deletePendingRegistration` is deliberately still **outside** the transaction, so a
+refused signup stays retryable.
+
+**Verification, and what is still unverified.** The in-memory half is red-on-revert: with the
+compensation removed, `routes/signup-company-orphan.test.ts` fails with the orphan company
+printed as the actual value, 297 of the other 298 tests green, and restores to
+`# tests 326 # pass 298 # fail 0 # skipped 28`. The Postgres half —
+`routes/signup-company-transaction-db.test.ts`, three tests — is DB-gated and **has never been
+executed**: there is no Postgres in the environment it was written in, so it registers its skip
+placeholder and `EXPECTED_DB_SUITES` went 20 → 21 in the same commit. Nothing repaired, per the
+entry above: no backfill, no deletion of the existing orphan row.
+
 ---
 
 ### L106 — `auth_pending_registrations` retains a password hash, a phone number and a name indefinitely, because expiry is enforced at use and deletion is only opportunistic — RETENTION QUESTION (owner's legal review; deliberately not filed as a code defect)
@@ -3576,7 +3597,7 @@ properly.
 
 ---
 
-### L107 — The crew-permission table's six pins came through the eleven-workstream merge unchanged, and that is the defect: four new crew-facing surfaces have no row in it — MEDIUM (test integrity; the table that defines "crew can do their job" does not know about a quarter of the job) — QUEUED, behind L105
+### L107 — The crew-permission table's six pins came through the eleven-workstream merge unchanged, and that is the defect: four new crew-facing surfaces have no row in it — MEDIUM (test integrity; the table that defines "crew can do their job" does not know about a quarter of the job) — FIXED on `chore/pr0-clear-the-queue`, 29 October 2026
 
 **How this was found.** Not by a failure. By the opposite: during the merge rehearsal
 (`rehearsal/merge-all-2`, 27 October 2026) every pinned count in the repository was re-measured
@@ -3651,6 +3672,28 @@ rows for the client writes, one 403 and one 409 for timecard approval, one crew-
 `/bin` and `/restore` — each with its positive control on the same endpoint in the same test per
 the standing rule, the three pins raised to the measured lengths in the same commit, and the
 whole thing in the DB-gated suite because every one of them is a permission against Postgres.
+
+**Disposition:** FIXED on `chore/pr0-clear-the-queue`, 29 October 2026, commit `11961da`, in the
+shape prescribed above with two deviations, both stated here rather than left for a reader to
+notice.
+
+1. **The 409 is not on the approval route.** This entry says the 409 is "for an approved card
+   (`routes/crew.ts:301`)" in the course of describing timecard approval. It is not: the approval
+   handler at `routes/crew.ts:377` says in its own comment that no locked case reaches it, and the
+   409 is raised by `sendWriteResult` when a PATCH or DELETE lands on an already-approved card. The
+   new probe is therefore a PATCH, and the test asserts on `body.code === "timecard_approved"`
+   rather than the sentence.
+2. **A seventh population, not three raised pins.** `EXPECTED_READS` went 15 → 16 and
+   `EXPECTED_REFUSALS` 16 → 22; `EXPECTED_WRITE_STEPS` did not move, because none of the four
+   surfaces adds a step to the crew's own write walk. The rank-blind case — a write refused to the
+   author *and* to the owner while the card is approved, and allowed to both after a reopen — does
+   not fit any of the six existing lists, so it is a seventh: `EXPECTED_RANK_BLIND_REFUSALS=2`,
+   with the completeness test renamed from "all six rows hold" to "all seven rows hold".
+
+**Not verified.** The whole suite is DB-gated and there is no Postgres in the environment it was
+written in. The three pins were counted statically against the array literals and agree, but no
+assertion in that file has been executed; it must be run with `TEST_DATABASE_URL` set and the
+printed table read.
 
 ---
 
@@ -4157,3 +4200,121 @@ silently". Both of those record it as an incident in a specific merge. It is fil
 because the conditions that produce it are generic — a pin, a population in other files, a resolution
 that changes the population, and one side not having touched the pin line — and none of them is
 specific to workflows, to this script, or to this batch.
+
+---
+
+### L113 — the rate limiter's degradation alarm was armed inside the lazy client path, so an unreachable Redis on an idle service announced nothing and reported "configured" — MEDIUM (monitoring gap; the limiter itself behaved correctly, the alarm on it did not) — FIXED on `chore/pr0-clear-the-queue`, 29 October 2026
+
+**What this is.** Filed from the owner's M2 observation after the rate-limiter work: *"the
+degradation alarm is armed inside the lazy client path, so an unreachable Redis on an idle service
+produces no error, no Sentry event and a health reading of 'configured'. Arm it at boot, or say why
+not."* The observation is correct, and the call graph is the whole of it.
+
+**The call graph, as it stood before this commit.** Everything that reports a dead Redis is created
+inside `getRedisClient()`:
+
+| mechanism | where it was created | what calls it |
+|---|---|---|
+| `client.on("error", …)` → `markDegraded` → `announceDegraded` (`rateLimit.ts:323`) | inside `getRedisClient()` | — |
+| the grace timer that announces when the socket never becomes ready (`rateLimit.ts:497`, `REDIS_CONNECT_GRACE_MS` default 10 s at `:273`) | inside `getRedisClient()` | — |
+| `getRedisClient()` itself (`:453`) | — | two call sites, `:563` and `:578`, both on the counter path |
+
+`announceDegraded` is the only thing that does `console.error` plus
+`Sentry.captureMessage("[ratelimit] degraded to in-memory counting: …", "error")`. Both routes to
+it were therefore created by the first rate-limited request. On a service that had not yet served
+one, an unreachable Redis produced no console line, no Sentry event, and
+`getRateLimiterStatus()` (`:386`) reporting `state: "configured"` — the alarm was armed by the
+first victim rather than at boot, and **"nobody has tried yet" and "it is broken" were the same
+reading**. `logRateLimiterBackendAtBoot()` (`:395`, called once from `server.ts:201`) printed a
+line at boot but connected nothing, and said so honestly.
+
+**Severity, and why it is not higher.** Nothing about the limiter's behaviour was wrong: the
+fallback, the fail-fast `enableOfflineQueue: false`, the once-per-transition announcement and the
+truthful `/health/ready` backend field all worked as designed and are covered by tests. What was
+missing was the *trigger*. The blast radius is bounded by the fact that the alarm does fire the
+moment anybody hits a rate-limited route — so the window is "idle", not "forever". It is MEDIUM
+rather than LOW because an API that nobody is hitting is exactly the state in which a silent
+limiter is least likely to be noticed and most likely to be wrong when traffic arrives.
+
+**Two premises in the report, corrected rather than propagated.**
+
+1. **The health reading of `"configured"` is not a case mismatch or a misread variable.** Line 386
+   reads `redisState === "disabled" && process.env.REDIS_URL ? "configured" : redisState`.
+   `"configured"` is **unreachable** unless `process.env.REDIS_URL` is truthy in that process. So
+   the owner's own health reading is positive evidence that `REDIS_URL` **is** set in production,
+   and the situation is set-but-never-attempted, not set-under-a-different-name. An earlier session
+   hypothesised a name or case mismatch; that hypothesis is disproved by the reading itself.
+2. **On the written record this is the first instance of an unnoticed fallback, not the second.**
+   The report refers to a fifteen-day unnoticed Redis fallback as prior art. No such record exists:
+   `/usr/bin/grep -rni 'fifteen day\|15 days\|for two weeks' docs/` returns nothing, and no entry
+   in this file records one. **L5** (`docs/AUDIT.md:170`) is the only prior rate-limiter entry —
+   three sentences, verdict "No action now", and it cites `server.ts:51-54` for the boot log, which
+   is stale: those lines are now inside `validateProviderConfig()`'s missing-provider list. The
+   fifteen days may well have happened in production; it is not in the repository, and this entry
+   does not record it as if it were.
+
+**The decision: armed at boot.** `warmRateLimiterBackendAtBoot()` (`rateLimit.ts:441`) is called
+from `bootstrap()` at `server.ts:207`, immediately after the existing boot log line. It opens the
+socket at boot, which creates the error handler and starts the grace timer there, so an unreachable
+Redis announces within `REDIS_CONNECT_GRACE_MS` of boot whether or not anybody has made a request.
+The four properties that made this safe to do rather than a reason to say no:
+
+- **It does not block boot.** Fire and forget. `getRedisClient()` holds its *first* caller for up
+  to `REDIS_READY_TIMEOUT_MS` so that caller's count lands in Redis; a boot has no count to place,
+  and everything this call wants created — client, error handler, grace timer — exists before the
+  first `await`.
+- **It does not change the request path.** `getRedisClient()` sets `redisConnectAttempted`
+  synchronously, so the first real request takes the already-attempted branch and awaits the same
+  handshake promise it would otherwise have created.
+- **It cannot reject.** `getRedisClient()` catches its own failures and the promise it returns
+  settles on `error` as well as on `ready`. The `.catch(() => {})` is there so a future change
+  inside it cannot turn a boot into an unhandled rejection.
+- **It does not alarm a deployment that has no Redis.** `warmRateLimiterBackendAtBoot()` returns
+  early when `REDIS_URL` is unset. Not configuring Redis is a decision, which
+  `logRateLimiterBackendAtBoot()` already warns about in plain words; arming an alarm for a backend
+  nobody asked for would turn that decision into a Sentry incident on every boot of every
+  deployment that counts in memory.
+
+**What this does NOT fix, stated so nobody reads more into it.** The alarm now fires at boot, but
+**nothing proves Sentry received it**, and no test in this repository can: `instrument.ts`
+deliberately never calls `Sentry.init()` in test mode, and `@sentry/node` exports `captureMessage`
+as a non-configurable getter that cannot be stubbed. What is tested is that the announcement branch
+executed, counted by `redisDegradationReports`. Delivery is a one-line call, reviewable by eye,
+and unproven.
+
+**Verification.** Two tests in `routes/rate-limit-redis-degraded.test.ts`, which already points
+`REDIS_URL` at `redis://admin:hunter2@127.0.0.1:1` (port 1, refused immediately, no network) and
+already sets `RATE_LIMIT_REDIS_CONNECT_GRACE_MS=0`, so the alarm is the subject rather than the
+suppression. The first test issues **no HTTP request** before its assertion: it reads
+`state === "configured"` and `degradationReports === 0`, calls `warmRateLimiterBackendAtBoot()`,
+and asserts `degradationReports === 1` and `state === "degraded"`. Its positive control is that the
+full per-identifier allowance is still intact afterwards — `[200, 200, 429]` on three
+`forgot-password` calls — which proves the announcement preceded all counting rather than having
+come from the request path. The second test blanks `REDIS_URL` (assign `""`, never `delete`: dotenv
+repopulates an absent key), asserts the same call announces nothing, and then restores the URL and
+asserts the identical call *does* announce — without that control, a warm function reduced to
+`return;` would satisfy the silence assertions having proved nothing.
+
+Red-on-revert, with the arming replaced by `return;` (the pre-L113 behaviour):
+
+```
+not ok 150 - an idle service alarms on an unreachable Redis, without a request to trip it
+  error: 'the boot-armed degradation alarm never happened within 5000ms; last reading:
+    {"backend":"memory","state":"configured","degradedSince":null,"fallbackCount":0,
+     "degradationReports":0,"lastError":null}'
+not ok 151 - a memory-only deployment is not alarmed at boot
+  error: 'the boot-armed alarm with REDIS_URL restored never happened within 5000ms; last
+    reading: {"backend":"memory","state":"configured","degradedSince":null,"fallbackCount":0,
+     "degradationReports":0,"lastError":null}'
+# tests 328  # pass 298  # fail 2  # skipped 28
+```
+
+The reverted reading is the defect verbatim: `state: "configured"`, `degradationReports: 0`,
+`fallbackCount: 0`. 298 others stayed green, 28 skips unchanged. Restored:
+`# tests 328 # pass 300 # fail 0 # skipped 28`, exit 0.
+
+**Unverified here.** The boot path itself. `bootstrap()` is not called by any test — tests use
+`createApp()` — so `server.ts:207` executing, and the Sentry event arriving, are both things only a
+deployment shows. The check after this deploys is `/api/health/ready` on an idle API with
+`REDIS_URL` set: `rateLimiter.state` must read `connected` or `degraded`, and must never again read
+`configured` more than ten seconds after a boot.
