@@ -47,6 +47,14 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
+# 4 and 36, MEASURED on this branch.
+#
+# EXPECTED_TEST_FILES alone cannot catch a test file that was never COMPILED --
+# tsconfig.test.json carries an explicit `files` list, so a new lib/*.test.ts
+# omitted from it emits nothing, the count stays where it was, and this counter
+# passes having run the new tests nowhere. AUDIT L115, where exactly that
+# happened on the mobile side. The equality further down closes it, by deriving
+# the population from the SOURCE tree rather than from this number.
 EXPECTED_TEST_FILES=4
 EXPECTED_TESTS=36
 
@@ -92,6 +100,97 @@ if [ "$#" -ne "$EXPECTED_TEST_FILES" ]; then
   exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# AUDIT L115, ported from apps/mobile/scripts/run-tests.sh.
+#
+# The counter above counts what the compiler EMITTED. It cannot count what a
+# person WROTE, so it cannot notice the gap between the two. tsconfig.test.json
+# carries an explicit `files` array -- deliberately, so that a module can only
+# be added by someone who has checked it has no React, next/* or DOM import --
+# and the cost is that a new lib/*.test.ts omitted from it emits nothing,
+# dist-test/ holds the same number of files as before, EXPECTED_TEST_FILES
+# still matches, and the run goes green having never loaded the new tests.
+#
+# On mobile that was not hypothetical: lib/client-site-counts.test.ts sat on
+# disk through a full green run of 26 files and 207 tests, with seven tests that
+# had never executed. Nothing about that mechanism is specific to mobile, and
+# this package's `files` array is the same shape. It is ported here BEFORE it
+# bites rather than after, because the portal's suite is about to grow.
+#
+# A hand-maintained number cannot close this, because the number and the
+# omission are the same mistake. So the population comes from the SOURCE tree --
+# the files a person actually wrote -- and each one must have an emitted twin.
+# Per AUDIT L112: an equality against a run-time-derived comparand, not a floor.
+#
+# `.test.tsx` is included in the sweep even though this package currently has
+# none. A component test would be the obvious first one somebody writes, and a
+# guard that silently ignores the file extension it was not written for is the
+# same defect in a new coat.
+# ---------------------------------------------------------------------------
+SOURCE_LIST=$(find . \( -name '*.test.ts' -o -name '*.test.tsx' \) \
+  -not -path './node_modules/*' -not -path './dist-test/*' | sort)
+
+if [ -z "$SOURCE_LIST" ]; then
+  {
+    echo ""
+    echo "ERROR: found 0 *.test.ts files in the source tree."
+    echo ""
+    echo "  dist-test/ held $# compiled test file(s), so this is not an empty"
+    echo "  package -- it is a broken find(1) invocation, a wrong working"
+    echo "  directory, or a source tree that has lost its tests."
+    echo ""
+  } >&2
+  exit 1
+fi
+
+UNCOMPILED=""
+SOURCE_COUNT=0
+for src in $SOURCE_LIST; do
+  SOURCE_COUNT=$((SOURCE_COUNT + 1))
+  emitted="dist-test/$(echo "$src" | sed -e 's|^\./||' -e 's|\.test\.tsx*$|.test.js|')"
+  if [ ! -f "$emitted" ]; then
+    UNCOMPILED="$UNCOMPILED
+    $src -> expected $emitted"
+  fi
+done
+
+if [ -n "$UNCOMPILED" ]; then
+  {
+    echo ""
+    echo "ERROR: $SOURCE_COUNT test file(s) in the source tree, but these"
+    echo "       emitted nothing to dist-test/:"
+    echo "$UNCOMPILED"
+    echo ""
+    echo "  Almost always: the file is missing from the \"files\" array in"
+    echo "  tsconfig.test.json. Add it, together with the module it tests, and"
+    echo "  raise EXPECTED_TEST_FILES and EXPECTED_TESTS in the same commit."
+    echo ""
+    echo "  If the module genuinely cannot be compiled here -- it imports React,"
+    echo "  next/* or a browser global -- then it does not belong in lib/ as a"
+    echo "  *.test.ts; say so in review rather than leaving a test file that"
+    echo "  never runs."
+    echo ""
+  } >&2
+  exit 1
+fi
+
+if [ "$SOURCE_COUNT" -ne "$#" ]; then
+  {
+    echo ""
+    echo "ERROR: $SOURCE_COUNT test file(s) in the source tree, $# in dist-test/."
+    echo ""
+    echo "  Every source test file has an emitted twin (checked above), so this"
+    echo "  is the other direction: dist-test/ holds a compiled test with no"
+    echo "  source. A stale dist-test should be impossible -- the test script"
+    echo "  starts with 'rm -rf dist-test' -- so find out why before changing"
+    echo "  any number."
+    echo ""
+  } >&2
+  exit 1
+fi
+
+echo "run-tests.sh: $SOURCE_COUNT source test file(s), all compiled"
+
 # Exit status out of a pipeline, the careful way. `$?` after a pipe is tee's
 # status (always 0) and ${PIPESTATUS[0]} is a bashism that expands to nothing
 # under dash — either mistake swallows every test failure and reports green.
@@ -101,8 +200,21 @@ OUT=$(mktemp)
 STATUS_FILE=$(mktemp)
 trap 'rm -f "$OUT" "$STATUS_FILE"' EXIT
 
+# --test-reporter=tap is EXPLICIT, not decorative (AUDIT L110). node picks its
+# default reporter from whether stdout is a TTY, and the non-TTY default changed
+# between node 20 (`tap`) and node 24 (`spec`). The parsers below grep for TAP
+# counter lines such as "# pass 12", which node 24's spec reporter writes as
+# "ℹ pass 12" instead. CI pins node 20, so CI never saw it; a local run on 24
+# failed with "could not find a '# pass' line" and looked like a broken parser
+# rather than a reporter change. Passing it explicitly is correct under BOTH
+# versions, so this is backward-safe, not a node-24 workaround.
+#
+# This site was MISSED by the L110 sweep in PR 0, which said "all three node
+# --test invocation sites" and meant the API's two and mobile's one. There are
+# four. The portal's was overlooked for the same reason AUDIT L115 wrongly
+# recorded that this package has no test suite at all -- see L117.
 set +e
-{ node --test "$@"; echo "$?" > "$STATUS_FILE"; } | tee "$OUT"
+{ node --test-reporter=tap --test "$@"; echo "$?" > "$STATUS_FILE"; } | tee "$OUT"
 set -e
 
 STATUS=$(cat "$STATUS_FILE")

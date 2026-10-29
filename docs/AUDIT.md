@@ -4580,3 +4580,123 @@ have yet. Stated so that the next person moving an address does not rediscover i
 `files` array and therefore the same silent-omission hole; it has not been shown to have bitten
 there, and PR 1 is not where it belongs.
 
+---
+
+### L117 — the portal's test runner was missing both of the protections the other three runners got, because a false belief that it had no tests kept it out of two sweeps — MEDIUM (one of the two was live: the portal's suite could not be run at all on the default node here) — FIXED on `feat/pr2-job-number`, 30 October 2026
+
+**One root cause, two defects.** I recorded in AUDIT L115 that "the portal has no test suite".
+L116 withdrew that claim a day later. This entry is what the claim cost: `apps/supervisor-web` was
+silently excluded from the last two repo-wide sweeps over the test runners, and both exclusions were
+real holes rather than harmless omissions.
+
+| # | sweep | the other three got it | the portal | live? |
+|---|---|---|---|---|
+| 1 | L110 — pass `--test-reporter=tap` explicitly | PR 0, `075502e` | missed | **yes** |
+| 2 | L115 — derive the compiled population from the source tree | PR 1, `ca94b56` (mobile only) | missed | not yet shown to have bitten |
+
+**On the count itself.** PR 0's commit message and L110 both say "all three node `--test`
+invocation sites". There are **four**: `services/api/scripts/run-tests.sh` has two (the `exec` path
+at line 264 and the piped path at line 298), `apps/mobile/scripts/run-tests.sh` has one, and
+`apps/supervisor-web/scripts/run-tests.sh` has one. Three of the four were fixed. The sentence was
+not a miscount of a population I had enumerated — it is the population I enumerated, with the
+portal absent from it because I did not believe there was anything there to enumerate. That is the
+more useful way to state it: **the sweep was complete over the wrong set.**
+
+**Defect 1 was live, and reproduced before fixing.** `node --test` picks its reporter from whether
+stdout is a TTY, and the non-TTY default changed from `tap` (node 20) to `spec` (node 24). The
+portal runner greps for `^# pass`. On the default node here (v24.13.1):
+
+```
+$ node -v
+v24.13.1
+$ pnpm -C Projects --filter sitesnap-supervisor-web run test
+✔ a record with no photographs produces an empty set rather than throwing (1.14625ms)
+ℹ tests 36
+ℹ suites 0
+ℹ pass 36
+ℹ fail 0
+ℹ skipped 0
+
+ERROR: could not find a '# pass' line in the test output.
+  The runner's summary format changed; update this parser rather than
+  dropping the check.
+Exit status 1
+```
+
+Thirty-six tests passed and the runner reported a broken parser. It **fails closed**, which is the
+correct direction and is why this is MEDIUM rather than HIGH — but it fails closed *with a wrong
+diagnosis*, and the diagnosis it offers ("update this parser") is an invitation to make it fail open.
+CI pins node 20, so CI never saw it; anybody running the portal suite locally on a current node saw
+nothing but a red build they had no reason to connect to a reporter default. After the one-word fix,
+same node, same command:
+
+```
+1..36
+# tests 36
+# pass 36
+# fail 0
+# skipped 0
+run-tests.sh: 36 test(s) passed, 0 skipped
+```
+
+**Defect 2 was ported before it bit, and the red-on-revert covers both directions.** The portal's
+`tsconfig.test.json` carries the same explicit `files` array as mobile's, so it has the same silent
+drop: a new `lib/*.test.ts` omitted from the array emits nothing, `dist-test/` holds the same number
+of files as before, `EXPECTED_TEST_FILES` still matches, and the run is green having never loaded
+it. The guard is the same shape as mobile's — an equality against a comparand derived from the
+source tree at run time, per L112, not a raised floor.
+
+Reproduced in the **genuine** configuration, which is the one where none of the existing counters
+fire: `lib/photo-viewer-set.ts` and its test removed from the `files` array **and** both pins put
+back to where they would be without that file (4→3 files, 36→30 tests). Only the new guard should
+have anything to say. Both runs on node 20, so the reporter change is not a variable.
+
+*A — the pre-change runner, the same configuration:*
+
+```
+# fail 0
+# skipped 0
+run-tests.sh: 30 test(s) passed, 0 skipped
+exit=0
+```
+
+Green. Exit 0. `lib/photo-viewer-set.test.ts` on disk, its six tests never executed, and no counter
+troubled by it. That is the defect, demonstrated on the portal rather than argued from mobile.
+
+*B — the new runner, byte-identical configuration:*
+
+```
+run-tests.sh: 3 test file(s)
+
+ERROR: 4 test file(s) in the source tree, but these
+       emitted nothing to dist-test/:
+
+    ./lib/photo-viewer-set.test.ts -> expected dist-test/lib/photo-viewer-set.test.js
+
+  Almost always: the file is missing from the "files" array in
+  tsconfig.test.json. …
+Exit status 1
+```
+
+Restored: 4 files, `# pass 36 # fail 0 # skipped 0`, exit 0. The six tests are back.
+
+**`.test.tsx` is swept even though this package has none.** A component test is the obvious first
+one somebody writes here, and a guard that ignores the extension it was not written for is the same
+defect in a new coat.
+
+**Considered and deliberately not changed:** the portal runner's skip check is
+`[ "${SKIPPED:-0}" -ne 0 ]`, which reports "0 skipped" if the `# skipped` line is absent entirely —
+the shape that was wrong at `services/api/scripts/run-tests.sh:291` and fixed in PR 0. It is not
+wrong here, because `PASSED` is proven non-empty a few lines above and both counters come out of the
+same summary block, so an absent `# skipped` is unreachable without an absent `# pass` that has
+already exited. Mobile's runner has the identical line and was left alone in PR 0 for the same
+reason. Recorded so that a future sweep does not read the two as inconsistent.
+
+**Disposition:** FIXED, both halves. **The lesson is about the sweep, not the scripts.** Two
+repo-wide passes over "every test runner" both ran over three of four, and neither noticed, because
+the population came from what I believed rather than from the file system. The durable fix is the
+same one L115 reached for in a smaller way: derive the population. `grep -rln 'node --test' Projects
+--include='*.sh'` is the whole enumeration and takes a second. Not automated here — a check that
+asserts all four runners pass `--test-reporter=tap` would be a fifth thing to keep in step, and the
+command above is cheaper than maintaining it. That is a judgement, so it is written down.
+
