@@ -35,7 +35,8 @@ import type { Client, Site } from "./types";
  * docs/DECISIONS.md rather than to a filing feature.
  *
  * So the region between the two markers below is byte-identical in both files,
- * and `assert_site_grouping_copies` in Projects/scripts/ci.sh diffs it. Edit one
+ * and `assert_shared_logic_copies` in Projects/scripts/ci.sh diffs it, driven by
+ * the `site-grouping` entry in that script's SHARED_LOGIC_GROUPS list. Edit one
  * and CI fails on the commit that did it, naming both paths. The imports and the
  * prose above the marker are each file's own; everything inside it is shared.
  *

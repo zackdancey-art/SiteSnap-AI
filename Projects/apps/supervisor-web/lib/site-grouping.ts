@@ -8,7 +8,7 @@ import type { Client, Site } from "@/lib/api";
  * The rule itself is in the marked region below and is byte-identical to
  * apps/mobile/lib/site-grouping.ts, which carries the long explanation of why
  * an unknown client id keeps its own group instead of falling into "Unfiled".
- * `assert_site_grouping_copies` in Projects/scripts/ci.sh diffs the two regions,
+ * `assert_shared_logic_copies` in Projects/scripts/ci.sh diffs the two regions,
  * so editing one without the other fails the build.
  *
  * WHAT IS THE PORTAL'S OWN AND WHAT IS SHARED

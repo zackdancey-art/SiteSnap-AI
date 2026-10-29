@@ -4700,3 +4700,105 @@ same one L115 reached for in a smaller way: derive the population. `grep -rln 'n
 asserts all four runners pass `--test-reporter=tap` would be a fifth thing to keep in step, and the
 command above is cheaper than maintaining it. That is a judgement, so it is written down.
 
+
+---
+
+### L118 — four schema columns shipped in migrations 010 and 011 that no TypeScript has ever referenced, and the one the UI appeared to render was reached through a type assertion so the compiler could not report its absence — MEDIUM (one of the four was a visible feature that could never render; the other three are still open)
+
+**Found while implementing PR 2, whose brief said "Migration additive."** The column already existed.
+PR 2 was specified as adding `job_number` to sites. `011_job_numbers_time_codes.sql` had added it
+already:
+
+```sql
+-- Add job_number to sites, and time_code + hours_worked to entries
+-- Source: feature/soon-and-v2-features migration 007, renumbered to 011 for main's sequence
+
+ALTER TABLE project_sites
+  ADD COLUMN IF NOT EXISTS job_number TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE project_entries
+  ADD COLUMN IF NOT EXISTS time_code TEXT NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS hours_worked TEXT NOT NULL DEFAULT '';
+```
+
+So PR 2 is not "add a column" but "give an orphaned column its store, its routes, its two clients
+and its tests". The migration was never the missing part.
+
+**THE POPULATION, DERIVED RATHER THAN SAMPLED.** Every `ADD COLUMN IF NOT EXISTS` in every
+migration, cross-checked against every `.ts`/`.tsx` file in the workspace outside `migrations/`:
+
+| measured | value |
+|---|---|
+| distinct columns added by `ADD COLUMN IF NOT EXISTS` | 66 |
+| `.ts`/`.tsx` files scanned outside `migrations/` | 342 |
+| columns with **zero** references in that tree, before PR 2 | **4** |
+| columns with zero references after PR 2 | 3 |
+
+The four: `job_number` (`project_sites`, migration 011), `time_code` and `hours_worked`
+(`project_entries`, migration 011), `signed_by` (migration 010, line 37). PR 2 closes the first.
+**The other three are recorded here as open and deliberately not fixed** — two of them are entry
+fields that belong with PR 5's entry work, and `signed_by` belongs with signatures.
+
+**A false negative in my own census, recorded rather than quietly corrected.** The first pass
+reported two orphans, not three: `time_code` appeared to be referenced. It was not. The match was
+the substring inside the migration **filename** `011_job_numbers_time_codes.sql`, which PR 2's own
+new comments name three times. A census by substring clears a column the moment somebody writes the
+migration's name in a comment. The second pass blanks every migration filename from the haystack
+first, and that is the number in the table above. Worth stating because the technique is the thing
+being reused here, not the result.
+
+**WHY NOTHING NOTICED, WHICH IS THE ACTUAL FINDING.** Three separate guards were in a position to
+see this and none could.
+
+*1 — The mobile site screen rendered `Job #` through a cast.* `apps/mobile/app/site/[id].tsx`, as it
+stood:
+
+```tsx
+{!!(site as { jobNumber?: string }).jobNumber && (
+  …
+  <Text style={styles.headerDetailText}>Job #{(site as { jobNumber?: string }).jobNumber}</Text>
+```
+
+`Site` had no `jobNumber`. The API never sent one. The condition was therefore always false and the
+line could never render — a shipped feature that was structurally unreachable. A cast is an
+instruction to the compiler not to check, so `tsc --noEmit` had nothing to say about it for the
+whole time the column sat unread. **Removing both casts and declaring the field is what produced
+two real type errors** (`invites.test.ts:664`, `projects.e2e.test.ts:55`), which is the error the
+cast had been suppressing all along.
+
+*2 — The DB round-trip guard proves one direction, and its own payload is cast.*
+`storage/store-roundtrip.test.ts` exists precisely to catch store-versus-schema drift (L10, L11).
+It did not catch this, for two compounding reasons. It drives each store's **full-column INSERT**
+and reads it back, so it proves every column the store writes exists in the schema — the store →
+schema direction. A column in the schema that **no store writes** is invisible to it. And its
+`createSite` payload carried `as Parameters<typeof S.createSite>[1]`, which silences exactly the
+compiler error a missing payload field produces. The one test whose job is column coverage was
+structurally unable to notice the gap, and a cast kept it that way.
+
+*3 — The API's own schema and store never mentioned it.* `SiteSchema` had no `jobNumber`, `mapSite`
+dropped `job_number` from every row it mapped, and `createSite`'s INSERT listed nine columns of a
+ten-column table. `SELECT *` was returning the column on every read and the mapper was discarding
+it.
+
+**Disposition: PARTIALLY FIXED on `feat/pr2-job-number`, 30 October 2026.**
+
+`job_number` now has: the field on `SiteRecord` and `SiteRow`, `mapSite` reading it with `?? ""`,
+`createSite` writing it as the tenth column, `updateSiteJobNumber` in `projectsStore.ts`, `PATCH
+/projects/sites/:id/job-number` at `requireAtLeast("manager")`, `jobNumber` on `SiteSchema`, the
+rule duplicated to both clients inside the shared-logic markers, 8 in-memory route tests, 9
+DB-gated route tests, 7 client tests on each side, and two shipping callers
+(`apps/mobile/app/site/[id].tsx` via `lib/data-context.tsx`, and
+`apps/supervisor-web/app/sites/[id]/page.tsx` via `lib/api.ts`).
+
+The round-trip guard's `createSite` now writes a **non-empty** `job_number` and asserts it comes
+back, so that one column is covered in both directions. **The cast is still there** and still
+silences the same class of error for the other columns; it is left because removing it means giving
+that test a full literal payload for every store, which is its own change. Recorded as open.
+
+**What would actually close the class.** A check that enumerates `ADD COLUMN` across the migrations
+and fails when a column has no reference in the TypeScript tree — the census above, as a CI step.
+Not added here, and the reason is honest rather than tidy: it would have to tolerate columns that
+are legitimately written only by SQL in a migration, and the exemption list is the kind of thing
+that grows until the check means nothing. Filed as a candidate, not a decision. The cheap half is
+already in place for the one column PR 2 touches: `assert_job_number_cap_agrees` in
+`Projects/scripts/ci.sh` proves the three tiers that state the field's cap agree with each other.

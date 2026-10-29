@@ -340,30 +340,54 @@ assert_legal_copy_census() {
   echo "  $label: $count copies, exactly the ones enumerated."
 }
 
-# ── The site-grouping rule exists twice, so prove the two copies agree
+# ── Rules that exist twice, so prove each pair of copies agrees
 #
-# apps/mobile/lib/site-grouping.ts and apps/supervisor-web/lib/site-grouping.ts
-# carry the same function. They are not one module because @sitesnap/shared
-# resolves `main`, `types` and every `exports` entry to a `.d.ts` file — it
-# carries types and no runtime JavaScript — and making it emit JS is an
-# install-resolution change belonging to docs/DECISIONS.md.
+# Two client rules are written out in both clients rather than imported from
+# one module: site grouping and job numbers. They are not one module because
+# @sitesnap/shared resolves `main`, `types` and every `exports` entry to a
+# `.d.ts` file — it carries types and no runtime JavaScript — and making it
+# emit JS is an install-resolution change belonging to docs/DECISIONS.md.
 #
-# The region between the markers is byte-identical by construction (the portal
-# copy was generated from the mobile one). This diffs it, so editing one side
-# alone fails the build naming both paths, instead of the phone and the portal
-# quietly disagreeing about whether a site is filed.
+# Each pair's region between the markers is byte-identical by construction (the
+# portal copy was generated from the mobile one). This diffs it, so editing one
+# side alone fails the build naming both paths, instead of the phone and the
+# portal quietly disagreeing about whether a site is filed, or about how long a
+# job number may be.
 #
-# WHAT THIS DOES NOT PROVE: that either copy is correct. The eight tests in
-# apps/mobile/lib/site-grouping.test.ts prove that, and they run against the
-# mobile copy only. This step is what carries their result across to the
-# portal, which has no test harness. It also does not notice a THIRD copy
-# appearing somewhere else — unlike the legal census, there is no marker phrase
-# to grep for, and a function body is not prose.
+# WHAT THIS DOES NOT PROVE: that either copy is correct. Tests prove that, and
+# where those tests live differs per rule:
+#
+#   site-grouping  apps/mobile/lib/site-grouping.test.ts only, eight tests
+#                  against the mobile copy. For this rule the diff is what
+#                  carries that result across to the portal copy.
+#   job-number     BOTH sides — apps/mobile/lib/job-number.test.ts and
+#                  apps/supervisor-web/lib/job-number.test.ts, seven tests
+#                  each. Two identical copies of a WRONG rule diff clean, so
+#                  here the diff proves agreement and each package's own suite
+#                  proves behaviour.
+#
+# An earlier version of this comment said the portal "has no test harness".
+# That was false when written — apps/supervisor-web/scripts/run-tests.sh
+# existed and was green — and the same false belief is what kept the portal's
+# runner out of the AUDIT L110 and L115 sweeps, two real holes left open by a
+# sentence in a comment. Corrected here rather than quietly deleted; the record
+# is AUDIT L117.
+#
+# It also does not notice a THIRD copy appearing somewhere else — unlike the
+# legal census, there is no marker phrase to grep for, and a function body is
+# not prose.
 
-SITE_GROUPING_COPIES="apps/mobile/lib/site-grouping.ts
-apps/supervisor-web/lib/site-grouping.ts"
+# label|sentinel the marked region must contain|comma-separated paths
+#
+# The sentinel is what makes a renamed or deleted marker a failure instead of a
+# vacuous pass: an extract missing its region is empty, and two empty extracts
+# diff clean.
+SHARED_LOGIC_GROUPS="site-grouping|export function groupSitesByClient|apps/mobile/lib/site-grouping.ts,apps/supervisor-web/lib/site-grouping.ts
+job-number|export const JOB_NUMBER_MAX_LENGTH|apps/mobile/lib/job-number.ts,apps/supervisor-web/lib/job-number.ts"
 
-assert_site_grouping_copies() {
+# $1 label, $2 sentinel, $3 comma-separated paths
+assert_shared_logic_copies() {
+  label="$1"; sentinel="$2"; paths="$3"
   tmp="$(mktemp -d)"
   i=0
   prev=""
@@ -373,10 +397,11 @@ assert_site_grouping_copies() {
   # end the subshell and let this function return 0 — a check that reports a
   # pass after failing is worse than no check. The paths are repo-relative with
   # no spaces, which is what makes the splitting safe.
-  for path in $(printf '%s\n' "$SITE_GROUPING_COPIES" | sed '/^$/d'); do
+  for path in $(printf '%s\n' "$paths" | tr ',' '\n' | sed '/^$/d'); do
     if [ ! -f "$path" ]; then
-      echo "ci.sh: $path is enumerated as a site-grouping copy but does not exist." >&2
-      echo "  Either it was renamed, or this list is stale. Fix both together." >&2
+      echo "ci.sh: $path is enumerated as a $label copy but does not exist." >&2
+      echo "  Either it was renamed, or SHARED_LOGIC_GROUPS is stale. Fix both" >&2
+      echo "  together." >&2
       rm -rf "$tmp"; exit 1
     fi
     i=$((i + 1))
@@ -384,15 +409,15 @@ assert_site_grouping_copies() {
     # A marker that has been renamed or deleted extracts nothing, and an empty
     # file diffs clean against another empty file — exactly the vacuous pass
     # this script exists to refuse. So require the region to be present AND to
-    # contain the function it is meant to be guarding.
-    if ! grep -q "export function groupSitesByClient" "$tmp/r$i"; then
-      echo "ci.sh: $path has no SHARED-LOGIC region containing groupSitesByClient." >&2
+    # contain the declaration it is meant to be guarding.
+    if ! grep -q "$sentinel" "$tmp/r$i"; then
+      echo "ci.sh: $path has no SHARED-LOGIC region containing '$sentinel'." >&2
       echo "  The markers are '// SHARED-LOGIC-BEGIN' and '// SHARED-LOGIC-END'," >&2
       echo "  each alone on its line. Refusing to compare two empty extracts." >&2
       rm -rf "$tmp"; exit 1
     fi
     if [ -n "$prev" ] && ! diff -u "$prev" "$tmp/r$i" > "$tmp/d$i"; then
-      echo "ci.sh: the site-grouping rule has drifted between its two copies." >&2
+      echo "ci.sh: the $label rule has drifted between its copies." >&2
       echo "  $prev_path" >&2
       echo "  $path" >&2
       echo "  The marked region must be byte-identical in both. Apply the" >&2
@@ -405,16 +430,138 @@ assert_site_grouping_copies() {
   # The count is measured from what was actually compared, not written down. A
   # list trimmed to one entry would otherwise sail through: one file, no diff.
   if [ "$i" -lt 2 ]; then
-    echo "ci.sh: only $i site-grouping copy was examined, so nothing was compared." >&2
-    echo "  SITE_GROUPING_COPIES must list at least two paths." >&2
+    echo "ci.sh: only $i $label copy was examined, so nothing was compared." >&2
+    echo "  Every SHARED_LOGIC_GROUPS entry must list at least two paths." >&2
     rm -rf "$tmp"; exit 1
   fi
   rm -rf "$tmp"
-  echo "  site-grouping: $i copies, marked regions byte-identical."
+  echo "  $label: $i copies, marked regions byte-identical."
 }
 
-step "Structural: the site-grouping rule has not drifted between its two copies"
-assert_site_grouping_copies
+assert_all_shared_logic_copies() {
+  groups=0
+  # The same `for` rather than `while read`, for the same reason as above: an
+  # `exit 1` from inside a piped `while` would only end its subshell. The
+  # entries hold no spaces, which is what makes the line-splitting safe.
+  OLD_IFS=$IFS
+  IFS='
+'
+  # shellcheck disable=SC2086
+  set -- $SHARED_LOGIC_GROUPS
+  IFS=$OLD_IFS
+  for entry in "$@"; do
+    [ -n "$entry" ] || continue
+    groups=$((groups + 1))
+    assert_shared_logic_copies \
+      "$(printf '%s' "$entry" | cut -d'|' -f1)" \
+      "$(printf '%s' "$entry" | cut -d'|' -f2)" \
+      "$(printf '%s' "$entry" | cut -d'|' -f3)"
+  done
+  # An equality, not a floor (AUDIT L112). Two groups are enumerated above; a
+  # list emptied or truncated to one by an edit would otherwise pass having
+  # checked less than it claims, and the per-group `$i -lt 2` guard cannot see
+  # a group that is no longer there at all.
+  if [ "$groups" -ne 2 ]; then
+    echo "ci.sh: examined $groups shared-logic group(s), expected 2." >&2
+    echo "  If you added or removed a duplicated client rule, change this" >&2
+    echo "  number in the same commit as SHARED_LOGIC_GROUPS." >&2
+    exit 1
+  fi
+  echo "  shared-logic: $groups group(s), every copy in agreement."
+}
+
+step "Structural: no duplicated client rule has drifted between its copies"
+assert_all_shared_logic_copies
+
+# ── The job-number cap is stated on three tiers, so prove the three agree
+#
+# The number appears in:
+#
+#   services/api/src/routes/projects.ts    the cap z.string().trim().max()
+#                                          REFUSES with a 400
+#   apps/mobile/lib/job-number.ts          the `maxLength` the input gets
+#   apps/supervisor-web/lib/job-number.ts  the same, in the portal twin
+#
+# The two client copies are already proved equal by the shared-logic diff above
+# — the declaration is inside their marked region, which is why the sentinel
+# for that group is this very constant. This step is the one the diff cannot
+# do: comparing them against the SERVER's literal, which lives in another
+# package and is duplicated nowhere.
+#
+# WHY IT IS WORTH A CHECK. A cap that disagrees across tiers is invisible until
+# somebody types a long job number: the form accepts up to the client's number,
+# the save is refused by the server's, and the only symptom is "it won't save"
+# with a message naming a limit the input did not enforce. Nothing in
+# typecheck, lint or either test suite can see across the two packages.
+#
+# The comparands are DERIVED by reading each file (AUDIT L112), so this step
+# has no number of its own to go stale — only the population of files does, and
+# that is pinned by an equality below.
+
+JOB_NUMBER_CAP_FILES="services/api/src/routes/projects.ts
+apps/mobile/lib/job-number.ts
+apps/supervisor-web/lib/job-number.ts"
+
+assert_job_number_cap_agrees() {
+  first=""
+  first_path=""
+  i=0
+  for path in $(printf '%s\n' "$JOB_NUMBER_CAP_FILES" | sed '/^$/d'); do
+    if [ ! -f "$path" ]; then
+      echo "ci.sh: $path is enumerated as stating the job-number cap but does" >&2
+      echo "  not exist. Either it was renamed, or JOB_NUMBER_CAP_FILES is" >&2
+      echo "  stale. Fix both together." >&2
+      exit 1
+    fi
+    i=$((i + 1))
+    # Exactly one declaration per file. `sed` would silently take the last of
+    # several, so count first: zero means it was renamed or the cap moved, and
+    # more than one means this check cannot say which is authoritative.
+    # `\(export \)*` and not `\(export \)\?`: BSD sed has no `\?`, so the
+    # optional-group spelling GNU accepts made this sed match nothing on
+    # macOS while the grep above still counted 1 -- the two patterns
+    # disagreeing, which is the one failure mode this function can report
+    # but not fix for itself. `*` is portable BRE in both sed and grep, and
+    # the probe below was run under /bin/sh AND dash to prove it.
+    found="$(grep -c '^\(export \)*const JOB_NUMBER_MAX_LENGTH = [0-9]\{1,\};$' "$path" || true)"
+    if [ "$found" != "1" ]; then
+      echo "ci.sh: $path declares JOB_NUMBER_MAX_LENGTH $found time(s), expected 1." >&2
+      echo "  It must read 'const JOB_NUMBER_MAX_LENGTH = <n>;' on one line," >&2
+      echo "  optionally exported, so that all three tiers can be compared." >&2
+      exit 1
+    fi
+    value="$(sed -n 's/^\(export \)*const JOB_NUMBER_MAX_LENGTH = \([0-9]\{1,\}\);$/\2/p' "$path")"
+    if [ -z "$value" ]; then
+      echo "ci.sh: counted a JOB_NUMBER_MAX_LENGTH declaration in $path but" >&2
+      echo "  could not read its value. The grep and the sed above disagree;" >&2
+      echo "  fix the pattern rather than dropping the check." >&2
+      exit 1
+    fi
+    if [ -z "$first" ]; then
+      first="$value"; first_path="$path"
+    elif [ "$value" != "$first" ]; then
+      echo "ci.sh: the job-number cap disagrees across tiers." >&2
+      echo "  $first_path: $first" >&2
+      echo "  $path: $value" >&2
+      echo "  A client cap above the server's lets a form accept what the save" >&2
+      echo "  then refuses; below it, the form refuses what the server would" >&2
+      echo "  have taken. Change all three in the same commit." >&2
+      exit 1
+    fi
+  done
+  # An equality on the population, not a floor (AUDIT L112). Three tiers state
+  # this number; a list trimmed to one would otherwise pass having compared
+  # nothing against anything.
+  if [ "$i" -ne 3 ]; then
+    echo "ci.sh: examined $i file(s) for the job-number cap, expected 3." >&2
+    echo "  JOB_NUMBER_CAP_FILES must list the API's and both clients'." >&2
+    exit 1
+  fi
+  echo "  job-number cap: $i tiers, all stating $first."
+}
+
+step "Structural: the job-number cap agrees across the API and both clients"
+assert_job_number_cap_agrees
 
 # ── The portal's version constant
 #
