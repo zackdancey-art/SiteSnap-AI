@@ -2254,19 +2254,28 @@ export async function updateSiteClient(
 }
 
 /**
- * Every site's id and filing, unpaginated, for counting sites per client.
+ * Every LIVE site's id and filing, unpaginated, for counting sites per client.
  *
  * `listSites` caps at 200 and `clientsStore.countSitesByClient` needs the whole
  * company, so this is a separate narrow read rather than a bigger limit on the
  * list route. Only the in-memory path uses it — against Postgres the count is
  * one GROUP BY in clientsStore.
+ *
+ * The `deletedAt` filter is L114, and it belongs here rather than in the
+ * caller: this function is the in-memory twin of a statement that carries
+ * `liveOnly("project_sites")`, and the two halves of one count drifting apart
+ * is how the bug reached production in the first place. Every other reader of
+ * `memory.sites` that feeds a user-visible list filters the bin out the same
+ * way (`listSites`, `listEntries`, `listDiaries`); this one did not, and it was
+ * the only one whose output was a number rather than a list, which is why
+ * nobody saw it.
  */
 export async function listSitesForClientCounts(
   actor: Actor
 ): Promise<Array<{ id: string; clientId: string | null }>> {
   await ensureMemoryLoaded();
   return Array.from(memory.sites.values())
-    .filter((site) => site.companyId === actor.companyId)
+    .filter((site) => site.companyId === actor.companyId && !site.deletedAt)
     .map((site) => ({ id: site.id, clientId: site.clientId ?? null }));
 }
 

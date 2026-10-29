@@ -408,6 +408,62 @@ if (!process.env.TEST_DATABASE_URL) {
     }
   });
 
+  test("binning a site takes it out of its client's count, and restoring puts it back", async () => {
+    // L114, against the store production uses. The twin of this scenario in
+    // clients.test.ts is what makes it reproducible without a database; this
+    // one is the only place the GROUP BY actually runs, and the GROUP BY is
+    // where the missing `deleted_at IS NULL` lived.
+    const clientId = await newClient(`Binned Count ${runId}`, ownerToken);
+    const FILED: string[] = [];
+    for (const n of [1, 2]) {
+      const id = await newSite(`Binned Count Site ${n} ${runId}`, ownerToken);
+      await seed("PATCH", `/projects/sites/${id}`, { clientId }, ownerToken);
+      FILED.push(id);
+    }
+    const countFor = async (id: string): Promise<number | undefined> => {
+      const list = await seed<{ clients: Client[] }>("GET", "/clients", undefined, ownerToken);
+      return list.body.clients.find((c) => c.id === id)?.siteCount;
+    };
+
+    // POSITIVE CONTROL before anything is binned, derived from what this test
+    // filed rather than written down (L112).
+    assert.equal(await countFor(clientId), FILED.length, "the filed sites were not counted at all");
+
+    const binned = await req("DELETE", `/projects/sites/${FILED[0]}`, undefined, ownerToken);
+    assert.equal(binned.status, 200, "the site was not binned, so nothing below is measured");
+    // From behind the route: the row is still there, and still filed. That is
+    // what makes the count wrong rather than the row missing — the site is
+    // present and filed, and must not be counted. The binned state itself is
+    // read through the product below rather than by selecting `deleted_at`
+    // here, which the L99 lint rule forbids in a SQL string for good reason.
+    const row = await siteRow(FILED[0]);
+    assert.ok(row, "binning DELETED the row — then this is a different bug from the one under test");
+    assert.equal(row.client_id, clientId, "binning unfiled the site, which is not what it is supposed to do");
+    // And the product agrees about which side of the bin it is on: in the bin
+    // listing, out of the live listing. Both, because either alone is satisfied
+    // by a site that has vanished entirely.
+    const bin = await seed<{ sites: Site[] }>("GET", "/projects/sites/bin", undefined, ownerToken);
+    assert.ok(bin.body.sites.some((s) => s.id === FILED[0]), "the binned site is not in the bin");
+    const live = await seed<{ sites: Site[] }>("GET", "/projects/sites", undefined, ownerToken);
+    assert.ok(!live.body.sites.some((s) => s.id === FILED[0]), "the binned site is still in the live listing");
+    assert.ok(live.body.sites.some((s) => s.id === FILED[1]), "positive control: the other filed site IS still listed");
+
+    assert.equal(
+      await countFor(clientId), FILED.length - 1,
+      "the client still counts a binned site — this is the reported bug"
+    );
+
+    // POSITIVE CONTROL on the other side: restore puts it back. A count that
+    // had been decremented on delete rather than computed over live rows would
+    // pass the assertion above and fail this one.
+    const restored = await req("POST", `/projects/sites/${FILED[0]}/restore`, undefined, ownerToken);
+    assert.equal(restored.status, 200, "the site was not restored, so the count below proves nothing");
+    assert.equal(
+      await countFor(clientId), FILED.length,
+      "the restored site is live again but is not counted again"
+    );
+  });
+
   test("crew cannot file a site under a client, and a manager can", async () => {
     const clientId = await newClient(`Crew Filing ${runId}`, ownerToken);
     const target = await newSite(`Crew Filing Site ${runId}`, ownerToken);

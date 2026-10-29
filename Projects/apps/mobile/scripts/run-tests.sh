@@ -30,25 +30,23 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
-# 26, MEASURED on the tree this branch merges into -- main plus the PRs
-# ahead of it in the merge order -- not on this branch alone. The number is
-# POSITION-DEPENDENT: 15 on main, +1 clients, +1 whs, +2 storage-ceiling, +1
-# report-periods, +1 photo-viewer, +1 bin-retention, +2 consent-and-native,
-# +2 here = 26. FINAL value: the one PR after this adds a test but no test
-# FILE. Every count and every position: docs/NINE-WORKSTREAMS-HANDOVER.md.
-EXPECTED_TEST_FILES=26
-# 207, MEASURED on the tree this branch merges into -- main plus the ten PRs
-# ahead of it -- not on this branch alone, where the count is 114. The
-# number is POSITION-DEPENDENT: this branch is ELEVENTH AND LAST in the
-# merge order, so 207 is the final union total and this is the branch that
-# carries it. Of the 94 tests the batch adds, 93 come from the ten PRs ahead
-# and 1 from here (lib/permissions.test.ts gained the canVoidSignature test,
-# AUDIT L91, which is why this branch read 114 against main's 113).
-# EXPECTED_TEST_FILES is deliberately LEFT AT 15: this branch adds no test
-# FILE, so the line is left untouched to inherit 26 from
-# feat/branding-and-dashboard-parity (PR 10) with no conflict. Every count
-# and every position: docs/NINE-WORKSTREAMS-HANDOVER.md.
-EXPECTED_TESTS=207
+# 27, MEASURED on this branch. The eleven-workstream batch that produced the
+# comment this replaces has landed, so the number is no longer
+# position-dependent across that batch: 26 on main, +1 for
+# lib/client-site-counts.test.ts (AUDIT L114, the phone half of the site-count
+# bug). The historical breakdown of the 26 is in
+# docs/NINE-WORKSTREAMS-HANDOVER.md.
+#
+# This counter alone cannot catch a test file that was never COMPILED --
+# tsconfig.test.json carries an explicit `files` list, so a new lib/*.test.ts
+# omitted from it emits nothing, the count stays where it was and the counter
+# passes. AUDIT L115. The equality below closes that, by deriving the
+# population from the SOURCE tree rather than from this number.
+EXPECTED_TEST_FILES=27
+# 214, MEASURED on this branch: 207 on main, +7 from
+# lib/client-site-counts.test.ts. The historical derivation of the 207 is in
+# docs/NINE-WORKSTREAMS-HANDOVER.md.
+EXPECTED_TESTS=214
 
 FILE_LIST=$(find dist-test -name '*.test.js' | sort)
 
@@ -91,6 +89,88 @@ if [ "$#" -ne "$EXPECTED_TEST_FILES" ]; then
   } >&2
   exit 1
 fi
+
+# ---------------------------------------------------------------------------
+# AUDIT L115: the counter above cannot catch a test file that was never
+# compiled.
+#
+# tsconfig.test.json carries an EXPLICIT `files` array -- deliberately, so that
+# a module can only be added by someone who has checked it has no React Native
+# import. The cost is that a new lib/*.test.ts omitted from it emits nothing,
+# dist-test holds the same number of files as before, EXPECTED_TEST_FILES still
+# matches, and the run goes green having never loaded the new tests. That is
+# exactly what happened to lib/client-site-counts.test.ts: 26 files, 207 tests,
+# exit 0, with seven tests on disk that had never executed.
+#
+# A hand-maintained number cannot close that, because the number and the
+# omission are the same mistake. So this derives the population from the SOURCE
+# tree -- the files a person actually wrote -- and requires an emitted twin for
+# each one. Per AUDIT L112: an equality against a run-time-derived comparand,
+# not a floor.
+# ---------------------------------------------------------------------------
+SOURCE_LIST=$(find . \( -name '*.test.ts' -o -name '*.test.tsx' \) \
+  -not -path './node_modules/*' -not -path './dist-test/*' | sort)
+
+if [ -z "$SOURCE_LIST" ]; then
+  {
+    echo ""
+    echo "ERROR: found 0 *.test.ts files in the source tree."
+    echo ""
+    echo "  dist-test/ held $# compiled test file(s), so this is not an empty"
+    echo "  package -- it is a broken find(1) invocation, a wrong working"
+    echo "  directory, or a source tree that has lost its tests."
+    echo ""
+  } >&2
+  exit 1
+fi
+
+UNCOMPILED=""
+SOURCE_COUNT=0
+for src in $SOURCE_LIST; do
+  SOURCE_COUNT=$((SOURCE_COUNT + 1))
+  emitted="dist-test/$(echo "$src" | sed -e 's|^\./||' -e 's|\.test\.tsx*$|.test.js|')"
+  if [ ! -f "$emitted" ]; then
+    UNCOMPILED="$UNCOMPILED
+    $src -> expected $emitted"
+  fi
+done
+
+if [ -n "$UNCOMPILED" ]; then
+  {
+    echo ""
+    echo "ERROR: $SOURCE_COUNT test file(s) in the source tree, but these"
+    echo "       emitted nothing to dist-test/:"
+    echo "$UNCOMPILED"
+    echo ""
+    echo "  Almost always: the file is missing from the \"files\" array in"
+    echo "  tsconfig.test.json. Add it, together with the module it tests, and"
+    echo "  raise EXPECTED_TEST_FILES and EXPECTED_TESTS in the same commit."
+    echo ""
+    echo "  If the module genuinely cannot be compiled here -- it imports"
+    echo "  react-native, expo-router or a .tsx screen -- then it does not"
+    echo "  belong in lib/ as a *.test.ts; say so in review rather than"
+    echo "  leaving a test file that never runs."
+    echo ""
+  } >&2
+  exit 1
+fi
+
+if [ "$SOURCE_COUNT" -ne "$#" ]; then
+  {
+    echo ""
+    echo "ERROR: $SOURCE_COUNT test file(s) in the source tree, $# in dist-test/."
+    echo ""
+    echo "  Every source test file has an emitted twin (checked above), so this"
+    echo "  is the other direction: dist-test/ holds a compiled test with no"
+    echo "  source. A stale dist-test should be impossible -- the test script"
+    echo "  starts with 'rm -rf dist-test' -- so find out why before changing"
+    echo "  any number."
+    echo ""
+  } >&2
+  exit 1
+fi
+
+echo "run-tests.sh: $SOURCE_COUNT source test file(s), all compiled"
 
 # Exit status out of a pipeline, the careful way. `$?` after a pipe is tee's
 # status (always 0) and ${PIPESTATUS[0]} is a bashism that expands to nothing

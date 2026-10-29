@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from "uuid";
 import { Actor } from "./actor";
+import { liveOnly } from "./softDelete";
 import { withTenant } from "./tenant";
 
 /**
@@ -296,6 +297,8 @@ export async function countSitesByClient(actor: Actor): Promise<Record<string, n
     // The in-memory twin has to ask projectsStore, which is the only place the
     // site rows live in that mode. Imported lazily to keep the module graph
     // one-directional: projectsStore does not know this file exists.
+    // listSitesForClientCounts returns LIVE sites only — see its doc comment
+    // and L114 for why that is the function's job rather than a filter here.
     const { listSitesForClientCounts } = await import("./projectsStore");
     const counts: Record<string, number> = {};
     for (const site of await listSitesForClientCounts(actor)) {
@@ -306,9 +309,16 @@ export async function countSitesByClient(actor: Actor): Promise<Record<string, n
   }
   const result = await withTenant(actor, (client) =>
     client.query<{ client_id: string; count: string }>(
+      // `liveOnly` is L114: without it this COUNT(*) included binned sites, so
+      // the number under a client's name never came down when a site was
+      // deleted and never went up again on restore — while the site list on
+      // the same screen filters the bin out through onLiveSite()/liveOnly().
+      // The helper takes the table name so the predicate cannot be written
+      // against a table that has no deleted_at column (L99).
       `SELECT ${SITE_CLIENT_COLUMN} AS client_id, COUNT(*)::int AS count
          FROM project_sites
         WHERE company_id = $1 AND ${SITE_CLIENT_COLUMN} IS NOT NULL
+          AND ${liveOnly("project_sites")}
         GROUP BY ${SITE_CLIENT_COLUMN}`,
       [actor.companyId]
     )

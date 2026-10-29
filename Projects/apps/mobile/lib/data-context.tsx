@@ -11,6 +11,7 @@ import {
   InviteResult,
 } from "@/lib/types";
 import { resolveApiBaseUrl } from "@/lib/api-base-url";
+import { clientsAfterSiteBinned, clientsAfterSiteRefiled } from "@/lib/client-site-counts";
 import { useAuth, isTokenExpiringSoon } from "@/lib/auth-context";
 import { SessionExpiredError, notifySessionExpired } from "@/lib/session";
 import {
@@ -899,6 +900,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     await apiJson<{ ok: boolean; binned?: boolean; retentionDays?: number }>(`/projects/sites/${id}`, {
       method: "DELETE",
     });
+    // Read the filing BEFORE the site leaves state — it is the only place the
+    // phone knows which client's count has just changed.
+    const binnedClientId = sites.find((s) => s.id === id)?.clientId ?? null;
     const updatedSites = sites.filter((s) => s.id !== id);
     const updatedEntries = entries.filter((e) => e.siteId !== id);
     const updatedDiaries = diaries.filter((d) => d.siteId !== id);
@@ -906,6 +910,29 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     setEntries(updatedEntries);
     setDiaries(updatedDiaries);
     await persistCache(user?.email, updatedSites, updatedEntries, updatedDiaries);
+    // THE SECOND HALF OF L114, and the half that is the phone's alone.
+    //
+    // Everything above prunes the three lists a binned site appears in, so
+    // state matches what the next refresh would produce. The CLIENT list was
+    // not pruned, and it carries `siteCount` — so after binning a site the
+    // clients screen went on showing the pre-delete number out of the cache,
+    // on a screen the user had just come from. Fixing the server's count (the
+    // GROUP BY counted binned rows) does nothing for this: the phone was not
+    // asking the server again.
+    //
+    // The arithmetic itself is in lib/client-site-counts.ts, with its own
+    // test file, because this module cannot be loaded by `node --test` — it
+    // imports react-native transitively — so a rule written inline here could
+    // only ever be verified by reading it. Same arrangement as
+    // lib/site-grouping.ts.
+    //
+    // Decremented locally rather than refetched, to match the three lines
+    // above: this function is deliberately a local prune, and a round trip
+    // here would make binning a site slower than it is. `restoreSite` is the
+    // other direction and needs no equivalent — it calls refresh(), which
+    // refetches the client list wholesale.
+    const nextClients = clientsAfterSiteBinned(clients, binnedClientId);
+    if (nextClients !== clients) await commitClients(nextClients);
   };
 
   /**
@@ -1006,15 +1033,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     const updatedSites = sites.map((s) => (s.id === siteId ? resp.site : s));
     setSites(updatedSites);
     await persistCache(user?.email, updatedSites, entries, diaries);
-    if (previousClientId !== clientId) {
-      await commitClients(
-        clients.map((c) => {
-          if (c.id === clientId) return { ...c, siteCount: c.siteCount + 1 };
-          if (c.id === previousClientId) return { ...c, siteCount: Math.max(0, c.siteCount - 1) };
-          return c;
-        })
-      );
-    }
+    // Same module, same reason, and the `from === to` guard that used to be
+    // this `if` now lives inside it — see the note there on why +1 and -1 are
+    // not commutative at zero.
+    const nextClients = clientsAfterSiteRefiled(clients, previousClientId, clientId);
+    if (nextClients !== clients) await commitClients(nextClients);
   };
 
   const listBinnedSites = async (): Promise<{ sites: BinnedSite[]; retentionDays: number }> => {

@@ -359,3 +359,61 @@ test("the clients list reports how many sites each client holds", async () => {
   assert.equal(both.body.clients.find((c) => c.id === another)?.siteCount, 0, "the site count is a company total, not a per-client count");
   assert.equal(both.body.clients.find((c) => c.id === clientId)?.siteCount, FILED.length);
 });
+
+test("binning a site takes it out of its client's count, and restoring puts it back", async () => {
+  // L114, and the defect the owner reported as "site numbers do not update
+  // under client information". `countSitesByClient` counted every row filed
+  // under the client, binned or not, in BOTH stores — so the number under a
+  // client's name never came down when a site was deleted, and the site list
+  // on the same screen disagreed with it because that list does filter the bin.
+  //
+  // Not a staleness bug: the count is recomputed on every GET /clients. It was
+  // computed over the wrong population, which is why no amount of refetching
+  // ever fixed it.
+  const clientId = await newClient(`Binned Count ${++idSeq}`, ownerToken);
+  const FILED: string[] = [];
+  for (const n of [1, 2]) {
+    const id = await newSite(`Binned Count Site ${n} ${++idSeq}`, ownerToken);
+    await seed("PATCH", `/projects/sites/${id}`, { clientId }, ownerToken);
+    FILED.push(id);
+  }
+  const countFor = async (id: string): Promise<number | undefined> => {
+    const list = await seed<{ clients: Client[] }>("GET", "/clients", undefined, ownerToken);
+    return list.body.clients.find((c) => c.id === id)?.siteCount;
+  };
+
+  // POSITIVE CONTROL, before anything is binned: the count is the population
+  // this test filed, derived rather than written down (L112).
+  assert.equal(await countFor(clientId), FILED.length, "the filed sites were not counted at all");
+
+  const binned = await req("DELETE", `/projects/sites/${FILED[0]}`, undefined, ownerToken);
+  assert.equal(binned.status, 200, "the site was not binned, so nothing below is measured");
+  // The site really has left the list the user reads on the same screen. This
+  // is the half that was always right, and it is here to make the disagreement
+  // the subject of the test rather than one number in isolation.
+  assert.equal(
+    await siteAsListed(FILED[0], ownerToken), undefined,
+    "the binned site is still listed, so the count below is not being compared against anything"
+  );
+  assert.equal(
+    await countFor(clientId), FILED.length - 1,
+    "the client still counts a binned site — this is the reported bug"
+  );
+
+  // POSITIVE CONTROL on the other side: restoring puts it back. A count that
+  // had simply been decremented on delete would pass the line above and fail
+  // this one, and that is the difference between a counter and a count.
+  const restored = await req("POST", `/projects/sites/${FILED[0]}/restore`, undefined, ownerToken);
+  assert.equal(restored.status, 200, "the site was not restored, so the count below proves nothing");
+  assert.ok(await siteAsListed(FILED[0], ownerToken), "the restored site is not listed again");
+  assert.equal(
+    await countFor(clientId), FILED.length,
+    "the restored site is listed again but is not counted again"
+  );
+
+  // And the binned site stays out of the count while it is in the bin even
+  // after an unrelated site is filed, so the number is not simply "however many
+  // PATCHes this client has seen".
+  await seed("DELETE", `/projects/sites/${FILED[1]}`, undefined, ownerToken);
+  assert.equal(await countFor(clientId), FILED.length - 1, "binning the second site did not come off the count");
+});

@@ -4318,3 +4318,167 @@ The reverted reading is the defect verbatim: `state: "configured"`, `degradation
 deployment shows. The check after this deploys is `/api/health/ready` on an idle API with
 `REDIS_URL` set: `rateLimiter.state` must read `connected` or `degraded`, and must never again read
 `configured` more than ten seconds after a boot.
+
+---
+
+### L114 — the site count under a client's name counted binned sites on the server AND was never decremented on the phone, so it was wrong in two independent ways at once — MEDIUM (two defects, one visible number; the server half was wrong for every reader, the phone half stale for one) — FIXED on `fix/pr1-site-counts-and-clients-tab`, 29 October 2026
+
+**What this is.** The reported symptom was "site numbers do not update under client information". The
+owner's pointer was `apps/supervisor-web/app/sites/page.tsx` hunk 3 — the most-merged region of the
+last batch, where `tally.all` was retargeted at main's `pool`. **That is not where the bug lives.**
+That page's `counts` memo (`app/sites/page.tsx:121-136`) is a status tally over an
+`activeClientId`-filtered pool and is correct; it was read line by line before anything was changed.
+
+The number the report is about is `siteCount` on the **clients** surfaces — the clients list, and the
+delete confirmation that says how many sites deleting a client will unfile. Two defects produce it,
+and they are in different codebases:
+
+| half | where | what it did | who saw it |
+|---|---|---|---|
+| server | `storage/clientsStore.ts` → `countSitesByClient`, and its in-memory twin `storage/projectsStore.ts` → `listSitesForClientCounts` | counted **binned** sites. The `GROUP BY` carried no live-only predicate and the in-memory twin carried no `deletedAt` filter | everyone, on every client, portal and phone alike |
+| phone | `apps/mobile/lib/data-context.tsx` → `deleteSite` | pruned `sites`, `entries` and `diaries` from state and left `clients` — whose cached `siteCount` therefore held the pre-delete number until a full `refresh()` | the phone only |
+
+**The count is wrong, not stale — and separately also stale.** `GET /clients` recomputes `siteCount`
+from one `GROUP BY` on every read, so no amount of refetching ever corrected the server half: the
+authority itself was wrong. That answers the first question asked of this diagnosis. The second —
+*do the portal and the phone disagree* — they do, and the phone half is why: the portal refetches
+`GET /clients` on mount and so shows the corrected number as soon as you navigate to it, while the
+phone kept its cached number. `restoreSite` was never affected in either client, because it calls
+`refresh()` and refetches the client list wholesale.
+
+**The same screen contradicted itself.** The site list beside the count filters the bin out through
+`onLiveSite()` / `liveOnly()`. So a client read "4 sites" above a list of three — the count and the
+list were reading the same table through different predicates.
+
+**The fix.**
+- `countSitesByClient` now carries `liveOnly("project_sites")`. Via the helper, not a hand-written
+  literal — the `no-restricted-syntax` rule from L99 would reject the literal, which is the point of
+  that rule.
+- `listSitesForClientCounts` filters `!site.deletedAt`, and its doc comment now states that it
+  returns live sites only **because** it is the in-memory twin of a statement carrying
+  `liveOnly("project_sites")`. The two halves of one count drifting apart is how this reached
+  production in the first place.
+- The phone's arithmetic moved out of the hook into `apps/mobile/lib/client-site-counts.ts`, with
+  `clientsAfterSiteBinned` and `clientsAfterSiteRefiled`, and `deleteSite` now calls the first.
+  Decremented locally rather than refetched, to match the three prunes above it in the same
+  function; `restoreSite` still needs nothing.
+
+**Deliberately not changed.** `deleteClient`'s `unfiledSites` count still counts binned rows. It
+reports a write that actually happened — `ON DELETE SET NULL` applies to binned rows too — and two
+DB tests pin it against `FILED.length`. A count of rows written is not a count of live sites, and
+conflating them here would make that return value a lie in the other direction.
+
+**Why the arithmetic is in `lib/`.** `lib/data-context.tsx` imports react-native and expo-router
+transitively, so `node --test` cannot load it; there is no simulator and no device in this
+environment. A rule written inline in that hook can only ever be verified by reading it. Same
+arrangement and same reason as `lib/site-grouping.ts`, `lib/permissions.ts` and
+`lib/offline-drain.ts`. The extraction also absorbed the `previousClientId !== clientId` guard that
+`fileSite` carried at its call site, because `+1` and `-1` are not commutative under the zero clamp:
+a client at 0 re-selected would have come back at 1 if the decrement clamped first. That case now
+has a test; inline, it had none.
+
+**Verification.** Three tests, one per half plus the phone:
+
+| test | file | gate |
+|---|---|---|
+| binning a site takes it out of its client's count, and restoring puts it back | `routes/clients.test.ts` | in-memory |
+| the same scenario against Postgres | `routes/clients-db.test.ts` | DB-gated |
+| seven cases over the two helpers | `apps/mobile/lib/client-site-counts.test.ts` | mobile suite |
+
+**L109 declaration for the new DB suite.** `clients-db.test.ts` already existed and is already in
+`EXPECTED_DB_SUITES`; this adds a test to it, not a suite, so the counter is unmoved. The stores it
+touches are `clientsStore` and `projectsStore`. `projectsStore` **is** test-aware — its
+`useDatabase()` honours `TEST_DATABASE_URL` — and `clientsStore` is among the seven whose
+`useDatabase()` does not; the compensating line is that this test reads nothing from `clientsStore`
+except through the route, so the route's own store selection governs, which is the same arrangement
+every other test in that file relies on. **It has never been executed**: there is no Postgres in
+this environment. That is a statement of what is unverified, not a claim of coverage.
+
+**Red against current main** (both store filters reverted, the test left in place):
+
+```
+not ok 50 - binning a site takes it out of its client's count, and restoring puts it back
+  error: |-
+    the client still counts a binned site — this is the reported bug
+    2 !== 1
+  expected: 1   actual: 2
+# tests 329  # pass 300  # fail 1  # skipped 28
+```
+
+300 others stayed green. Restored: `# tests 329 # pass 301 # fail 0 # skipped 28`, exit 0.
+
+**Unverified here.** That the phone's provider calls these helpers on the lines it appears to —
+`deleteSite` and `fileSite` are read, not executed, because the module they live in cannot be
+loaded by `node --test`. The helpers themselves are executed. Rendering of either number is a
+device check and is stated as such in the PR body.
+
+---
+
+### L115 — a new mobile test file omitted from `tsconfig.test.json`'s explicit `files` array runs nowhere, and neither pinned counter notices — MEDIUM (verification gap; it silently happened to the L114 test in this very branch) — FIXED on `fix/pr1-site-counts-and-clients-tab`, 29 October 2026
+
+**What this is.** `apps/mobile/tsconfig.test.json` lists its inputs in an explicit `files` array
+rather than a glob. That is deliberate and documented in the file: a module can only be added by
+someone who has checked it has no React Native import, so a test cannot silently drag a native
+module into `node --test`.
+
+The cost was not documented. A new `lib/*.test.ts` that is written but **not added to that array**
+emits nothing. `dist-test/` then holds the same number of files as before, so
+`EXPECTED_TEST_FILES` still matches, `EXPECTED_TESTS` still matches, and the suite exits 0.
+
+**This is not hypothetical.** It happened in this branch, to the test for L114's phone half:
+
+```
+run-tests.sh: 26 test file(s)
+# tests 207  # pass 207  # fail 0  # skipped 0
+run-tests.sh: 207 test(s) passed, 0 skipped
+```
+
+A green run, with seven tests sitting on disk that had never been loaded. Nothing in the output
+hints at it. The two counters cannot close this, because **the number and the omission are the same
+mistake**: whoever forgets the `files` entry has no new file to count and so has no reason to raise
+the pin. A pinned count only catches a divergence between a number and a population; here the
+population never changed.
+
+**The fix, and why it is shaped this way.** `scripts/run-tests.sh` now derives the population from
+the **source tree** — `find . -name '*.test.ts' -o -name '*.test.tsx'`, excluding `node_modules`
+and `dist-test` — and requires an emitted twin in `dist-test/` for every file it finds, naming each
+one that is missing. Per L112 this is an equality against a run-time-derived comparand, not a
+hand-written number: it cannot fail upward, and it needs no maintenance when a test file is added.
+The reverse direction (a compiled test with no source) is checked too and should be unreachable,
+because the `test` script begins `rm -rf dist-test`; it is checked because "should be unreachable"
+is what was believed about the forward direction.
+
+`*.test.tsx` is included even though a `.tsx` test cannot compile in this program. A `.tsx` test
+file would fail this check loudly rather than existing as a file that never runs — which is the
+correct outcome, and the error text says so.
+
+**Red-on-revert.** Reproduced the exact configuration that was green: the `files` entries removed
+and both pins put back to their pre-L114 values (26 / 207), so the two existing counters have
+nothing to say.
+
+```
+run-tests.sh: 26 test file(s)
+
+ERROR: 27 test file(s) in the source tree, but these
+       emitted nothing to dist-test/:
+
+    ./lib/client-site-counts.test.ts -> expected dist-test/lib/client-site-counts.test.js
+
+  Almost always: the file is missing from the "files" array in
+  tsconfig.test.json. Add it, together with the module it tests, and
+  raise EXPECTED_TEST_FILES and EXPECTED_TESTS in the same commit.
+```
+
+Exit 1. Restored: 27 files, `# tests 214 # pass 214 # fail 0 # skipped 0`, exit 0.
+
+**Scope.** Mobile only. The API's `tsconfig.json` has no equivalent explicit list — its test runner
+enumerates `dist` with `find` against a globbed compile, so an unregistered API test file is not a
+reachable state there. The portal has no test suite. **One defect of this kind is now known to have
+occurred**, this one; whether it occurred before and was never noticed is not something the record
+can answer, because the symptom is the absence of output.
+
+**An error message in the new block was fixed before commit**, and it is worth recording because
+`sh -n` passed it: the "found 0 test files" branch contained a backtick-quoted word inside a
+double-quoted `echo`, which is command substitution, not punctuation — it would have run `find`
+with no arguments while reporting a broken `find`. Syntax checks do not catch a shell quoting
+mistake that is syntactically valid.

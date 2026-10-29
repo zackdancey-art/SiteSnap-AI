@@ -85,6 +85,8 @@
     "lib/siteStatus.ts",
     "lib/siteStatus.test.ts",
     "lib/portfolio-metrics.ts",
-    "lib/portfolio-metrics.test.ts"
+    "lib/portfolio-metrics.test.ts",
+    "lib/client-site-counts.ts",
+    "lib/client-site-counts.test.ts"
   ]
 }
