@@ -273,7 +273,19 @@ test("every route file builds its router with asyncSafeRouter, so a new route is
   const dir = path.resolve(__dirname, "..", "..", "src", "routes");
   assert.ok(fs.existsSync(dir), `could not find the route sources at ${dir}`);
   const files = fs.readdirSync(dir).filter((f) => f.endsWith(".ts") && !f.includes(".test."));
-  assert.ok(files.length >= 14, `expected the route files to still be here, found ${files.length}`);
+  // An equality, not a floor, per AUDIT L112. The equality further down
+  // (`wrapped === files.length`) is already derived at run time and catches a
+  // new route file that forgets the wrapper, but it cannot notice the
+  // population itself shrinking: delete half the route files and both sides of
+  // that comparison fall together and it still passes. This line is what makes
+  // the population a fact rather than whatever the walk happened to find.
+  // MEASURED 15 on this tree. Adding a route file updates this in the same commit.
+  assert.equal(
+    files.length,
+    15,
+    `expected exactly 15 route files, found ${files.length} — ` +
+      "if you added or removed one, update this count in the same commit"
+  );
 
   const offenders: string[] = [];
   let wrapped = 0;

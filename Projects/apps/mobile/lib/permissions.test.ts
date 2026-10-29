@@ -120,19 +120,31 @@ test("crew are the only operational role refused nothing else — every predicat
 
   // The control on the derivation. Without it, a filter that matched nothing
   // would make the loop below iterate zero times and pass — the vacuity shape
-  // docs/VACUITY-AUDIT.md names. It is a floor rather than an equality because
-  // adding a predicate must not break this test, only granting crew something
-  // must.
+  // docs/VACUITY-AUDIT.md names.
   //
-  // MEASURED AT 11 ON THIS MERGED TREE, and deliberately still reading 8. Both
-  // parents wrote the floor as "the count at the time of writing" — 7 on one
-  // side, 8 on the other — and that sentence stops being true the moment two
-  // branches of predicates land together, which is what this merge is. Raising
-  // it is a one-line commit held back until the whole batch is on main, because
-  // a floor raised to 11 here would go red on every branch in the batch that
-  // does not yet carry all eleven. The number above is a floor that passes; the
-  // number that makes this test tight is queued, not forgotten.
-  assert.ok(predicates.length >= 8, `expected at least 8 predicates, found ${predicates.length}`);
+  // AN EQUALITY, NOT A FLOOR, per AUDIT L112. The previous line read
+  // `>= 8` against a population of 11, which is the exact shape L112 was filed
+  // about: a hand-written floor cannot fail upward, so it read green against a
+  // tree it no longer described. The population here is knowable — it is
+  // derived two lines above from this module's own exports — so it gets pinned
+  // exactly.
+  //
+  // Adding a predicate therefore fails this line, and that is the intended
+  // friction rather than a cost: the loop below is what proves every predicate
+  // refuses crew, and the whole value of this count is to make a change in the
+  // population something a human has to look at. Update the number in the same
+  // commit that adds the predicate.
+  //
+  // MEASURED 11 on this tree: canSeeSupervisorDashboard, canInvite,
+  // canDeleteSite, canSeeSiteBin, canManageSiteMembers, canApproveDiary,
+  // canManageClients, canFileSiteUnderClient, canApproveTimesheet,
+  // canVoidSignature, canChangeCompanySettings.
+  assert.equal(
+    predicates.length,
+    11,
+    `expected exactly 11 permission predicates, found ${predicates.length} — ` +
+      "if you added or removed one, update this count in the same commit"
+  );
   assert.ok(
     predicates.includes(canSeeSupervisorDashboard),
     "control: the derivation must actually be finding this module's predicates"

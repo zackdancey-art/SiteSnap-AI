@@ -103,11 +103,40 @@ function sourceFiles(dir: string): string[] {
 test("no store defines its own schema — DDL lives in migrations, and the scanner proves it can see DDL", () => {
   assert.ok(fs.existsSync(SRC), `could not find the API sources at ${SRC}`);
   const files = sourceFiles(SRC);
-  // A floor, not an equality: source files are added all the time and a count
-  // that has to be bumped for every unrelated file gets bumped without being
-  // read. Measured at 57 on 2026-10-20; the point is that the walk found the
-  // tree rather than an empty directory.
-  assert.ok(files.length >= 40, `expected the API sources, walked up ${files.length} files`);
+  // THIS ONE STAYS A FLOOR, and AUDIT L112 is the reason rather than an
+  // exception to it. L112's argument is against a pin that cannot fail upward
+  // where the population is knowable AND stable. This walk is every .ts file
+  // under src/, which grows with any unrelated commit, so an equality here
+  // would be bumped several times a week by people whose change has nothing to
+  // do with DDL — and a number that gets bumped reflexively is weaker than no
+  // number at all, because it carries the appearance of having been checked.
+  //
+  // What the floor was really standing in for is "the walk reached the tree",
+  // and a count is a poor proxy for that. So the membership control below
+  // asserts it directly, against files that cannot disappear without a much
+  // louder failure elsewhere. That is the part that would actually catch a
+  // broken walk; the floor is a cheap backstop for catastrophic truncation.
+  //
+  // Floor raised 40 -> 67, MEASURED on this tree (was 40, read against 67).
+  assert.ok(files.length >= 67, `expected the API sources, walked up ${files.length} files`);
+
+  // The real control on the walk: these exist and must be reached. A walk that
+  // returned a truncated set, or rooted itself at the wrong directory, passes
+  // the count above as long as it finds enough files somewhere — it cannot pass
+  // this.
+  const walked = new Set(files.map((f) => path.relative(SRC, f).split(path.sep).join("/")));
+  for (const anchor of [
+    "server.ts",
+    "storage/migrate.ts",
+    "middleware/rateLimit.ts",
+    "routes/health.ts",
+  ]) {
+    assert.ok(
+      walked.has(anchor),
+      `the DDL walk did not reach ${anchor} — it is reading the wrong tree, so a clean ` +
+        "result below proves nothing. Walked " + files.length + " files from " + SRC
+    );
+  }
 
   const offenders: string[] = [];
   for (const full of files) {
