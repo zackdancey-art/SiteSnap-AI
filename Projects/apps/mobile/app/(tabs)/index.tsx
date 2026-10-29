@@ -11,6 +11,7 @@ import {
 import { Ionicons, Feather } from "@expo/vector-icons";
 import { router } from "expo-router";
 import { useData } from "@/lib/data-context";
+import { ClientsView } from "@/components/ClientsView";
 import { SyncStatusBanner } from "@/components/SyncStatusBanner";
 import Colors from "@/constants/colors";
 import { Site } from "@/lib/types";
@@ -83,6 +84,24 @@ function SitesContent() {
   const { sites, clients, refresh } = useData();
   const [search, setSearch] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  /**
+   * SITES AND CLIENTS, TWO VIEWS OF THIS ONE SCREEN.
+   *
+   * The Clients list used to be a row in Settings, which is where nobody would
+   * look for it: a client is a grouping of sites and nothing else, so it
+   * belongs beside the sites it groups. The row is gone from Settings and this
+   * switcher replaces it, matching the portal, where Clients is likewise a
+   * view of /sites rather than its own sidebar destination.
+   *
+   * Local state rather than a route parameter, unlike the portal. The portal
+   * puts its view in the URL because a URL is shareable and survives a reload;
+   * a tab has neither property, and making this a navigation would put a back
+   * affordance on a tab that has none of its own.
+   *
+   * The body is components/ClientsView.tsx — the same component app/clients.tsx
+   * renders, so there is one clients list in the app and not two.
+   */
+  const [view, setView] = useState<"sites" | "clients">("sites");
 
   const filtered = useMemo(() => {
     if (!search.trim()) return sites;
@@ -151,18 +170,48 @@ function SitesContent() {
       <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
         <View style={styles.headerTop}>
           <View>
-            <Text style={styles.headerTitle}>My Sites</Text>
-            <Text style={styles.headerSubtitle}>{activeSites} active {activeSites === 1 ? "project" : "projects"}</Text>
+            <Text style={styles.headerTitle}>{view === "sites" ? "My Sites" : "Clients"}</Text>
+            <Text style={styles.headerSubtitle}>
+              {view === "sites"
+                ? `${activeSites} active ${activeSites === 1 ? "project" : "projects"}`
+                : `${clients.length} ${clients.length === 1 ? "client" : "clients"}`}
+            </Text>
           </View>
-          <Pressable
-            style={({ pressed }) => [styles.addButton, pressed && { opacity: 0.85 }]}
-            onPress={() => router.push("/create-site")}
-            testID="add-site-button"
-          >
-            <Ionicons name="add" size={24} color={Colors.white} />
-          </Pressable>
+          {/* The + is the sites view's own. The clients view carries its add
+              control inside ClientsView, so that the same one appears on
+              app/clients.tsx — two add buttons for one action, in two places,
+              is how they drift apart. */}
+          {view === "sites" && (
+            <Pressable
+              style={({ pressed }) => [styles.addButton, pressed && { opacity: 0.85 }]}
+              onPress={() => router.push("/create-site")}
+              testID="add-site-button"
+            >
+              <Ionicons name="add" size={24} color={Colors.white} />
+            </Pressable>
+          )}
         </View>
 
+        <View style={styles.viewSwitch}>
+          {(["sites", "clients"] as const).map((key) => (
+            <Pressable
+              key={key}
+              style={[styles.viewSwitchTab, view === key && styles.viewSwitchTabActive]}
+              onPress={() => setView(key)}
+              testID={`view-switch-${key}`}
+            >
+              <Text style={[styles.viewSwitchText, view === key && styles.viewSwitchTextActive]}>
+                {key === "sites" ? "Sites" : "Clients"}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+
+        {/* Search is the sites list's filter. The clients list is short by
+            nature — a company has a handful of clients and dozens of sites —
+            and a search box that filtered nothing visible would be worse than
+            no search box. */}
+        {view === "sites" && (
         <View style={styles.searchContainer}>
           <Feather name="search" size={18} color={Colors.textTertiary} />
           <TextInput
@@ -178,10 +227,16 @@ function SitesContent() {
             </Pressable>
           )}
         </View>
+        )}
       </View>
 
       <SyncStatusBanner />
 
+      {view === "clients" && (
+        <ClientsView bottomInset={insets.bottom + 24} onSeeSites={() => setView("sites")} />
+      )}
+
+      {view === "sites" && (
       <SectionList
         sections={sections}
         keyExtractor={(item) => item.id}
@@ -211,6 +266,7 @@ function SitesContent() {
           </View>
         }
       />
+      )}
     </View>
   );
 }
@@ -244,6 +300,31 @@ const styles = StyleSheet.create({
     color: "rgba(255,255,255,0.6)",
     marginTop: 2,
   },
+  // The Sites | Clients switcher. A segmented pair inside the blue header,
+  // not a tab bar: the app already has one of those at the bottom, and this is
+  // two views of one tab rather than two tabs.
+  viewSwitch: {
+    flexDirection: "row",
+    gap: 4,
+    backgroundColor: "rgba(255,255,255,0.12)",
+    borderRadius: 12,
+    padding: 3,
+    marginBottom: 12,
+  },
+  viewSwitchTab: {
+    flex: 1,
+    minHeight: 40,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  viewSwitchTabActive: { backgroundColor: Colors.white },
+  viewSwitchText: {
+    fontSize: 14,
+    fontFamily: "Inter_600SemiBold",
+    color: "rgba(255,255,255,0.75)",
+  },
+  viewSwitchTextActive: { color: Colors.primary },
   addButton: {
     width: 48,
     height: 48,

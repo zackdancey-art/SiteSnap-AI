@@ -4482,3 +4482,101 @@ can answer, because the symptom is the absence of output.
 double-quoted `echo`, which is command substitution, not punctuation — it would have run `find`
 with no arguments while reporting a broken `find`. Syntax checks do not catch a shell quoting
 mistake that is syntactically valid.
+
+---
+
+### L116 — a `redirect()` in a statically prerenderable Next page is served as a cached 307 with no `Location` header, so the redirect only happens after hydration — MEDIUM (a moved address that needs 88 kB of JavaScript to move; worse for anything that reads the status rather than running the script) — FIXED on `fix/pr1-site-counts-and-clients-tab`, 29 October 2026
+
+**What this was.** PR 1 moves the portal's Clients page onto `/sites` as a second view. `/clients`
+itself had to keep working — it is in bookmarks, in the history of everyone who has used the portal,
+and in any link somebody has pasted into a message — so the first implementation replaced
+`app/clients/page.tsx` with a server component whose whole body was
+`redirect("/sites?view=clients")`. That reads like an HTTP redirect. It is not one.
+
+The page takes no dynamic input, so `next build` prerenders it, and `redirect()` evaluated at
+**build** time is baked into the static payload rather than turned into a response header. Measured
+against that build, `next start`, node 20:
+
+```
+$ curl -s -D - -o /dev/null --max-redirs 0 http://127.0.0.1:3001/clients
+HTTP/1.1 307 Temporary Redirect
+x-nextjs-cache: HIT
+Content-Type: text/html; charset=utf-8
+Content-Length: 4407
+
+$ curl -s -L -o /dev/null -w "%{url_effective} %{http_code}\n" http://127.0.0.1:3001/clients
+http://127.0.0.1:3001/clients 307
+```
+
+No `Location`. A 4407-byte body whose root element is `<html id="__next_error__">`, carrying
+`NEXT_REDIRECT;…;/sites?view=clients;307;` in its flight data. `curl -L` does not move, because
+there is nowhere in the response that says where to go — the navigation is performed by the client
+router once React has hydrated.
+
+**Why the status code made it look fine.** The build output listed `/clients` as a 137-byte static
+route and a `curl -I` showed `307 Temporary Redirect`, which is the answer you are looking for. The
+missing header is the whole defect and it is invisible unless you either ask for every header or
+follow the redirect. I had accepted the first `307` as verification and was about to commit on it.
+
+| | status | `Location` | works without JS | reads as |
+|---|---|---|---|---|
+| `page.tsx` + `redirect()`, prerendered | 307 | **absent** | no | a redirect |
+| `next.config.mjs` `redirects()` | 307 | `/sites?view=clients` | yes | a redirect |
+
+**The fix** is to move it to `next.config.mjs`'s `redirects()`, which the portal already uses for
+exactly this shape of problem — `/privacy` and `/terms` are config redirects to the marketing site
+for the reasons in L36 — and to delete `app/clients/` entirely. A config redirect is resolved by the
+server before any React runs. Verified on the rebuilt output:
+
+```
+$ curl -s -D - -o /dev/null --max-redirs 0 http://127.0.0.1:3001/clients
+HTTP/1.1 307 Temporary Redirect
+location: /sites?view=clients
+
+$ curl -s -L -o /dev/null -w "%{url_effective} %{http_code}\n" http://127.0.0.1:3001/clients
+http://127.0.0.1:3001/sites?view=clients 200
+
+$ curl -s -D - -o /dev/null --max-redirs 0 "http://127.0.0.1:3001/clients?clientId=abc"
+HTTP/1.1 307 Temporary Redirect
+location: /sites?clientId=abc&view=clients
+```
+
+The third case was not asked for and is worth having: a saved link carrying `?clientId=` keeps it,
+merged rather than replaced, so an old deep link does not lose its selection on the way across.
+
+**`permanent: false` (307), matching the legal redirects and for the same stated reason.** A 308 is
+cached hard by the browser; if `/clients` ever becomes a real page again, a permanent redirect
+sitting in every manager's browser is a cache to fight rather than a route to change.
+
+**A measurement error on the way, recorded because it nearly produced a false finding.** After
+moving the redirect to the config and rebuilding, the response was still `307` with `Content-Length:
+4407` and no `Location`, which reads as "the config redirect does not work either". It was not that.
+`pkill -f "next start"` had matched nothing between runs — `next start` renames its process to
+`next-server (v14.2.35)`, so the pattern never matched, the first server kept port 3001, the second
+exited with `EADDRINUSE` into a log nobody was reading, and `curl` was still talking to a server
+holding the **pre-change build in memory**. The teardown now kills by listening port
+(`lsof -nP -iTCP:3001 -sTCP:LISTEN -t`) and asserts the port is free afterwards. A server that is
+still running is indistinguishable from a fix that did not work, and the stale-binary rule
+("results from a stale binary are not results") applies to a local `next start` exactly as it does
+to a phone.
+
+**Correction to L115.** That entry, written and committed in `ca94b56` an hour before this one,
+states "The portal has no test suite." That is false. `Projects/apps/supervisor-web` has a `test`
+script, a `tsconfig.test.json`, a `scripts/run-tests.sh` with the same empty-list guard, and 36
+passing tests as of this branch. It is left standing rather than edited, per this document's
+practice, and the claim is withdrawn here. What L115 *should* have said about the portal is that its
+`tsconfig.test.json` wants the same source-derived equality the mobile one now has — filed as the
+open remedy below rather than built here, because it is not in PR 1's scope.
+
+**Disposition:** FIXED for `/clients`. **Not swept.** `app/` was checked for other pages whose body
+is a bare `redirect()` and there are none, so `/clients` was the only instance — but nothing
+prevents the next one, and the failure mode is a green build plus a plausible status code. The
+durable version of this would be a test that asserts every entry in `MOVED_REDIRECTS` answers with a
+`Location`, which needs a built-and-started portal and therefore a CI job shape the portal does not
+have yet. Stated so that the next person moving an address does not rediscover it.
+
+**Open remedy carried forward:** apply the L115 source-derived compile equality to
+`Projects/apps/supervisor-web/scripts/run-tests.sh`. Its `tsconfig.test.json` has the same explicit
+`files` array and therefore the same silent-omission hole; it has not been shown to have bitten
+there, and PR 1 is not where it belongs.
+

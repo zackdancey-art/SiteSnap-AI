@@ -6,6 +6,7 @@ import { useSearchParams } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import Topbar from "@/components/Topbar";
 import { SkeletonCard } from "@/components/Skeleton";
+import ClientsPanel from "@/components/ClientsPanel";
 import { getSavedUser, listClients } from "@/lib/api";
 import type { Client, Site } from "@/lib/api";
 import { useBootstrap } from "@/lib/useBootstrap";
@@ -19,6 +20,18 @@ import {
   type SiteStatusFilter,
 } from "@/lib/siteStatus";
 
+
+/**
+ * The two views of this screen, as addresses.
+ *
+ * `/sites` and not `/sites?view=sites` for the default: one view, one address.
+ * Written out here rather than built from the key so that the default's href
+ * cannot drift into a second spelling of the same page.
+ */
+const VIEWS = [
+  { key: "sites", label: "Sites", href: "/sites" },
+  { key: "clients", label: "Clients", href: "/sites?view=clients" },
+] as const;
 
 const GRID: React.CSSProperties = {
   display: "grid",
@@ -71,6 +84,22 @@ function SitesPageInner() {
    */
   const searchParams = useSearchParams();
   const activeClientId = searchParams.get("clientId");
+
+  /**
+   * ?view=clients — the Clients view of this same screen.
+   *
+   * Sites and Clients are two views of one screen rather than two sidebar
+   * destinations: a client is a grouping of sites and nothing else, and moving
+   * between two pages to read one fact is what this replaces. /clients
+   * redirects here, so every existing link and bookmark still arrives.
+   *
+   * In the URL rather than in `useState`, for the same reason ?clientId= is:
+   * the view is then a shareable address, it survives a reload, and the
+   * browser's back button moves between the two views instead of leaving the
+   * screen. `view=sites` and an absent parameter are the same thing, so the
+   * default view has one address and not two.
+   */
+  const view = searchParams.get("view") === "clients" ? "clients" : "sites";
   const activeClient = activeClientId
     ? clients?.find((c) => c.id === activeClientId) ?? null
     : null;
@@ -205,103 +234,133 @@ function SitesPageInner() {
     <div className="app-shell">
       <Sidebar userName={user?.name ?? user?.email ?? "Manager"} />
       <div className="main">
-        <Topbar title="Sites" />
+        <Topbar title={view === "clients" ? "Clients" : "Sites"} />
         <div className="page-body">
-          {/* Filter bar */}
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            {SITE_STATUS_FILTERS.map((s) => (
-              <button
-                key={s}
-                onClick={() => setFilterStatus(s)}
+          {/* The two views of this screen. Links, not buttons: each view is an
+              address, so these are navigable, shareable and middle-clickable,
+              and `?clientId=` is deliberately dropped when crossing over —
+              "sites filed under this client" is not a state the client list
+              has. */}
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }} role="tablist">
+            {VIEWS.map(({ key, label, href }) => (
+              <Link
+                key={key}
+                href={href}
+                role="tab"
+                aria-selected={view === key}
                 style={{
-                  padding: "6px 14px", borderRadius: 20, fontSize: 13, fontWeight: 600, cursor: "pointer",
-                  background: filterStatus === s ? "var(--primary)" : "var(--surface)",
-                  color: filterStatus === s ? "#fff" : "var(--text-secondary)",
-                  border: filterStatus === s ? "none" : "1.5px solid var(--border)",
+                  padding: "7px 16px", borderRadius: 8, fontSize: 13, fontWeight: 700, textDecoration: "none",
+                  background: view === key ? "var(--primary)" : "var(--surface)",
+                  color: view === key ? "#fff" : "var(--text-secondary)",
+                  border: view === key ? "1.5px solid var(--primary)" : "1.5px solid var(--border)",
                 }}
               >
-                {siteStatusFilterLabel(s)}&nbsp;
-                <span style={{ opacity: 0.7 }}>({counts[s]})</span>
-              </button>
+                {label}
+              </Link>
             ))}
-            <input
-              type="search"
-              placeholder="Search sites…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              style={{ marginLeft: "auto", maxWidth: 220, height: 36, fontSize: 13 }}
-            />
           </div>
 
-          {/* The ?clientId= banner. Always drawn when the parameter is set, so
-              a filtered page can never be mistaken for the whole list. */}
-          {activeClientId && (
-            <div
-              className="card"
-              style={{ padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}
-            >
-              <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>
-                {activeClient ? (
-                  <>Filed under <strong style={{ color: "var(--text)" }}>{activeClient.name}</strong></>
-                ) : clients === null && !clientsFailed ? (
-                  <>Filtering by one client…</>
-                ) : clientsFailed ? (
-                  // Not "no such client": we do not know that. Say which of
-                  // the two it is.
-                  <>Filtering by one client — the client list could not be loaded, so it cannot be named here.</>
-                ) : (
-                  <>No client with that id — it may have been deleted. Its sites are not lost; they are unfiled.</>
-                )}
-              </span>
-              <Link href="/sites" style={{ fontSize: 13, color: "var(--accent)", fontWeight: 600, textDecoration: "none" }}>
-                Show all sites →
-              </Link>
-            </div>
-          )}
+          {view === "clients" && <ClientsPanel />}
 
-          {bootstrap.status === "error" && (
-            <p style={{ color: "var(--error, #ef4444)", gridColumn: "1/-1", padding: "24px 0" }}>
-              ⚠️ {bootstrap.message} — <a href="/" style={{ color: "inherit" }}>Sign in again</a>
-            </p>
-          )}
-
-          {loading && (
-            <div style={GRID}>
-              {Array.from({ length: 6 }).map((_, i) => <SkeletonCard key={i} rows={3} />)}
-            </div>
-          )}
-
-          {/* Site cards, grouped by client with the unfiled ones last */}
-          {!loading && filtered.length === 0 && (
-            <p style={{ color: "var(--text-secondary)" }}>No sites match your filters.</p>
-          )}
-          {!loading && filtered.length > 0 && !showHeadings && (
-            <div style={GRID}>{filtered.map(renderCard)}</div>
-          )}
-          {!loading && filtered.length > 0 && showHeadings && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
-              {groups.map((group) => (
-                <section key={group.key}>
-                  <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 10 }}>
-                    <h2 style={{ fontSize: 13, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-secondary)", margin: 0 }}>
-                      {group.title}
-                    </h2>
-                    <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
-                      {group.data.length} {group.data.length === 1 ? "site" : "sites"}
-                    </span>
-                    {group.clientId && (
-                      <Link
-                        href={`/sites?clientId=${encodeURIComponent(group.clientId)}`}
-                        style={{ fontSize: 12, color: "var(--accent)", fontWeight: 600, textDecoration: "none", marginLeft: "auto" }}
-                      >
-                        Only this client →
-                      </Link>
-                    )}
-                  </div>
-                  <div style={GRID}>{group.data.map(renderCard)}</div>
-                </section>
+          {view === "sites" && (
+            <>
+            {/* Filter bar */}
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              {SITE_STATUS_FILTERS.map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setFilterStatus(s)}
+                  style={{
+                    padding: "6px 14px", borderRadius: 20, fontSize: 13, fontWeight: 600, cursor: "pointer",
+                    background: filterStatus === s ? "var(--primary)" : "var(--surface)",
+                    color: filterStatus === s ? "#fff" : "var(--text-secondary)",
+                    border: filterStatus === s ? "none" : "1.5px solid var(--border)",
+                  }}
+                >
+                  {siteStatusFilterLabel(s)}&nbsp;
+                  <span style={{ opacity: 0.7 }}>({counts[s]})</span>
+                </button>
               ))}
+              <input
+                type="search"
+                placeholder="Search sites…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                style={{ marginLeft: "auto", maxWidth: 220, height: 36, fontSize: 13 }}
+              />
             </div>
+
+            {/* The ?clientId= banner. Always drawn when the parameter is set, so
+                a filtered page can never be mistaken for the whole list. */}
+            {activeClientId && (
+              <div
+                className="card"
+                style={{ padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}
+              >
+                <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+                  {activeClient ? (
+                    <>Filed under <strong style={{ color: "var(--text)" }}>{activeClient.name}</strong></>
+                  ) : clients === null && !clientsFailed ? (
+                    <>Filtering by one client…</>
+                  ) : clientsFailed ? (
+                    // Not "no such client": we do not know that. Say which of
+                    // the two it is.
+                    <>Filtering by one client — the client list could not be loaded, so it cannot be named here.</>
+                  ) : (
+                    <>No client with that id — it may have been deleted. Its sites are not lost; they are unfiled.</>
+                  )}
+                </span>
+                <Link href="/sites" style={{ fontSize: 13, color: "var(--accent)", fontWeight: 600, textDecoration: "none" }}>
+                  Show all sites →
+                </Link>
+              </div>
+            )}
+
+            {bootstrap.status === "error" && (
+              <p style={{ color: "var(--error, #ef4444)", gridColumn: "1/-1", padding: "24px 0" }}>
+                ⚠️ {bootstrap.message} — <a href="/" style={{ color: "inherit" }}>Sign in again</a>
+              </p>
+            )}
+
+            {loading && (
+              <div style={GRID}>
+                {Array.from({ length: 6 }).map((_, i) => <SkeletonCard key={i} rows={3} />)}
+              </div>
+            )}
+
+            {/* Site cards, grouped by client with the unfiled ones last */}
+            {!loading && filtered.length === 0 && (
+              <p style={{ color: "var(--text-secondary)" }}>No sites match your filters.</p>
+            )}
+            {!loading && filtered.length > 0 && !showHeadings && (
+              <div style={GRID}>{filtered.map(renderCard)}</div>
+            )}
+            {!loading && filtered.length > 0 && showHeadings && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+                {groups.map((group) => (
+                  <section key={group.key}>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 10 }}>
+                      <h2 style={{ fontSize: 13, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-secondary)", margin: 0 }}>
+                        {group.title}
+                      </h2>
+                      <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
+                        {group.data.length} {group.data.length === 1 ? "site" : "sites"}
+                      </span>
+                      {group.clientId && (
+                        <Link
+                          href={`/sites?clientId=${encodeURIComponent(group.clientId)}`}
+                          style={{ fontSize: 12, color: "var(--accent)", fontWeight: 600, textDecoration: "none", marginLeft: "auto" }}
+                        >
+                          Only this client →
+                        </Link>
+                      )}
+                    </div>
+                    <div style={GRID}>{group.data.map(renderCard)}</div>
+                  </section>
+                ))}
+              </div>
+            )}
+            </>
           )}
         </div>
       </div>

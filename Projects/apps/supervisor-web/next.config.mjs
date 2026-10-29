@@ -116,13 +116,47 @@ const LEGAL_REDIRECTS = [
   { source: "/terms", destination: "https://www.getsitesnapai.com/terms/" },
 ];
 
+/**
+ * Addresses that have moved WITHIN the portal.
+ *
+ * `/clients` was a page. It is now a view of `/sites`, because a client is a
+ * grouping of sites and nothing else, and two sidebar destinations for one fact
+ * is how they drift apart. The address itself stays alive: it is in bookmarks,
+ * in the browser history of everyone who has used the portal, and in any link
+ * somebody has pasted into a message.
+ *
+ * It lives HERE rather than as an `app/clients/page.tsx` calling `redirect()`.
+ * That was the first attempt and it does not work the way it reads. The page
+ * has no dynamic input, so Next prerenders it at build time, and a build-time
+ * `redirect()` is baked into the static payload: `GET /clients` answered
+ *
+ *     HTTP/1.1 307 Temporary Redirect
+ *     Content-Type: text/html; charset=utf-8
+ *     Content-Length: 4407
+ *     x-nextjs-cache: HIT
+ *
+ * with NO `Location` header and a `<html id="__next_error__">` body carrying
+ * `NEXT_REDIRECT;…;/sites?view=clients;307;` in its flight data. The navigation
+ * was performed by the client router after hydration — so `curl -L` stayed put,
+ * and a browser downloaded 88 kB of JavaScript to be told where to go. A
+ * redirect that needs JavaScript to redirect is not a redirect (AUDIT L116).
+ *
+ * `redirects()` is resolved by the server before any React runs, which is what
+ * the word is supposed to mean. `permanent: false` for the same reason the
+ * legal ones are: a 308 sits in every manager's browser cache and becomes a
+ * route to fight rather than a route to change.
+ */
+const MOVED_REDIRECTS = [
+  { source: "/clients", destination: "/sites?view=clients" },
+];
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   env: {
     NEXT_PUBLIC_API_URL: API_URL,
   },
   async redirects() {
-    return LEGAL_REDIRECTS.map(({ source, destination }) => ({
+    return [...LEGAL_REDIRECTS, ...MOVED_REDIRECTS].map(({ source, destination }) => ({
       source,
       destination,
       permanent: false,

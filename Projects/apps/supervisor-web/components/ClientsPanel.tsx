@@ -2,11 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import Sidebar from "@/components/Sidebar";
-import Topbar from "@/components/Topbar";
 import { SkeletonCard } from "@/components/Skeleton";
 import {
-  getSavedUser,
   listClients,
   createClient,
   updateClient,
@@ -24,8 +21,22 @@ import { useRole } from "@/lib/useRole";
  * Lists the company's clients with how many sites each holds, and for a manager
  * or owner adds, renames and deletes them.
  *
+ * WHY THIS IS A PANEL AND NOT A PAGE
+ *
+ * Clients and Sites are two views of one screen, by decision — a client is a
+ * grouping of sites and nothing else, and a person moving between the two was
+ * navigating between two places to read one fact. So this is the body of the
+ * Clients view, rendered by app/sites/page.tsx under ?view=clients, and
+ * /clients now redirects there for the links and bookmarks that already exist.
+ *
+ * IT RETURNS A FRAGMENT, DELIBERATELY. Its children are direct children of the
+ * host's `.page-body`, which supplies the 20px column gap and — load-bearing —
+ * matches `.page-body > .card { flex-shrink: 0 }` in globals.css. Wrapping
+ * them in a div of its own would put every card one level too deep for that
+ * rule and reintroduce the flex-shrink clipping that rule exists to stop.
+ *
  * READ-ONLY FOR CREW, ON PURPOSE. GET /clients is behind identity rather than
- * rank because the sites list takes its group headings from it, so this page is
+ * rank because the sites list takes its group headings from it, so this view is
  * theirs to read and the three write controls are simply absent — not drawn and
  * disabled. A disabled control still names an action and still invites a click;
  * what it does not do is explain itself. (AUDIT L79 is the same mistake in the
@@ -35,11 +46,10 @@ import { useRole } from "@/lib/useRole";
  * not: the client's sites lose their filing and none of them, nor any entry,
  * diary or photograph, is deleted. The confirmation says that in those words
  * with the real count, and the result reports the number the SERVER unfiled
- * rather than the one this page predicted — they disagree whenever another
+ * rather than the one this view predicted — they disagree whenever another
  * session filed a site between the list loading and the click.
  */
-export default function ClientsPage() {
-  const user = getSavedUser();
+export default function ClientsPanel() {
   const { canManageClients } = useRole();
 
   const [clients, setClients] = useState<Client[] | null>(null);
@@ -165,124 +175,117 @@ export default function ClientsPage() {
   const loading = clients === null && loadError === null;
 
   return (
-    <div className="app-shell">
-      <Sidebar userName={user?.name ?? user?.email ?? "Manager"} />
-      <div className="main">
-        <Topbar title="Clients" />
-        <div className="page-body">
-          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-            <p style={{ margin: 0, fontSize: 13, color: "var(--text-secondary)", flex: 1, minWidth: 240 }}>
-              Clients group your sites for filing and reporting. A site with no client stays
-              visible as <strong>Unfiled</strong> — nothing is hidden by not filing it.
-            </p>
-            {canManageClients && (
-              <button className="btn-primary" onClick={openCreate} style={{ flexShrink: 0 }}>
-                + New client
-              </button>
-            )}
-          </div>
-
-          {notice && (
-            <div
-              style={{
-                padding: "10px 14px", borderRadius: 8, fontSize: 13,
-                background: "var(--surface)", border: "1.5px solid var(--border)",
-                display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center",
-              }}
-            >
-              <span>{notice}</span>
-              <button
-                onClick={() => setNotice(null)}
-                style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-tertiary)" }}
-              >
-                ✕
-              </button>
-            </div>
-          )}
-
-          {loadError && (
-            <p style={{ color: "var(--error, #ef4444)", padding: "16px 0", fontSize: 13 }}>
-              ⚠️ {loadError}{" "}
-              <button
-                onClick={() => { setClients(null); void load(); }}
-                style={{ background: "none", border: "none", textDecoration: "underline", cursor: "pointer", color: "inherit", font: "inherit" }}
-              >
-                Try again
-              </button>
-            </p>
-          )}
-
-          {loading && (
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
-              {Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} rows={2} />)}
-            </div>
-          )}
-
-          {clients !== null && clients.length === 0 && (
-            <div className="card" style={{ padding: 32, textAlign: "center" }}>
-              <p style={{ fontSize: 15, fontWeight: 600, margin: "0 0 6px" }}>No clients yet</p>
-              <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: 0 }}>
-                {canManageClients
-                  ? "Add a client, then file sites under it from the Sites page."
-                  : "Nobody has added a client yet. Sites show as Unfiled until one is added."}
-              </p>
-            </div>
-          )}
-
-          {clients !== null && clients.length > 0 && (
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
-              {clients.map((client) => (
-                <div className="card" key={client.id} style={{ padding: "16px 18px" }}>
-                  <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
-                    <h3 style={{ fontSize: 15, fontWeight: 700, margin: 0, flex: 1 }}>{client.name}</h3>
-                    {canManageClients && (
-                      <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
-                        <button
-                          onClick={() => openEdit(client)}
-                          title="Edit client"
-                          style={iconBtn}
-                        >
-                          ✎
-                        </button>
-                        <button
-                          onClick={() => void remove(client)}
-                          title="Delete client — its sites are unfiled, not deleted"
-                          style={{ ...iconBtn, color: "var(--error, #ef4444)" }}
-                        >
-                          🗑
-                        </button>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* The site count links to the filtered sites list rather than
-                      only stating a number: "4 sites" is the one thing on this
-                      card somebody will want to act on. */}
-                  <Link
-                    href={`/sites?clientId=${encodeURIComponent(client.id)}`}
-                    style={{ fontSize: 13, color: "var(--accent)", fontWeight: 600, textDecoration: "none" }}
-                  >
-                    {client.siteCount} {client.siteCount === 1 ? "site" : "sites"} →
-                  </Link>
-
-                  {/* Each contact line is conditional. A client added mid-job has
-                      a name and nothing else, and empty labelled rows read as
-                      missing data rather than as data nobody entered. */}
-                  {(client.contactName || client.contactEmail || client.contactPhone || client.notes) && (
-                    <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)", display: "grid", gap: 4 }}>
-                      {client.contactName && <Detail label="Contact" value={client.contactName} />}
-                      {client.contactEmail && <Detail label="Email" value={client.contactEmail} />}
-                      {client.contactPhone && <Detail label="Phone" value={client.contactPhone} />}
-                      {client.notes && <Detail label="Notes" value={client.notes} />}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+    <>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <p style={{ margin: 0, fontSize: 13, color: "var(--text-secondary)", flex: 1, minWidth: 240 }}>
+          Clients group your sites for filing and reporting. A site with no client stays
+          visible as <strong>Unfiled</strong> — nothing is hidden by not filing it.
+        </p>
+        {canManageClients && (
+          <button className="btn-primary" onClick={openCreate} style={{ flexShrink: 0 }}>
+            + New client
+          </button>
+        )}
       </div>
 
+      {notice && (
+        <div
+          style={{
+            padding: "10px 14px", borderRadius: 8, fontSize: 13,
+            background: "var(--surface)", border: "1.5px solid var(--border)",
+            display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center",
+          }}
+        >
+          <span>{notice}</span>
+          <button
+            onClick={() => setNotice(null)}
+            style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-tertiary)" }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {loadError && (
+        <p style={{ color: "var(--error, #ef4444)", padding: "16px 0", fontSize: 13 }}>
+          ⚠️ {loadError}{" "}
+          <button
+            onClick={() => { setClients(null); void load(); }}
+            style={{ background: "none", border: "none", textDecoration: "underline", cursor: "pointer", color: "inherit", font: "inherit" }}
+          >
+            Try again
+          </button>
+        </p>
+      )}
+
+      {loading && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
+          {Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} rows={2} />)}
+        </div>
+      )}
+
+      {clients !== null && clients.length === 0 && (
+        <div className="card" style={{ padding: 32, textAlign: "center" }}>
+          <p style={{ fontSize: 15, fontWeight: 600, margin: "0 0 6px" }}>No clients yet</p>
+          <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: 0 }}>
+            {canManageClients
+              ? "Add a client, then file sites under it from the Sites page."
+              : "Nobody has added a client yet. Sites show as Unfiled until one is added."}
+          </p>
+        </div>
+      )}
+
+      {clients !== null && clients.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
+          {clients.map((client) => (
+            <div className="card" key={client.id} style={{ padding: "16px 18px" }}>
+              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
+                <h3 style={{ fontSize: 15, fontWeight: 700, margin: 0, flex: 1 }}>{client.name}</h3>
+                {canManageClients && (
+                  <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+                    <button
+                      onClick={() => openEdit(client)}
+                      title="Edit client"
+                      style={iconBtn}
+                    >
+                      ✎
+                    </button>
+                    <button
+                      onClick={() => void remove(client)}
+                      title="Delete client — its sites are unfiled, not deleted"
+                      style={{ ...iconBtn, color: "var(--error, #ef4444)" }}
+                    >
+                      🗑
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* The site count links to the filtered sites list rather than
+                  only stating a number: "4 sites" is the one thing on this
+                  card somebody will want to act on. */}
+              <Link
+                href={`/sites?clientId=${encodeURIComponent(client.id)}`}
+                style={{ fontSize: 13, color: "var(--accent)", fontWeight: 600, textDecoration: "none" }}
+              >
+                {client.siteCount} {client.siteCount === 1 ? "site" : "sites"} →
+              </Link>
+
+              {/* Each contact line is conditional. A client added mid-job has
+                  a name and nothing else, and empty labelled rows read as
+                  missing data rather than as data nobody entered. */}
+              {(client.contactName || client.contactEmail || client.contactPhone || client.notes) && (
+                <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)", display: "grid", gap: 4 }}>
+                  {client.contactName && <Detail label="Contact" value={client.contactName} />}
+                  {client.contactEmail && <Detail label="Email" value={client.contactEmail} />}
+                  {client.contactPhone && <Detail label="Phone" value={client.contactPhone} />}
+                  {client.notes && <Detail label="Notes" value={client.notes} />}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
       {showForm && (
         <div style={modalBackdrop} onClick={() => !saving && setShowForm(false)}>
           <div className="card" style={modalCard} onClick={(e) => e.stopPropagation()}>
@@ -308,7 +311,7 @@ export default function ClientsPage() {
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }
 

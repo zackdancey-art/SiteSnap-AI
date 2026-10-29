@@ -54,7 +54,7 @@ export default function SettingsScreen() {
 function SettingsContent() {
   const insets = useTabScreenInsets();
   const { user, logout } = useAuth();
-  const { pendingCount, failedOps, clients } = useData();
+  const { pendingCount, failedOps } = useData();
   const [profile, setProfile] = useState(DEFAULT_PROFILE);
   const [deletingAccount, setDeletingAccount] = useState(false);
 
@@ -172,25 +172,15 @@ function SettingsContent() {
               onPress={() => router.push("/settings/account")}
             />
             <SettingsDivider />
-            {/* Clients. The entry point for app/clients.tsx, and the only one
-                besides the picker's "Manage clients" footer.
+            {/* Clients used to be a row here. It is now the second view of the
+                Sites tab, because a client is a grouping of sites and nothing
+                else, and Settings is not where anybody looks for one.
 
-                NOT gated: GET /clients is behind identity rather than rank
-                because the grouped site list takes its headings from it, so
-                crew reach a read-only version of the same screen. The add,
-                edit and delete controls there are what `canManageClients`
-                draws. */}
-            <SettingsRow
-              icon="briefcase-outline"
-              label="Clients"
-              description={
-                clients.length === 0
-                  ? "Group your sites under the client they belong to."
-                  : `${clients.length} ${clients.length === 1 ? "client" : "clients"}.`
-              }
-              onPress={() => router.push("/clients")}
-            />
-            <SettingsDivider />
+                Settings keeps nothing client-related: no row, and no `clients`
+                read from the provider. The screen itself survives as
+                app/clients.tsx for the site picker's "Manage clients" footer
+                (app/create-site.tsx and app/site/[id].tsx push to it), and
+                both it and the tab render the same components/ClientsView. */}
             <SettingsRow
               icon="lock-closed-outline"
               label="Data & Privacy"
