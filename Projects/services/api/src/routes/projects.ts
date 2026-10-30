@@ -733,7 +733,7 @@ projectsRouter.post("/projects/invites/accept", async (req, res) => {
     // behaviour, which is the measure of how badly it read.
     //
     // The two addresses are returned as fields as well as prose so a client can
-    // offer sign-out without parsing the sentence; app/invite.tsx does. `code`
+    // offer sign-out without parsing the sentence; apps/mobile/app/invite.tsx does. `code`
     // exists for the same reason -- the mobile screen used to decide what to
     // render with a substring match on this very string.
     return res.status(403).json({

@@ -148,7 +148,7 @@ export function canApproveDiary(companyRole: unknown): boolean {
 
 /**
  * Creating, renaming or deleting a CLIENT. Manager+, matching the three write
- * routes on routes/clients.ts, which all carry requireAtLeast("manager").
+ * routes on services/api/src/routes/clients.ts, which all carry requireAtLeast("manager").
  *
  * READING the client list is NOT gated and must not be: that route is behind
  * identity alone, deliberately, because the site a crew member is standing on
@@ -238,7 +238,7 @@ export function canApproveTimesheet(companyRole: unknown): boolean {
  *
  * This hides one control. The server is what refuses — POST
  * /inspections/:id/signatures/:sigId/void is requireAtLeast("manager") in
- * routes/inspections.ts — and the rest of the inspections screen, signing
+ * services/api/src/routes/inspections.ts — and the rest of the inspections screen, signing
  * included, stays fully usable for crew.
  */
 export function canVoidSignature(companyRole: unknown): boolean {
@@ -249,7 +249,7 @@ export function canVoidSignature(companyRole: unknown): boolean {
  * Company settings: branding, NZBN, contact details, anything
  * organisation-level. Exception 3, and the only one that is owner-only rather
  * than manager+, because that is what the API already enforces
- * (routes/company.ts PATCH /company/profile is requireCompanyRole("owner")).
+ * (services/api/src/routes/company.ts PATCH /company/profile is requireCompanyRole("owner")).
  */
 export function canChangeCompanySettings(companyRole: unknown): boolean {
   return isRole(companyRole, "owner");
@@ -280,7 +280,7 @@ export const FORBIDDEN_MESSAGE = "You don't have access to this.";
  * pre-existing helpers in lib/data-context.tsx do too.
  *
  * Deliberately keyed on the STATUS ALONE. Unlike a 401, a 403 from this API
- * means one thing — middleware/auth.ts answers it from requireAtLeast and
+ * means one thing — services/api/src/middleware/auth.ts answers it from requireAtLeast and
  * requireCompanyRole only — so there is no second cause to discriminate, and
  * inventing a code to match would be a contract the server does not have.
  */

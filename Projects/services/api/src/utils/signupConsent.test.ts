@@ -13,7 +13,7 @@ import { MAX_VERSION_LENGTH, parseSignupConsent } from "./signupConsent";
  * disagree about.
  *
  * The recording -- the part that writes a row and therefore can diverge -- is
- * tested against Postgres in routes/signup-consent.db.test.ts.
+ * tested against Postgres in routes/signup-consent-db.test.ts.
  */
 
 const VERSION = "Last updated: 3 October 2026";

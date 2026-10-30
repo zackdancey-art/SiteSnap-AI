@@ -9,7 +9,7 @@
  *
  * Mobile's derivative (`app/entry/[id].tsx`, `handleSaveAnnotation`) reuses the
  * source's `uri` and `storageKey` and carries the drawing as a vector in
- * `annotationVector`, which `components/AnnotatedImage.tsx` overlays as SVG
+ * `annotationVector`, which `apps/mobile/components/AnnotatedImage.tsx` overlays as SVG
  * paths. No second image is uploaded. This module deliberately does the same
  * thing, for one reason: the two clients must not diverge. A portal that
  * rasterised the drawing into new bytes would produce annotations that the AI
@@ -36,7 +36,7 @@ export type AnnotationStroke = { path: string; color: string; width: number };
  * synced, and then silently invisible on mobile — the two surfaces disagreeing
  * about what is marked on a piece of evidence. Text is therefore NOT offered by
  * the portal annotator; adding it needs an additive change to this type AND a
- * matching change to `components/AnnotatedImage.tsx`, shipped together.
+ * matching change to `apps/mobile/components/AnnotatedImage.tsx`, shipped together.
  */
 export type AnnotationVector = { viewBox: string; strokes: AnnotationStroke[] };
 

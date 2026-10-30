@@ -402,7 +402,7 @@ if (!process.env.TEST_DATABASE_URL) {
     // Most recent first, so the client can take the head of each document.
     assert.ok(rows[0].acceptedAt >= rows[rows.length - 1].acceptedAt, "listConsents is not ordered newest first");
     // And the route hands all of it to the client, which is what lets
-    // app/settings/data-privacy.tsx show the current version per document.
+    // apps/mobile/app/settings/data-privacy.tsx show the current version per document.
     const answer = await getConsents(token);
     assert.equal((answer.body.consents as Returned[]).length, CONSENT_DOCUMENTS.length * 2);
   });

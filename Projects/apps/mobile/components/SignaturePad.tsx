@@ -8,7 +8,7 @@ import Colors from "@/constants/colors";
 // Dev-only layout probe. The require is deliberately INSIDE `if (__DEV__)`: a
 // top-level import of this module ships its code in production bundles, a gated
 // require eliminates it entirely. Both measured by grepping a production Hermes
-// bundle — see the header of lib/dev-signature-probe.ts. Do not convert this to
+// bundle — see the header of lib/dev-signature-probe.tsx. Do not convert this to
 // an import.
 let DevProbe: typeof import("@/lib/dev-signature-probe") | null = null;
 if (__DEV__) {

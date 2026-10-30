@@ -153,7 +153,7 @@ function isAllowed(key: string): boolean {
  *  1. What is in process.env right now — the inherited shell environment.
  *
  *  2. What `.env` DECLARES but has not injected yet. This is the subtle half.
- *     dotenv.config() runs later, on import of server.ts/instrument.ts, so at
+ *     dotenv.config() runs later, on import of server.ts or instrument.ts, so at
  *     this moment the real TWILIO_AUTH_TOKEN is not in process.env at all and
  *     a loop over Object.keys(process.env) cannot see it. Blanking only what
  *     is already present would therefore be WEAKER than the two-name denylist

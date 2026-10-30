@@ -4888,3 +4888,64 @@ B. stripPhotoPayloads rebuilding photos from an explicit field list:
 **What the new check cannot see**, stated so the number is not mistaken for more than it is: it cannot prove the strokes are drawn *correctly* (only that a component capable of drawing them is mounted); it cannot see a third render mechanism arriving under a new name; it does not cover the portal, whose own join is covered by `apps/supervisor-web/lib/annotation-render.test.ts` instead; and it says nothing about whether a given surface *should* display photographs at all. The two bare `<Image>` renders it does find — `app/(tabs)/settings.tsx:149` and `app/profile.tsx:78` — are both `profile.avatarUri` avatars, and are **enumerated rather than regex-excluded**. An exemption list fails when it grows, which is visible; a narrowed regex fails silently, which is the whole mechanism of this finding.
 
 **Disposition:** Fixed on both clients. Mobile's four defective surfaces now render through `AnnotatedImage`, which was rewritten as a strict superset of `EvidenceImage` — every prop forwarded including `onStatusChange`, so moving a surface across costs nothing and the "2 of 6 images unavailable" banner survives. The cheapness of *not* moving them is how four of six ended up this way. The portal gets an `AnnotationOverlay` on both surfaces, with the lightbox's zoom/pan transform moved off the `<img>` onto a shrink-wrapping wrapper so the overlay shares the image's box and its transform. The decision of whether, which and how is in `lib/annotation-render.ts` on both sides, duplicated inside `// SHARED-LOGIC-BEGIN/END` markers and diffed byte-identical by `ci.sh` as the third registered shared-logic group. **The portal's lightbox geometry has been read, not seen** — this environment has no browser — and that is the one claim here that wants a human eye.
+
+---
+
+### L120 — comments that name a file path are unverified prose, and three false ones caused real gaps in a single week; the paths among them were mechanically checkable the whole time — MEDIUM (two of the three were a bare path; the third was a behaviour claim and remains unverifiable) — FIXED on `feat/pr3-client-information`, 30 October 2026
+
+**The report.** "Three times this week a false comment has caused a real gap — `app-config-permissions.test.ts` (named a guard that does not exist), `useRole.ts`'s `isAtLeast` line, and `ci.sh`'s 'the portal, which has no test harness', which is what kept the portal's runner out of the L110 and L115 sweeps. Two of the three were a path that could have been checked mechanically."
+
+**That accounting is correct, and the proportion it implies is the finding.** A comment has no compiler and no test. It is the only artefact in the repository that can be wrong indefinitely while being read by everyone, and the reason it stays wrong is not negligence — it is that nothing anywhere reports it. Of the class, the subset naming a *path* is decidable: the file either exists or it does not. `Projects/scripts/assert-comment-paths.mjs` now decides it on every CI run.
+
+**The population examined, not just the failures** — the brief asked for this explicitly, and it is the half that says whether the number of failures means anything:
+
+| | |
+|---|---|
+| files walked | **407** |
+| path references found in comments | **659** (241 distinct) |
+| matches deliberately not resolved | 0 globs, 0 URL-like, 5 `.d.ts` |
+| references to a declared-absent path, allowed | 7, from a `KNOWN_ABSENT` list of **5** |
+| unresolved at the end | **0** |
+
+**What it found, in two kinds.** Five were genuine rot — a path that has never existed, or no longer does:
+
+| comment in | said | is | how established |
+|---|---|---|---|
+| `middleware/logger.ts:8` | `routes/media.ts` | `routes/uploads.ts:165-166` | `routes/media.ts` is absent from the tree and from `git log --all`; `req.query.sig`/`exp` are read at exactly those two lines and nowhere else |
+| `app/inspections/[siteId].tsx` | `lib/dev-signature-probe.ts` | `…probe.tsx` | the file is a `.tsx` |
+| `components/SignaturePad.tsx` | `lib/dev-signature-probe.ts` | `…probe.tsx` | same file, same error, twice |
+| `utils/signupConsent.test.ts` | `routes/signup-consent.db.test.ts` | `routes/signup-consent-db.test.ts` | a dot where a hyphen belongs — **the claim was true and the path was not**, which is the most expensive variety |
+| `test-setup.ts` | `server.ts/instrument.ts` | `server.ts` or `instrument.ts` | prose containing a slash, read by the checker as one path; both files exist, the sentence did not |
+
+The other forty-four were ambiguity rather than error: a comment naming a real file in a *different* package without saying which application, e.g. mobile's `lib/permissions.ts` citing API paths, or the portal's `lib/annotation-derivative.ts:12,39` and `lib/annotation-render.ts:15` citing `components/AnnotatedImage.tsx` — which exists, in `apps/mobile`, and does not exist in the portal. All forty-four now carry their package prefix.
+
+**That last case decided the resolver's design, and it is the only interesting engineering decision here.** Suffix matching across the whole repository would resolve the portal's `components/AnnotatedImage.tsx` against mobile's real file and pass — on the one comment the check was written to catch. So suffix matching is **scoped to the commenting file's own package**, and resolution is: exact against each ancestor directory up to the repo root, then suffix within that package only. The first run reported 343 failures, almost all of them the resolver's own fault (an ordered-alternation bug matching `clients.tsx` as `clients.ts`; API comments written relative to `src/`, which is not an ancestor of a file in `src/routes/`). 343 → 59 → 0. The false-positive rate is the whole question of whether a check like this survives contact with a developer, so it is recorded in the script's own header rather than here.
+
+**The population is derived, not pinned, per L112** — 407 is knowable but moves on every commit, so a literal would be stale within the day and then raised without thought, which is a floor wearing an equality's clothes. It comes from `git ls-files --cached --others --exclude-standard`, and the walk and the index must agree exactly.
+
+**Two negative controls were needed to make that comparison non-vacuous, and the first version failed both.** Breaking the walk's `SCANNED` pattern did fail the run — but by way of the `KNOWN_ABSENT` reverse pin, reporting five unused exemptions and saying nothing whatever about having examined no files. A check that fails for the wrong reason sends the next person to the wrong place. The set comparison was added to fix that; it then reported `0 file(s) walked, agreeing exactly with git ls-files`, because it filtered the index through the walk's own `SCANNED` and `SKIP_DIRS` constants. **A comparison between two things computed from one definition is a comparison with itself.** The git side now carries a deliberate duplicate of both constants, documented as a duplicate that must not be tidied into a shared one, because the duplication is the entire mechanism:
+
+```
+CONTROL B — walk's SCANNED broken, git side untouched:
+FAIL: the file walk and git disagree — 407 tracked file(s) not walked, 0 walked file(s) not tracked.
+CONTROL D — "routes" added to the walk's SKIP_DIRS only:
+FAIL: the file walk and git disagree — 61 tracked file(s) not walked, 0 walked file(s) not tracked.
+CONTROL E — one fixed comment reverted to its stale path:
+FAIL: 1 comment(s) name a source file that does not exist.
+  Projects/services/api/src/middleware/logger.ts:8 → routes/media.ts
+```
+
+**What the check cannot see, which is the larger half and the brief said so.** It resolves paths. It cannot evaluate a claim. `app-config-permissions.test.ts` naming a guard that does not exist, and `useRole.ts`'s `isAtLeast` line, were both assertions about behaviour at a path that exists — invisible to this and to anything short of reading the code. The demonstration arrived unprompted while this was being built: the check's own CI step sits in `ci.sh`, and `ci.sh` still contained **two more instances of L117's false "the portal has no test runner"** — the third, fourth and fifth occurrences of one false belief, in the file whose job is to define what passing means. Both were corrected by hand, and the inline note now says plainly that the structural check cannot catch that class. It also cannot see a path that exists but is the wrong file, a bare filename with no slash, a path inside a string literal, or a glob.
+
+**It then caught one of mine, about four minutes old.** The first full `ci.sh` run after the check was wired in failed on a comment written by hand in this same branch:
+
+```
+FAIL: 1 comment(s) name a source file that does not exist.
+  Projects/services/api/src/routes/clients.test.ts:503 → lib/client-details.ts
+```
+
+An API test file citing `lib/client-details.ts`, which exists twice — in `apps/mobile` and `apps/supervisor-web` — and not at all in the API. Precisely the forty-four-instance ambiguity class, written by the person who had just finished enumerating it, and caught before the commit rather than in a sweep three weeks later. That is better evidence that the check earns its place than either of the controls below, because nobody arranged it.
+
+**One further limit, recorded because it is a fair criticism and not a bug to be fixed.** `KNOWN_ABSENT` is an exemption list, and exemption lists are where exemptions quietly accumulate. It is pinned in both directions: an entry nothing references is a failure, exactly as an unresolved path is. Five entries, each with a stated reason — two are dependency sources cited for their behaviour, two are files removed under A6, one was never created and the comment explains why.
+
+**Disposition:** Fixed, and wired into `ci.sh` as a step ahead of the shared-logic diff. Forty-nine comments corrected across the tree, of which five were false and forty-four ambiguous. The limit above is not a residual defect — it is the boundary of what a path checker can be, and the reason the finding is recorded at MEDIUM rather than closed as solved: **the larger half of the original report is still unverifiable, and nothing in this entry changes that.**

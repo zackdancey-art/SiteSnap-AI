@@ -637,7 +637,7 @@ export default function SiteDetailScreen() {
       {/* Mounted only when the viewer may change it, the same as ClientPicker
           above. A crew member sees the job number on the header row and gets no
           editor -- and the gate that actually matters is the route's
-          requireAtLeast("manager"), which routes/job-number.test.ts proves with
+          requireAtLeast("manager"), which services/api/src/routes/job-number.test.ts proves with
           a crew token. */}
       {canEditJobNumber && (
         <JobNumberEditor

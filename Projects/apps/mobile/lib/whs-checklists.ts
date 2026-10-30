@@ -4,7 +4,7 @@
  *
  * WHAT THE API SERVES
  * GET /api/whs-checklists returns five hardcoded Australian WHS checklists
- * (routes/templates.ts) — daily pre-start, hazard identification, incident and
+ * (services/api/src/routes/templates.ts) — daily pre-start, hazard identification, incident and
  * near-miss, WHS inspection, SWMS review. They are read-only starter content
  * compiled into the API: no table, no rows, no company. Until now nothing
  * called the route, so a new company opening the inspections screen saw an

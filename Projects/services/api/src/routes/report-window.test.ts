@@ -17,7 +17,7 @@ import { resetFakeSendsForTests } from "../services/notificationService";
  * SCOPE, and why this file is in the in-memory suite rather than the DB-gated
  * one. Every request here sends its own `entries` array, which takes the
  * branch of `resolveDiaryRequest` that reads NO STORE AT ALL (the branch
- * supervisor-web/lib/api.ts documents at length, and the one the phone falls
+ * apps/supervisor-web/lib/api.ts documents at length, and the one the phone falls
  * back to when it has entries locally and the server has none). So these tests
  * exercise window parsing, refusal, the response contract and the report
  * header, none of which involve a store.

@@ -7,7 +7,7 @@
  *    arithmetic in `services/api/src/utils/reportWindow.ts` because
  *    `@sitesnap/shared` is declaration-only and cannot carry runtime code (see
  *    that module's comment). `ANCHORED_VECTORS` below is the same table as
- *    `utils/reportWindow.test.ts:133`, by hand. Edit the rule on one side and
+ *    `services/api/src/utils/reportWindow.test.ts:133`, by hand. Edit the rule on one side and
  *    the other side's copy of this table fails. It is a weaker guarantee than
  *    sharing the code and a much stronger one than the status quo, where the
  *    two copies disagreed and nothing reported it.
@@ -118,7 +118,7 @@ test("date arithmetic is UTC and crosses month, year and leap boundaries", () =>
 
 /**
  * The cross-package agreement table. The same anchor and the same three
- * expected `from` dates as `utils/reportWindow.test.ts:133` in the API.
+ * expected `from` dates as `services/api/src/utils/reportWindow.test.ts:133` in the API.
  */
 const ANCHORED_VECTORS: Array<{ period: ReportPeriod; anchor: string; from: string; to: string }> = [
   { period: "daily", anchor: "2026-03-05", from: "2026-03-05", to: "2026-03-05" },

@@ -8,7 +8,7 @@ import { composeE164, stripTrunkZero, DIALLING_CODES } from "@/lib/phone";
  * The defect being pinned: signup composed `prefix + every digit typed`, so a
  * New Zealand mobile entered as "021 555 0199" — the way it is written on a
  * business card — became +640215550199, keeping both the country code and the
- * trunk 0 that the country code replaces. Twilio rejects it, routes/auth.ts
+ * trunk 0 that the country code replaces. Twilio rejects it, services/api/src/routes/auth.ts
  * returns 502, and the person sees an SMS code that never arrives.
  *
  * These tests run against the real exported list, not a fixture copy of it, so

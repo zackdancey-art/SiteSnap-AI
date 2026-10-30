@@ -63,7 +63,7 @@ function getTokenExpiry(token: string): number | null {
  * The scope is wider than a button labelled "Sign Out" implies: the only
  * revocation this product has is `auth_users.token_generation`, which is per
  * ACCOUNT, so signing out here also signs out the tablet in the site shed.
- * That trade is recorded in `routes/auth.ts`; this string is the half the
+ * That trade is recorded in `services/api/src/routes/auth.ts`; this string is the half the
  * person sees, and it lives next to `logout` so the two cannot drift.
  *
  * Exported because two surfaces ask the question — the native Alert and the

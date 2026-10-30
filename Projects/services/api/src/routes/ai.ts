@@ -1049,7 +1049,7 @@ async function resolveDiaryRequest(
   const period = normalizePeriod(body.period);
 
   // A client-supplied entries array still displaces the server's own load
-  // (AUDIT L45's note in supervisor-web/lib/api.ts explains why that branch
+  // (AUDIT L45's note in apps/supervisor-web/lib/api.ts explains why that branch
   // exists and why the portal no longer takes it). The window is resolved
   // against that array, so an offline retry from the phone reports the same
   // dates the server would have.

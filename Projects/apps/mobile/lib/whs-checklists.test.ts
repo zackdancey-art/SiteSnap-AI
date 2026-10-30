@@ -24,7 +24,7 @@ import {
  * ONE string for both kinds of selection, so the mistake is a single forgotten
  * conversion away, and the in-memory store will never report it.
  *
- * The API refuses an unknown templateId independently (routes/inspections.ts
+ * The API refuses an unknown templateId independently (services/api/src/routes/inspections.ts
  * and inspection-template-id-db.test.ts, against Postgres). This is the client
  * half: it stops the request being made rather than making it and handling the
  * refusal.

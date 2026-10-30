@@ -182,7 +182,7 @@ test("approving a diary is manager+, and that is not the same as using diaries",
   // difference is in what ELSE the diary screen still does. The assertion that
   // separates them is a crew content-edit returning 200 on the same route in
   // the same test as the refused approval, and it lives in the API's
-  // routes/crew-permissions-db.test.ts, against Postgres.
+  // services/api/src/routes/crew-permissions-db.test.ts, against Postgres.
   //
   // What this file can establish is that the module gained exactly one
   // predicate and not a diary predicate: there is no canUseDiaries,
@@ -196,7 +196,7 @@ test("approving a diary is manager+, and that is not the same as using diaries",
 });
 
 test("managing clients and filing a site are manager+, and READING the client list is not gated at all", () => {
-  // Both match requireAtLeast("manager") — the three writes on routes/clients.ts
+  // Both match requireAtLeast("manager") — the three writes on services/api/src/routes/clients.ts
   // and PATCH /projects/sites/:id respectively.
   assert.equal(canManageClients("crew"), false);
   assert.equal(canManageClients("viewer"), false);
@@ -271,7 +271,7 @@ test("voiding a signature is manager+, and signing one is not", () => {
   // assertion that no such predicate exists is the only one this file can make
   // about it. The positive half, crew signing and being refused the void on the
   // same inspection, is a Postgres probe in the API's
-  // routes/crew-permissions-db.test.ts.
+  // services/api/src/routes/crew-permissions-db.test.ts.
   assert.deepEqual(
     Object.keys(permissionsModule).filter((k) => /sign(ature)?/i.test(k)),
     ["canVoidSignature"],
@@ -382,7 +382,7 @@ test("approving a timesheet is manager+, and that is not the same as using times
   // which would satisfy all four assertions above and remove the daily work the
   // screen exists for. The assertion that separates them is a crew member's own
   // edit returning 200 on the same route in the same test as their refused
-  // approval, and it lives in the API's routes/crew-timecards-db.test.ts
+  // approval, and it lives in the API's services/api/src/routes/crew-timecards-db.test.ts
   // against Postgres (test 2, the rank gate, and test 8, crew see only their
   // own).
   //
@@ -413,7 +413,7 @@ test("approving a timesheet is manager+, and that is not the same as using times
  */
 
 test("an approved timecard reads as locked, and the adjacent refusals do not", () => {
-  // The refusal as routes/crew.ts actually sends it.
+  // The refusal as services/api/src/routes/crew.ts actually sends it.
   const locked = {
     status: 409,
     code: TIMECARD_LOCKED_CODE,

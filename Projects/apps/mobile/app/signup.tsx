@@ -39,7 +39,7 @@ export default function SignUpScreen() {
    * The invitation this signup is fulfilling, if any.
    *
    * The API has always accepted an `inviteToken` on /auth/register/verify —
-   * routes/auth.ts reads it, skips creating a solo company, and attaches the new
+   * services/api/src/routes/auth.ts reads it, skips creating a solo company, and attaches the new
    * account to the inviting one. No client ever sent it: the string
    * "inviteToken" appeared nowhere under apps/. So every invited signup created
    * a brand-new company with the invitee as its owner, and the invitation they

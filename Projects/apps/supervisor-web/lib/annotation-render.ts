@@ -12,7 +12,7 @@
  * time. Identical defect to mobile's, same cause, found in the same sweep.
  * AUDIT L119.
  *
- * A note in `lib/annotation-derivative.ts` pointed at `components/AnnotatedImage.tsx`
+ * A note in `lib/annotation-derivative.ts` pointed at `apps/mobile/components/AnnotatedImage.tsx`
  * as the place a renderer change would have to be made alongside a type change.
  * The portal has never had that file — mobile does. The comment named a real
  * file in the wrong application, which is exactly the class of false comment

@@ -5,9 +5,9 @@ morgan.token("reqid", (req) => req.headers["x-request-id"] as string || "-");
 /**
  * Query-string keys whose VALUES are credentials or personal data.
  *
- * `sig` and `exp` are the signed-media credentials (`routes/media.ts` reads
- * `req.query.sig` / `req.query.exp`); together they are a bearer grant for a
- * photograph. `token` is not read from the query string by any route today,
+ * `sig` and `exp` are the signed-media credentials (`routes/uploads.ts:165-166`
+ * reads `req.query.sig` / `req.query.exp`); together they are a bearer grant
+ * for a photograph. `token` is not read from the query string by any route today,
  * and is listed so that it cannot start being logged by the addition of one
  * route elsewhere — the invitation flow is the obvious candidate.
  *

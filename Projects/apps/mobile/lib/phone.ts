@@ -15,7 +15,7 @@
  * number is dialled from inside the country, and E.164 replaces it with the
  * country code rather than keeping both. The number wanted is +64215550199.
  *
- * Twilio rejects the malformed form, and `routes/auth.ts` turns that into a 502
+ * Twilio rejects the malformed form, and `services/api/src/routes/auth.ts` turns that into a 502
  * with the provider's message, so the symptom is an SMS code that never arrives
  * on an apparently valid number — with nothing anywhere telling the person that
  * the fix is to omit a digit they are used to dialling. Every country in the

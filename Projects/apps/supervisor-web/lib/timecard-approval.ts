@@ -80,7 +80,7 @@ export function normaliseApprovalStatus(value: unknown): TimecardApprovalStatus 
  * `services/api/src/routes/crew.ts` sends `code: "timecard_approved"` with the
  * 409. Matching on the code and not on the prose is the whole point of carrying
  * `code` out of `request()`: the server's wording is user-facing copy and will
- * be edited, and `app/invite.tsx` already demonstrated what happens to a client
+ * be edited, and `apps/mobile/app/invite.tsx` already demonstrated what happens to a client
  * that branches on wording — it matched tokens no response body contained and
  * chose its message by accident for months.
  */

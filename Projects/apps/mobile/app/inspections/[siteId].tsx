@@ -43,7 +43,7 @@ import { ScreenHeader } from "@/components/ScreenHeader";
 import { AnnotationVector, Photo } from "@/lib/types";
 
 // Dev-only layout probe for the Add Signature sheet. The require sits INSIDE
-// `if (__DEV__)` on purpose — see the header of lib/dev-signature-probe.ts for
+// `if (__DEV__)` on purpose — see the header of lib/dev-signature-probe.tsx for
 // the bundle-grep evidence that a top-level import would ship this code and a
 // gated require does not. Do not convert this to an import.
 let DevProbe: typeof import("@/lib/dev-signature-probe") | null = null;
@@ -317,7 +317,7 @@ export default function InspectionsScreen() {
   /**
    * The five built-in Australian WHS checklists, from GET /api/whs-checklists.
    *
-   * They are hardcoded in the API (routes/templates.ts) and live in no table,
+   * They are hardcoded in the API (services/api/src/routes/templates.ts) and live in no table,
    * so they have no row in inspection_templates for the inspections.template_id
    * foreign key to point at. That is why a selection from this list is sent as
    * templateId null plus the checklist's NAME, and why the whole

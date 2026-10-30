@@ -16,7 +16,7 @@
  * also does not depend on it today, and adding a dependency is not mine to
  * decide. So the rule is written twice, and the two copies are pinned to ONE
  * table of cases: `WINDOW_CASES` in `report-window.test.ts` is the same table
- * as `utils/reportWindow.test.ts`'s, by hand, with each file naming the other.
+ * as `services/api/src/utils/reportWindow.test.ts`'s, by hand, with each file naming the other.
  * A divergence fails on whichever side was edited. That is weaker than sharing
  * the code and stronger than the status quo, where the two copies disagreed and
  * nothing said so.

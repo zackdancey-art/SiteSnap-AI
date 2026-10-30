@@ -8,7 +8,7 @@
  * words for one role in one session.
  *
  * These four are the app's existing words, not new ones: mobile's
- * `settings/account.tsx` capitalises `companyRole` directly, and the mobile
+ * `apps/mobile/app/settings/account.tsx` capitalises `companyRole` directly, and the mobile
  * invite screens offer Manager / Viewer / Crew as chips. Web now reads from the
  * same four.
  *
@@ -31,7 +31,7 @@ export const COMPANY_ROLE_LABELS: Record<string, string> = {
  * Returning null rather than a default matters: `companyRole` is optional on
  * `User`, and a badge that reads "Viewer" for a user whose role we do not know
  * is a statement about their permissions that we cannot support. Mobile's
- * `settings/account.tsx` already renders nothing in that case.
+ * `apps/mobile/app/settings/account.tsx` already renders nothing in that case.
  */
 export function companyRoleLabel(companyRole: string | null | undefined): string | null {
   if (!companyRole) return null;

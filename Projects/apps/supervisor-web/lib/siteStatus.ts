@@ -8,7 +8,7 @@
  * underscore. The API's status is `on-hold`, with a hyphen — `z.enum(["active",
  * "completed", "on-hold"])` at `services/api/src/routes/projects.ts:53`, and
  * `type SiteStatus = "active" | "completed" | "on-hold"` at
- * `storage/projectsStore.ts:14`. So the key never matched, in three places:
+ * `services/api/src/storage/projectsStore.ts:14`. So the key never matched, in three places:
  *
  *   1. the dashboard rendered an on-hold site as grey "Inactive", via the
  *      `?? STATUS_CFG.inactive` fallback;

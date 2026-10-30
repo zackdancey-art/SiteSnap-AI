@@ -124,8 +124,13 @@ node ./scripts/assert-single-react-types.mjs
 # connecting any declaration to another, and the portal's two copies spelled
 # On Hold `on_hold` against the API's `on-hold` for the life of the feature —
 # three user-visible defects from one character, invisible to tsc because the
-# portal types that field as `string`. The portal has no test runner, so this is
-# the only thing that can hold the six in agreement. It now also compares the
+# portal types that field as `string`. Nothing else holds the six in agreement:
+# each package's own suite can only see its own copy, and this is the only check
+# that reads all of them. (An earlier version of this sentence said "the portal
+# has no test runner". It does — apps/supervisor-web/scripts/run-tests.sh, 7
+# files — and that false sentence is AUDIT L117's subject, appearing here for the
+# third time. The structural check added in PR 3 cannot catch this one: it
+# verifies that a path points at a file, and this is a claim about behaviour.) It now also compares the
 # two clients' LABELS, which is what let a finished site read "Complete" on the
 # portal and "Completed" on the phone.
 step "Structural: the site/diary status vocabularies and labels agree across all packages"
@@ -134,10 +139,11 @@ node ./scripts/assert-site-status-vocabulary.mjs
 # One sentence of policy — the supervisor dashboard is manager+ on every
 # surface, invisible to crew — implemented twice, in two packages. They had
 # already disagreed for the life of the portal: mobile manager+, portal viewer+.
-# Mobile's half is a real test (lib/permissions.test.ts, all four roles both
-# ways); the portal's half has nothing, because apps/supervisor-web has no test
-# program, and reverting its predicate to viewer+ was measured to leave
-# typecheck, lint and both other suites green.
+# Mobile's half is a real test (apps/mobile/lib/permissions.test.ts, all four
+# roles both ways); the portal's half has no test of the PREDICATE, and
+# reverting it to viewer+ was measured to leave typecheck, lint and the other
+# suites green. The portal does have a test program — this comment used to say
+# it did not, which was false; see the correction above.
 step "Structural: both clients agree on who may see the supervisor dashboard"
 node ./scripts/assert-dashboard-rank.mjs
 
@@ -372,6 +378,11 @@ assert_legal_copy_census() {
 #                  suites deliberately enter the same rule from opposite ends:
 #                  mobile asks whether a saved annotation reads back, the
 #                  portal whether a freshly built one is drawable at all.
+#   client-        BOTH sides — apps/mobile/lib/client-details.test.ts and
+#   details        apps/supervisor-web/lib/client-details.test.ts, seven tests
+#                  each and the same seven on purpose. Each package's own
+#                  suite is what a person editing that package runs; this diff
+#                  is what makes the two results one result.
 #
 # An earlier version of this comment said the portal "has no test harness".
 # That was false when written — apps/supervisor-web/scripts/run-tests.sh
@@ -391,7 +402,8 @@ assert_legal_copy_census() {
 # diff clean.
 SHARED_LOGIC_GROUPS="site-grouping|export function groupSitesByClient|apps/mobile/lib/site-grouping.ts,apps/supervisor-web/lib/site-grouping.ts
 job-number|export const JOB_NUMBER_MAX_LENGTH|apps/mobile/lib/job-number.ts,apps/supervisor-web/lib/job-number.ts
-annotation-render|export function selectAnnotationOverlay|apps/mobile/lib/annotation-render.ts,apps/supervisor-web/lib/annotation-render.ts"
+annotation-render|export function selectAnnotationOverlay|apps/mobile/lib/annotation-render.ts,apps/supervisor-web/lib/annotation-render.ts
+client-details|export function clientDetailRows|apps/mobile/lib/client-details.ts,apps/supervisor-web/lib/client-details.ts"
 
 # $1 label, $2 sentinel, $3 comma-separated paths
 assert_shared_logic_copies() {
@@ -465,18 +477,30 @@ assert_all_shared_logic_copies() {
       "$(printf '%s' "$entry" | cut -d'|' -f2)" \
       "$(printf '%s' "$entry" | cut -d'|' -f3)"
   done
-  # An equality, not a floor (AUDIT L112). Three groups are enumerated above; a
+  # An equality, not a floor (AUDIT L112). Four groups are enumerated above; a
   # list emptied or truncated by an edit would otherwise pass having checked
   # less than it claims, and the per-group `$i -lt 2` guard cannot see a group
   # that is no longer there at all.
-  if [ "$groups" -ne 3 ]; then
-    echo "ci.sh: examined $groups shared-logic group(s), expected 3." >&2
+  if [ "$groups" -ne 4 ]; then
+    echo "ci.sh: examined $groups shared-logic group(s), expected 4." >&2
     echo "  If you added or removed a duplicated client rule, change this" >&2
     echo "  number in the same commit as SHARED_LOGIC_GROUPS." >&2
     exit 1
   fi
   echo "  shared-logic: $groups group(s), every copy in agreement."
 }
+
+# A comment that names a file must name a file that exists.
+#
+# Three false comments caused three real gaps in one week, and two of the three
+# were a path a machine could have checked. This checks those, and reports the
+# population it examined rather than only its failures (AUDIT L112, L120).
+#
+# WHAT IT DOES NOT COVER is stated in the script's header and is the larger
+# half: a comment asserting a BEHAVIOUR is unverifiable by path resolution. The
+# two corrections higher up this very file are of that kind.
+step "Structural: every file path named in a comment points at a file that exists"
+node ./scripts/assert-comment-paths.mjs
 
 step "Structural: no duplicated client rule has drifted between its copies"
 assert_all_shared_logic_copies

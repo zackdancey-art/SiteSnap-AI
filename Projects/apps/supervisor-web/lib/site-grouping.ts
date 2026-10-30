@@ -65,9 +65,10 @@ export interface SiteGroup {
  *
  * A site can carry a `clientId` for a client that is not in `clients`. That is
  * not a corrupt state and it is not rare: `refresh()` swallows a failed
- * GET /clients (deliberately — see lib/data-context.tsx), another device can
- * delete a client between two fetches, and a cached site list outlives a cached
- * client list. The obvious implementation looks the id up, finds nothing, and
+ * GET /clients (deliberately — see apps/mobile/lib/data-context.tsx), another
+ * device can delete a client between two fetches, and a cached site list
+ * outlives a cached client list. The obvious implementation looks the id up,
+ * finds nothing, and
  * drops the site into "Unfiled" — which tells the person their filing has been
  * lost when it has not.
  *
