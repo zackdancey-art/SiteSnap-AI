@@ -66,13 +66,23 @@ cd "$(dirname "$0")/.."
 # the portal half of the annotation overlay rule. The guard refused this commit
 # too, in exactly the same way, and for the same reason: the file was registered
 # in tsconfig.test.json before this number was raised.
-EXPECTED_TEST_FILES=6
+#
+# 7 on feat/pr3-client-information, MEASURED: +1 for lib/client-details.test.ts,
+# the portal's copy of the detail-row rule. Refused this commit too, 7 against
+# 6 — three branches running, three refusals, which is the guard doing its job
+# rather than three mistakes.
+EXPECTED_TEST_FILES=7
 #
 # 43 on feat/pr2-job-number, MEASURED: 36 + 7 from lib/job-number.test.ts.
 #
 # 48 on fix/pr2b-annotation-save, MEASURED: 43 + 5 from
 # lib/annotation-render.test.ts.
-EXPECTED_TESTS=48
+#
+# 55 on feat/pr3-client-information, MEASURED: 48 + 7 from
+# lib/client-details.test.ts. Seven, the same as the mobile copy's, because
+# the two test files hold the same assertions deliberately — see either
+# file's header.
+EXPECTED_TESTS=55
 
 FILE_LIST=$(find dist-test -name '*.test.js' | sort)
 
@@ -127,7 +137,7 @@ fi
 # dist-test/ holds the same number of files as before, EXPECTED_TEST_FILES
 # still matches, and the run goes green having never loaded the new tests.
 #
-# On mobile that was not hypothetical: lib/client-site-counts.test.ts sat on
+# On mobile that was not hypothetical: apps/mobile/lib/client-site-counts.test.ts sat on
 # disk through a full green run of 26 files and 207 tests, with seven tests that
 # had never executed. Nothing about that mechanism is specific to mobile, and
 # this package's `files` array is the same shape. It is ported here BEFORE it

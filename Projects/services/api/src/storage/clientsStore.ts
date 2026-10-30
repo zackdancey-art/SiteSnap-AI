@@ -52,6 +52,18 @@ import { withTenant } from "./tenant";
  * The one thing this store shares with the rest: every query runs through
  * `withTenant` AND carries its own `company_id = $n`, because `clients` is
  * RLS-forced by migration 032 and CLAUDE.md §3 keeps both layers.
+ *
+ * ───────────────────────────────────────────────────────────────────────────
+ *  AND NO BANK DETAILS, EVER
+ * ───────────────────────────────────────────────────────────────────────────
+ *
+ * Migration 036 added the fields a Xero contact maps to — two addresses, two
+ * tax identifiers, and `xero_contact_id`. It did NOT add an account number,
+ * and neither should anything else, because the integration does not need one:
+ * Xero works off a contact record it holds itself, and payment credentials
+ * live on its side of that boundary. That is the entire reason the id column
+ * exists at all. The same sentence is in the migration and in
+ * routes/clients.ts, so it is there in whichever of the three a person opens.
  */
 
 /**
@@ -72,17 +84,49 @@ export type ClientRecord = {
   contactName: string;
   contactEmail: string;
   contactPhone: string;
+  /** Xero Contact.Addresses[AddressType=STREET]. One free-text block. */
+  physicalAddress: string;
+  /** Xero Contact.Addresses[AddressType=POBOX]. */
+  postalAddress: string;
+  /** Xero Contact.TaxNumber — a GST number, or an ABN. */
+  taxNumber: string;
+  /** Xero Contact.CompanyNumber — an NZBN. */
+  companyNumber: string;
   notes: string;
+  /**
+   * The id of the contact record Xero itself holds, or null for every client
+   * that exists today. READ-ONLY THROUGH THIS STORE'S INPUT TYPE: it is absent
+   * from `ClientInput` below, so no route and no form can set it, and the
+   * `.strict()` patch schema in routes/clients.ts turns an attempt into a 400
+   * rather than a silent no-op. Migration 036 explains why it is here before
+   * anything writes it.
+   *
+   * Note what is NOT here and will not be added: no bank account number, no
+   * BSB, no payment credential of any kind. Xero holds those against the
+   * contact this id points at, which is the whole reason the id is the only
+   * integration column in this table.
+   */
+  xeroContactId: string | null;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
 };
 
+/**
+ * What a caller may SET. Deliberately a different shape from `ClientRecord`
+ * rather than a `Partial` of it: the record carries three fields no caller
+ * owns — `id`, `createdBy`, `createdAt` — and now a fourth, `xeroContactId`,
+ * which belongs to an integration that does not exist yet.
+ */
 export type ClientInput = {
   name: string;
   contactName: string;
   contactEmail: string;
   contactPhone: string;
+  physicalAddress: string;
+  postalAddress: string;
+  taxNumber: string;
+  companyNumber: string;
   notes: string;
 };
 
@@ -108,7 +152,12 @@ type ClientRow = {
   contact_name: string;
   contact_email: string;
   contact_phone: string;
+  physical_address: string;
+  postal_address: string;
+  tax_number: string;
+  company_number: string;
   notes: string;
+  xero_contact_id: string | null;
   created_by: string;
   created_at: Date;
   updated_at: Date;
@@ -122,7 +171,12 @@ function mapRow(row: ClientRow): ClientRecord {
     contactName: row.contact_name,
     contactEmail: row.contact_email,
     contactPhone: row.contact_phone,
+    physicalAddress: row.physical_address,
+    postalAddress: row.postal_address,
+    taxNumber: row.tax_number,
+    companyNumber: row.company_number,
     notes: row.notes,
+    xeroContactId: row.xero_contact_id,
     createdBy: row.created_by,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
@@ -193,7 +247,14 @@ export async function createClient(actor: Actor, payload: ClientInput): Promise<
     contactName: payload.contactName,
     contactEmail: payload.contactEmail,
     contactPhone: payload.contactPhone,
+    physicalAddress: payload.physicalAddress,
+    postalAddress: payload.postalAddress,
+    taxNumber: payload.taxNumber,
+    companyNumber: payload.companyNumber,
     notes: payload.notes,
+    // Not from the payload, and not settable by one. A client is created
+    // unlinked; linking it is the integration's job, when there is one.
+    xeroContactId: null,
     createdBy: actor.email,
     createdAt: now,
     updatedAt: now,
@@ -211,12 +272,17 @@ export async function createClient(actor: Actor, payload: ClientInput): Promise<
   const result = await withTenant(actor, (client) =>
     client.query<ClientRow>(
       `INSERT INTO ${CLIENTS_TABLE}
-         (id, company_id, name, contact_name, contact_email, contact_phone, notes, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         (id, company_id, name, contact_name, contact_email, contact_phone,
+          physical_address, postal_address, tax_number, company_number, notes, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
        ON CONFLICT (company_id, lower(btrim(name))) DO NOTHING
        RETURNING *`,
+      // xero_contact_id is omitted rather than passed as NULL: the column's
+      // absence from this list is what makes it unwritable here, and a
+      // reviewer can see that without reading the parameter array.
       [record.id, actor.companyId, record.name, record.contactName, record.contactEmail,
-       record.contactPhone, record.notes, actor.email]
+       record.contactPhone, record.physicalAddress, record.postalAddress, record.taxNumber,
+       record.companyNumber, record.notes, actor.email]
     )
   );
   if (result.rowCount === 0) {
@@ -268,16 +334,24 @@ export async function updateClient(
   const result = await withTenant(actor, (client) =>
     client.query<ClientRow>(
       `UPDATE ${CLIENTS_TABLE} SET
-         name          = COALESCE($3, name),
-         contact_name  = COALESCE($4, contact_name),
-         contact_email = COALESCE($5, contact_email),
-         contact_phone = COALESCE($6, contact_phone),
-         notes         = COALESCE($7, notes),
-         updated_at    = NOW()
+         name             = COALESCE($3,  name),
+         contact_name     = COALESCE($4,  contact_name),
+         contact_email    = COALESCE($5,  contact_email),
+         contact_phone    = COALESCE($6,  contact_phone),
+         physical_address = COALESCE($7,  physical_address),
+         postal_address   = COALESCE($8,  postal_address),
+         tax_number       = COALESCE($9,  tax_number),
+         company_number   = COALESCE($10, company_number),
+         notes            = COALESCE($11, notes),
+         updated_at       = NOW()
        WHERE id = $1 AND company_id = $2
        RETURNING *`,
+      // xero_contact_id is absent from this SET list, so a patch cannot reach
+      // it even if a future edit widens ClientPatchSchema by accident.
       [id, actor.companyId, trimmedName ?? null, patch.contactName ?? null,
-       patch.contactEmail ?? null, patch.contactPhone ?? null, patch.notes ?? null]
+       patch.contactEmail ?? null, patch.contactPhone ?? null, patch.physicalAddress ?? null,
+       patch.postalAddress ?? null, patch.taxNumber ?? null, patch.companyNumber ?? null,
+       patch.notes ?? null]
     )
   );
   if (result.rowCount === 0) return null;

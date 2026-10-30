@@ -3,7 +3,7 @@
  *
  * WHY THIS FILE AND ITS IN-MEMORY TWIN BOTH EXIST
  *
- * `clients.test.ts` runs the same six scenarios against the in-memory store.
+ * `clients.test.ts` runs the same scenarios against the in-memory store.
  * The duplication is deliberate and the two files must be changed together:
  * seven defects in this service have hidden in the gap between the two store
  * implementations (AUDIT L65, L87, L88, L89, L99), so a permissions or tenancy
@@ -13,7 +13,7 @@
  *
  * WHAT IS BEING DEFENDED HERE
  *
- * Six things, each with both controls in the same test, because a refusal
+ * Nine things, each with both controls in the same test, because a refusal
  * assertion on its own passes equally well when the route has been deleted:
  *
  *   1. Crew READ the client list and cannot change it — and a manager can,
@@ -29,6 +29,18 @@
  *      difference in migration 032 between "unfile three sites" and "destroy
  *      three sites' worth of compliance evidence".
  *   6. Crew cannot file a site; a manager can, same endpoint, same test.
+ *   7. The Xero-shaped invoice fields (migration 036) survive the round trip,
+ *      and a PATCH of one does not blank the others — the COALESCE in the
+ *      UPDATE, asserted rather than assumed, because the failure mode is the
+ *      silent erasure of an address somebody typed last week.
+ *   8. `xero_contact_id` cannot be written through either write route. POST
+ *      strips the key (ClientSchema is not strict), PATCH refuses it with a
+ *      400 (ClientPatchSchema is) — two different correct answers, both
+ *      asserted so that changing either schema's strictness shows up here.
+ *   9. The clients table's column set, as an EQUALITY. This is the assertion
+ *      that defends the decision not to hold bank account details: it fails
+ *      on any new column at all, so the next person to add one has to come
+ *      here and say what it is for.
  *
  * NO HAND-WRITTEN COUNTS. `unfiledSites` is compared against the length of the
  * array of sites this file actually filed, not against a literal.
@@ -485,5 +497,190 @@ if (!process.env.TEST_DATABASE_URL) {
     const seen = crewSites.body.sites.find((s) => s.id === target);
     assert.ok(seen, "crew can no longer see the site they are standing on");
     assert.equal(seen.clientId, clientId, "crew can see the site but not what it is filed under");
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  THE XERO-SHAPED FIELDS (migration 036)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  type XeroClient = Client & {
+    contactName: string;
+    contactEmail: string;
+    contactPhone: string;
+    physicalAddress: string;
+    postalAddress: string;
+    taxNumber: string;
+    companyNumber: string;
+    notes: string;
+    xeroContactId: string | null;
+  };
+
+  const clientRow = async (id: string) => {
+    const r = await behindTheRoute<{
+      physical_address: string;
+      postal_address: string;
+      tax_number: string;
+      company_number: string;
+      xero_contact_id: string | null;
+    }>(
+      `SELECT physical_address, postal_address, tax_number, company_number, xero_contact_id
+         FROM ${CLIENTS_TABLE} WHERE id = $1`,
+      [id]
+    );
+    return r.rows[0] ?? null;
+  };
+
+  test("the invoice fields survive the round trip, and a patch of one leaves the others alone", async () => {
+    const PHYSICAL = "12 Kerbside Lane\nNewtown\nWellington 6021";
+    const POSTAL = "PO Box 4417\nWellington 6140";
+    const GST = "123-456-789";
+    const NZBN = "9429041234567";
+
+    const created = await seed<{ client: XeroClient }>(
+      "POST", "/clients",
+      {
+        name: `Xero Fields ${runId}`,
+        contactName: "Ana Petrov",
+        physicalAddress: PHYSICAL,
+        postalAddress: POSTAL,
+        taxNumber: GST,
+        companyNumber: NZBN,
+      },
+      ownerToken
+    );
+    const id = created.body.client.id;
+
+    // 1. The response carries them.
+    assert.equal(created.body.client.physicalAddress, PHYSICAL);
+    assert.equal(created.body.client.postalAddress, POSTAL);
+    assert.equal(created.body.client.taxNumber, GST);
+    assert.equal(created.body.client.companyNumber, NZBN);
+
+    // 2. So does the database, read from behind the route. This is the half a
+    //    response-only assertion cannot make: an INSERT whose column list had
+    //    drifted from the schema would echo the payload back from `RETURNING *`
+    //    only if the columns were actually written, but a store that built its
+    //    record in TypeScript and dropped a column from the SQL would return a
+    //    perfect 201 and store nothing. L10 and L11 were both that shape.
+    const row = await clientRow(id);
+    assert.ok(row, "the client was created but cannot be read behind the route");
+    assert.equal(row.physical_address, PHYSICAL);
+    assert.equal(row.postal_address, POSTAL);
+    assert.equal(row.tax_number, GST);
+    assert.equal(row.company_number, NZBN);
+
+    // 3. And the list route, which is what the clients screen renders.
+    const listed = await req<{ clients: XeroClient[] }>("GET", "/clients", undefined, ownerToken);
+    assert.equal(listed.status, 200);
+    const fromList = listed.body.clients.find((c) => c.id === id);
+    assert.ok(fromList, "the client is in the database but not in the list route");
+    assert.equal(fromList.taxNumber, GST, "the field persisted but the list route does not return it");
+    assert.equal(fromList.physicalAddress, PHYSICAL);
+
+    // 4. A field left out of the payload is '', not null. The whole table uses
+    //    '' for "not entered" so that every reader has one empty state to
+    //    handle; a null arriving here would mean the DEFAULT was not applied.
+    assert.equal(fromList.notes, "", "an unsupplied field came back as something other than the empty string");
+
+    // 5. PATCH one field. COALESCE in the UPDATE means an absent key must leave
+    //    its column alone — and the failure mode if it does not is silent
+    //    erasure of an address the user typed last week.
+    const patched = await seed<{ client: XeroClient }>(
+      "PATCH", `/clients/${id}`, { taxNumber: "987-654-321" }, ownerToken
+    );
+    assert.equal(patched.body.client.taxNumber, "987-654-321", "the patch did not take");
+    // POSITIVE CONTROL for the COALESCE, in the same test: the four fields the
+    // patch did not mention are unchanged, not blanked.
+    assert.equal(patched.body.client.physicalAddress, PHYSICAL, "patching the tax number erased the street address");
+    assert.equal(patched.body.client.postalAddress, POSTAL, "patching the tax number erased the postal address");
+    assert.equal(patched.body.client.companyNumber, NZBN, "patching the tax number erased the NZBN");
+    assert.equal(patched.body.client.contactName, "Ana Petrov", "patching the tax number erased the contact");
+
+    const afterPatch = await clientRow(id);
+    assert.equal(afterPatch?.physical_address, PHYSICAL, "the response kept the address but the database did not");
+  });
+
+  test("xero_contact_id cannot be written through the API, and stays null", async () => {
+    const id = await newClient(`Xero Link ${runId}`, ownerToken);
+
+    // POST: `xeroContactId` is absent from ClientSchema, which is not strict,
+    // so zod STRIPS it. The request succeeds and the column is untouched —
+    // which is the behaviour under test, not an oversight: a 201 that quietly
+    // ignored the key would be indistinguishable from one that honoured it
+    // without this assertion.
+    const posted = await seed<{ client: XeroClient }>(
+      "POST", "/clients",
+      { name: `Xero Link Post ${runId}`, xeroContactId: "xero-contact-forged" },
+      ownerToken
+    );
+    assert.equal(posted.body.client.xeroContactId, null, "POST set the Xero contact id");
+    assert.equal(
+      (await clientRow(posted.body.client.id))?.xero_contact_id, null,
+      "the response said null but the column was written"
+    );
+
+    // PATCH: ClientPatchSchema IS strict, so the same key is a 400 rather than
+    // a silent no-op. Different answers from the two routes, both correct, and
+    // both asserted so that a future `.strict()` added to ClientSchema -- or
+    // removed from the patch schema -- shows up here.
+    const patched = await req("PATCH", `/clients/${id}`, { xeroContactId: "xero-contact-forged" }, ownerToken);
+    assert.equal(patched.status, 400, "PATCH accepted a key that is not in the patch schema");
+    assert.equal((await clientRow(id))?.xero_contact_id, null, "a 400 was returned but the column was written anyway");
+
+    // POSITIVE CONTROL, same endpoint, same test: PATCH works. Without this,
+    // a route that 400s on every body would pass the assertion above.
+    const legitimate = await req<{ client: XeroClient }>(
+      "PATCH", `/clients/${id}`, { taxNumber: "111-222-333" }, ownerToken
+    );
+    assert.equal(legitimate.status, 200, "the patch route refuses everything, so the 400 above proves nothing");
+    assert.equal(legitimate.body.client.taxNumber, "111-222-333");
+  });
+
+  test("the clients table holds no bank account details, and its column set is exactly what is enumerated here", async () => {
+    const r = await behindTheRoute<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_name = $1 ORDER BY column_name ASC`,
+      [CLIENTS_TABLE]
+    );
+    const columns = r.rows.map((x) => x.column_name);
+
+    // An EQUALITY over the whole column set, not a search for forbidden names
+    // (AUDIT L112). A denylist of bank-ish words cannot fail upward: the column
+    // that gets added will be called `payment_ref` or `acct`, and no list
+    // written today contains it. This assertion fails on ANY new column, which
+    // forces whoever adds one to come here and say what it is for -- including,
+    // and this is the point, a bank account number.
+    assert.deepEqual(
+      columns,
+      [
+        "company_id",
+        "company_number",
+        "contact_email",
+        "contact_name",
+        "contact_phone",
+        "created_at",
+        "created_by",
+        "id",
+        "name",
+        "notes",
+        "physical_address",
+        "postal_address",
+        "tax_number",
+        "updated_at",
+        "xero_contact_id",
+      ],
+      "the clients table's columns have changed. If this is a bank account " +
+        "number or any other payment credential, it does not belong here: the " +
+        "Xero integration works off a contact record Xero holds itself, and " +
+        "xero_contact_id is its whole footprint. See migration 036."
+    );
+
+    // POSITIVE CONTROL for the query itself. `information_schema.columns`
+    // returning nothing -- a renamed table, a connection with no search_path --
+    // would make the deepEqual above fail rather than pass, but a WRONG table
+    // name in the parameter would make it fail too, and the two look identical
+    // in the output. So prove the query is looking at the right table.
+    assert.ok(columns.includes("tax_number"), "this query is not reading the clients table at all");
+    assert.ok(columns.length >= 15, `the clients table reported only ${columns.length} columns`);
   });
 }

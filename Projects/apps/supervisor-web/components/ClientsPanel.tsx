@@ -12,6 +12,7 @@ import {
   type ClientInput,
 } from "@/lib/api";
 import { useRole } from "@/lib/useRole";
+import { clientDetailRows, type ClientDetailKey } from "@/lib/client-details";
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════
@@ -93,6 +94,10 @@ export default function ClientsPanel() {
       contactName: client.contactName,
       contactEmail: client.contactEmail,
       contactPhone: client.contactPhone,
+      physicalAddress: client.physicalAddress,
+      postalAddress: client.postalAddress,
+      taxNumber: client.taxNumber,
+      companyNumber: client.companyNumber,
       notes: client.notes,
     });
     setEditing(client);
@@ -114,6 +119,10 @@ export default function ClientsPanel() {
         contactName: form.contactName.trim(),
         contactEmail: form.contactEmail.trim(),
         contactPhone: form.contactPhone.trim(),
+        physicalAddress: form.physicalAddress.trim(),
+        postalAddress: form.postalAddress.trim(),
+        taxNumber: form.taxNumber.trim(),
+        companyNumber: form.companyNumber.trim(),
         notes: form.notes.trim(),
       };
       if (editing) {
@@ -137,7 +146,7 @@ export default function ClientsPanel() {
        *
        * The wording is the server's to change; the status is the contract. The
        * portal already has one screen that picked its message by searching an
-       * error string for tokens no response body contained (app/invite.tsx,
+       * error string for tokens no response body contained (apps/mobile/app/invite.tsx,
        * which is why `request` now carries the status out at all).
        */
       const status = (e as { status?: unknown } | null)?.status;
@@ -237,7 +246,9 @@ export default function ClientsPanel() {
 
       {clients !== null && clients.length > 0 && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
-          {clients.map((client) => (
+          {clients.map((client) => {
+            const detailRows = clientDetailRows(client);
+            return (
             <div className="card" key={client.id} style={{ padding: "16px 18px" }}>
               <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
                 <h3 style={{ fontSize: 15, fontWeight: 700, margin: 0, flex: 1 }}>{client.name}</h3>
@@ -271,19 +282,22 @@ export default function ClientsPanel() {
                 {client.siteCount} {client.siteCount === 1 ? "site" : "sites"} →
               </Link>
 
-              {/* Each contact line is conditional. A client added mid-job has
-                  a name and nothing else, and empty labelled rows read as
-                  missing data rather than as data nobody entered. */}
-              {(client.contactName || client.contactEmail || client.contactPhone || client.notes) && (
+              {/* WHICH rows appear is lib/client-details.ts's decision, shared
+                  byte-for-byte with the phone and diffed by Projects/scripts/ci.sh.
+                  This block used to name every field twice — once in the `&&`
+                  that drew the container and once per row — which is eight
+                  fields in sixteen places across two surfaces, each a chance
+                  to hide a populated row behind a condition that forgot it. */}
+              {detailRows.length > 0 && (
                 <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)", display: "grid", gap: 4 }}>
-                  {client.contactName && <Detail label="Contact" value={client.contactName} />}
-                  {client.contactEmail && <Detail label="Email" value={client.contactEmail} />}
-                  {client.contactPhone && <Detail label="Phone" value={client.contactPhone} />}
-                  {client.notes && <Detail label="Notes" value={client.notes} />}
+                  {detailRows.map((row) => (
+                    <Detail key={row.key} label={DETAIL_LABELS[row.key]} value={row.value} />
+                  ))}
                 </div>
               )}
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
       {showForm && (
@@ -297,6 +311,16 @@ export default function ClientsPanel() {
               <Field label="Contact name" value={form.contactName} onChange={(contactName) => setForm((f) => ({ ...f, contactName }))} optional />
               <Field label="Email" value={form.contactEmail} onChange={(contactEmail) => setForm((f) => ({ ...f, contactEmail }))} optional type="email" />
               <Field label="Phone" value={form.contactPhone} onChange={(contactPhone) => setForm((f) => ({ ...f, contactPhone }))} optional type="tel" />
+              {/* ONE BOX PER ADDRESS, not four lines each. Street/suburb/city/
+                  postcode is eight inputs for two addresses, and a rural
+                  address with an RD number does not fit them anyway. Xero
+                  takes address lines, so a free-text block splits on newlines
+                  at the boundary rather than being structured all the way
+                  back through the schema. */}
+              <Field label="Street address" value={form.physicalAddress} onChange={(physicalAddress) => setForm((f) => ({ ...f, physicalAddress }))} optional multiline />
+              <Field label="Postal address" value={form.postalAddress} onChange={(postalAddress) => setForm((f) => ({ ...f, postalAddress }))} optional multiline />
+              <Field label="GST number" value={form.taxNumber} onChange={(taxNumber) => setForm((f) => ({ ...f, taxNumber }))} optional />
+              <Field label="NZBN" value={form.companyNumber} onChange={(companyNumber) => setForm((f) => ({ ...f, companyNumber }))} optional />
               <Field label="Notes" value={form.notes} onChange={(notes) => setForm((f) => ({ ...f, notes }))} optional multiline />
             </div>
             {formError && (
@@ -315,9 +339,47 @@ export default function ClientsPanel() {
   );
 }
 
+/**
+ * Every writable field, spelled out. `ClientInput` has no optional members on
+ * purpose, so adding a column to the type breaks this function and makes
+ * somebody decide what an empty form holds — rather than the field quietly
+ * never appearing in a create payload.
+ */
 function emptyForm(): ClientInput {
-  return { name: "", contactName: "", contactEmail: "", contactPhone: "", notes: "" };
+  return {
+    name: "",
+    contactName: "",
+    contactEmail: "",
+    contactPhone: "",
+    physicalAddress: "",
+    postalAddress: "",
+    taxNumber: "",
+    companyNumber: "",
+    notes: "",
+  };
 }
+
+/**
+ * key → the label beside the value. Exhaustive by type: a ninth
+ * `ClientDetailKey` fails the compile here instead of rendering a row with no
+ * label. The mobile copy maps the same keys to Ionicons for the same reason.
+ *
+ * "GST" and "NZBN" rather than "Tax number" and "Company number" because
+ * those are the words on the invoice a New Zealand contractor is copying from.
+ * The columns are named generically (migration 036) so the same fields serve
+ * an ABN or a VAT number later without a schema change; only these two labels
+ * would need to move.
+ */
+const DETAIL_LABELS: Record<ClientDetailKey, string> = {
+  contactName: "Contact",
+  contactEmail: "Email",
+  contactPhone: "Phone",
+  physicalAddress: "Address",
+  postalAddress: "Postal",
+  taxNumber: "GST",
+  companyNumber: "NZBN",
+  notes: "Notes",
+};
 
 function sortByName(list: Client[]): Client[] {
   return [...list].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
@@ -326,8 +388,12 @@ function sortByName(list: Client[]): Client[] {
 function Detail({ label, value }: { label: string; value: string }) {
   return (
     <div style={{ display: "flex", gap: 8, fontSize: 12 }}>
-      <span style={{ color: "var(--text-tertiary)", minWidth: 58 }}>{label}</span>
-      <span style={{ color: "var(--text-secondary)", wordBreak: "break-word" }}>{value}</span>
+      <span style={{ color: "var(--text-tertiary)", minWidth: 58, flexShrink: 0 }}>{label}</span>
+      {/* `pre-wrap`, because an address is entered as one free-text block with
+          its own line breaks (migration 036) and HTML would otherwise collapse
+          them into one line. `wordBreak` stays for a long unbroken token such
+          as an email address at a narrow width. */}
+      <span style={{ color: "var(--text-secondary)", wordBreak: "break-word", whiteSpace: "pre-wrap" }}>{value}</span>
     </div>
   );
 }

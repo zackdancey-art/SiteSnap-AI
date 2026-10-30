@@ -228,7 +228,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
      *
      * This was a bare `new Error(message)`, which left a caller that needs to
      * tell one refusal from another with nothing to branch on but the wording —
-     * and app/invite.tsx did exactly that, matching on tokens no response body
+     * and apps/mobile/app/invite.tsx did exactly that, matching on tokens no response body
      * ever contained, so it picked its message by accident. The clients page
      * needs the 409 specifically (a duplicate client name), and asking for it
      * by status is the only way that stays correct when the wording changes.
@@ -277,7 +277,7 @@ async function publicRequest<T>(method: string, path: string, body?: unknown): P
 /**
  * Registration, in the three steps the API requires: start, confirm the email
  * code, then confirm the SMS code. `inviteToken` goes on the LAST call, which
- * is where routes/auth.ts reads it — passing it earlier does nothing, and
+ * is where services/api/src/routes/auth.ts reads it — passing it earlier does nothing, and
  * omitting it makes the new account the owner of its own empty company instead
  * of a member of the one that invited them.
  */
@@ -288,7 +288,7 @@ export async function registerStart(payload: {
   // parameter: an optional field lets a future call site drop somebody's
   // consent by forgetting an argument, and the failure would be a missing legal
   // record rather than a type error. The API's own check treats a body with
-  // SOME of these fields as a 400 (utils/signupConsent.ts), so a partial
+  // SOME of these fields as a 400 (services/api/src/utils/signupConsent.ts), so a partial
   // payload cannot get through here either.
   acceptedTerms: true; acceptedPrivacy: true;
   termsVersion: string; privacyVersion: string;
@@ -505,7 +505,7 @@ export async function approveDiary(diaryId: string): Promise<Diary> {
  * already existed — `PATCH /api/projects/entries/:id`, defined at
  * services/api/src/routes/projects.ts:243. NO ROUTE WAS ADDED OR WIDENED for
  * annotation, and in particular the `Cross-Origin-Resource-Policy: same-site`
- * scope on the media route (routes/uploads.ts:160-215) is untouched: the portal
+ * scope on the media route (services/api/src/routes/uploads.ts:160-215) is untouched: the portal
  * draws a vector overlay in the DOM and stores coordinates, so it never needs to
  * read the image's pixels back and never needs a CORS-enabled image load.
  *
@@ -543,7 +543,7 @@ export async function updateEntryPhotos(
  * L45 rather than an omission.
  *
  * `/api/generate-diary` resolves its entries one of two ways
- * (`routes/ai.ts` → `resolveDiaryRequest`): if the request carries a non-empty
+ * (`services/api/src/routes/ai.ts` → `resolveDiaryRequest`): if the request carries a non-empty
  * `entries` array it uses that array and never reads the store; otherwise it
  * loads the site and its entries itself. This portal was sending an `entries`
  * array built by hand with `photos: []` hardcoded — so it was taking the first
@@ -763,20 +763,43 @@ export type Client = {
   contactName: string;
   contactEmail: string;
   contactPhone: string;
+  /** Xero Contact.Addresses[STREET]. One free-text block; '' when not entered. */
+  physicalAddress: string;
+  /** Xero Contact.Addresses[POBOX]. */
+  postalAddress: string;
+  /** Xero Contact.TaxNumber — a GST number, or an ABN. */
+  taxNumber: string;
+  /** Xero Contact.CompanyNumber — an NZBN. */
+  companyNumber: string;
   notes: string;
+  /**
+   * The id of the contact record Xero holds, or null for every client today.
+   * READ-ONLY, and absent from `ClientInput` below for that reason: POST
+   * strips the key and PATCH returns a 400.
+   *
+   * No bank account field beside it, deliberately — Xero holds the payment
+   * details against the contact this id points at. Migration 036 and
+   * services/api/src/routes/clients.ts both say so, in the other two places a person looks.
+   */
+  xeroContactId: string | null;
   createdAt: string;
   updatedAt: string;
   /** Sites currently filed under this client. Server-computed; never sent. */
   siteCount: number;
 };
 
-/** The five writable fields. Spelled out rather than derived from `Client`, so
- *  `siteCount` cannot be written from the browser even by accident. */
+/** The nine writable fields. Spelled out rather than derived from `Client`, so
+ *  that neither `siteCount` nor `xeroContactId` can be written from the browser
+ *  even by accident. */
 export type ClientInput = {
   name: string;
   contactName: string;
   contactEmail: string;
   contactPhone: string;
+  physicalAddress: string;
+  postalAddress: string;
+  taxNumber: string;
+  companyNumber: string;
   notes: string;
 };
 

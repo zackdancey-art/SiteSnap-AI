@@ -66,7 +66,26 @@ export interface Client {
   contactName: string;
   contactEmail: string;
   contactPhone: string;
+  /** Xero Contact.Addresses[STREET]. One free-text block; '' when not entered. */
+  physicalAddress: string;
+  /** Xero Contact.Addresses[POBOX]. */
+  postalAddress: string;
+  /** Xero Contact.TaxNumber — a GST number, or an ABN. */
+  taxNumber: string;
+  /** Xero Contact.CompanyNumber — an NZBN. */
+  companyNumber: string;
   notes: string;
+  /**
+   * The id of the contact record Xero holds, or null for every client today.
+   * READ-ONLY: no screen sets it, and the API refuses it — POST strips the key
+   * and PATCH returns a 400. It is here so a future screen can say whether a
+   * client is linked without another round of type changes.
+   *
+   * There is deliberately no bank account field beside it, and there should not
+   * be one: Xero works off the contact this id points at and holds the payment
+   * details on its own side. Migration 036 says the same thing in the schema.
+   */
+  xeroContactId: string | null;
   createdAt: string;
   updatedAt: string;
   siteCount: number;

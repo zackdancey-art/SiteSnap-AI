@@ -53,11 +53,57 @@ function getActor(req: AuthenticatedRequest) {
  */
 const ClientSchema = z.object({
   name: z.string().trim().min(1).max(200),
-  contactName: z.string().max(200).default(""),
-  contactEmail: z.string().max(320).default(""),
-  contactPhone: z.string().max(50).default(""),
-  notes: z.string().max(5000).default(""),
+  // `.trim()` on every field, not just `name`. Two reasons, and the second is
+  // the one that caught this: a value the user typed a trailing space into is
+  // the same client as the one without it, and the client-details rule — in
+  // both copies, apps/mobile/lib/client-details.ts and
+  // apps/supervisor-web/lib/client-details.ts — decides whether to render a
+  // row by trimming and testing for empty. That rule's header claimed "both
+  // routes .trim() on the way in", which was true of `name` alone. Either the comment was wrong or the schema was; the schema was the
+  // half worth changing, because a whitespace-only address stored verbatim is
+  // a row that renders on one surface and not the other depending on which
+  // of them trims.
+  contactName: z.string().trim().max(200).default(""),
+  contactEmail: z.string().trim().max(320).default(""),
+  contactPhone: z.string().trim().max(50).default(""),
+  // The Xero-shaped fields (migration 036). Every one optional, for the same
+  // reason `name` is the only required field: an invoice address is something
+  // the office fills in later, not something the person standing on the site
+  // has to hand.
+  //
+  // The addresses are one free-text block each rather than four columns, and
+  // the lengths are generous because a rural postal address with a RD number
+  // and a courier instruction is longer than it looks. 500 is well past any
+  // real address and well short of anything worth storing in a TEXT column.
+  physicalAddress: z.string().trim().max(500).default(""),
+  postalAddress: z.string().trim().max(500).default(""),
+  // Unvalidated by format, deliberately. A GST number's shape differs by
+  // country; refusing a number the user is reading off a real invoice is
+  // worse than storing it, and Xero's own rejection is the authority on what
+  // Xero accepts.
+  taxNumber: z.string().trim().max(50).default(""),
+  companyNumber: z.string().trim().max(50).default(""),
+  notes: z.string().trim().max(5000).default(""),
 });
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  WHAT IS NOT IN THAT SCHEMA, AND WILL NOT BE
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * NO BANK ACCOUNT DETAILS. No account number, no BSB, no sort code, no IBAN.
+ * The Xero integration does not need them: Xero works off a contact record it
+ * holds itself, and the bank details live on its side of that boundary. The
+ * whole of this schema's integration footprint is `xero_contact_id`, which
+ * this router does not accept either.
+ *
+ * `xeroContactId` is absent from `ClientSchema` on purpose, which means
+ * `ClientPatchSchema`'s `.strict()` below turns an attempt to set it into a
+ * 400 rather than a silent no-op. The store returns it so a future screen can
+ * show whether a client is linked; nothing can write it through HTTP. The same
+ * statement appears in migration 036 and in storage/clientsStore.ts, in all
+ * three places a person would look before adding a column.
+ */
 
 /**
  * `.strict()` so an unknown key is a 400 rather than a silent no-op.

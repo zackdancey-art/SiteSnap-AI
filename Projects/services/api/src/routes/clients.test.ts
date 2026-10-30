@@ -417,3 +417,172 @@ test("binning a site takes it out of its client's count, and restoring puts it b
   await seed("DELETE", `/projects/sites/${FILED[1]}`, undefined, ownerToken);
   assert.equal(await countFor(clientId), FILED.length - 1, "binning the second site did not come off the count");
 });
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  THE XERO-SHAPED FIELDS (migration 036), in-memory half
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The twin in clients-db.test.ts makes the same two claims against Postgres and
+// adds a third this harness cannot make — the column-set equality that defends
+// the decision to hold no bank details, which needs information_schema. What
+// these two earn by being here is the in-memory implementation of the SAME
+// rules: `createClient`'s record literal and `updateClient`'s spread are a
+// second, independently-written copy of the INSERT and the COALESCE, and the
+// gap between the two store implementations is where seven defects in this
+// service have hidden (L65, L87, L88, L89, L99).
+
+type XeroClient = Client & {
+  contactName: string;
+  // `contactEmail` and `contactPhone` predate migration 036 but are not on the
+  // API's own `Client` type, so they are spelled out here with the rest. All
+  // eight are listed rather than the type being widened with an index
+  // signature: an index signature would make a typo in an assertion below
+  // compile and then compare `undefined` to `undefined`, which passes.
+  contactEmail: string;
+  contactPhone: string;
+  physicalAddress: string;
+  postalAddress: string;
+  taxNumber: string;
+  companyNumber: string;
+  notes: string;
+  xeroContactId: string | null;
+};
+
+test("the invoice fields survive the in-memory round trip, and a patch of one leaves the others alone", async () => {
+  const PHYSICAL = "12 Kerbside Lane\nNewtown\nWellington 6021";
+  const POSTAL = "PO Box 4417\nWellington 6140";
+
+  const created = await seed<{ client: XeroClient }>(
+    "POST", "/clients",
+    {
+      name: `Xero Fields ${++idSeq}`,
+      contactName: "Ana Petrov",
+      physicalAddress: PHYSICAL,
+      postalAddress: POSTAL,
+      taxNumber: "123-456-789",
+      companyNumber: "9429041234567",
+    },
+    ownerToken
+  );
+  const id = created.body.client.id;
+  assert.equal(created.body.client.physicalAddress, PHYSICAL);
+  assert.equal(created.body.client.taxNumber, "123-456-789");
+  assert.equal(created.body.client.companyNumber, "9429041234567");
+
+  // Read back through the list route rather than off the create response: the
+  // in-memory store could return a correct record from `createClient` and store
+  // a different object, and only a second read can tell the two apart.
+  const listed = await req<{ clients: XeroClient[] }>("GET", "/clients", undefined, ownerToken);
+  const fromList = listed.body.clients.find((c) => c.id === id);
+  assert.ok(fromList, "the client was created but is not in the list");
+  assert.equal(fromList.postalAddress, POSTAL, "the field was returned on create and not stored");
+  assert.equal(fromList.notes, "", "an unsupplied field came back as something other than the empty string");
+
+  const patched = await seed<{ client: XeroClient }>(
+    "PATCH", `/clients/${id}`, { taxNumber: "987-654-321" }, ownerToken
+  );
+  assert.equal(patched.body.client.taxNumber, "987-654-321", "the patch did not take");
+  // POSITIVE CONTROL in the same test: the fields the patch did not mention are
+  // unchanged. The in-memory path does this with `{ ...existing, ...patch }`,
+  // which is only correct because the route's schema is `.partial()` and zod
+  // omits absent keys rather than defaulting them -- if `ClientPatchSchema`
+  // ever stopped being a `.partial()`, every unmentioned field would arrive as
+  // "" and this assertion is what would notice.
+  assert.equal(patched.body.client.physicalAddress, PHYSICAL, "patching the tax number erased the street address");
+  assert.equal(patched.body.client.postalAddress, POSTAL, "patching the tax number erased the postal address");
+  assert.equal(patched.body.client.companyNumber, "9429041234567", "patching the tax number erased the NZBN");
+  assert.equal(patched.body.client.contactName, "Ana Petrov", "patching the tax number erased the contact");
+});
+
+test("every field is trimmed on the way in, and internal whitespace is kept", async () => {
+  // This exists because the comment above `ClientSchema` claimed "both routes
+  // .trim() on the way in" when `.trim()` was on `name` alone. Adding it to the
+  // other seven was the fix; this is the assertion that would have caught the
+  // claim being false, and that will catch it being made false again.
+  //
+  // It matters on this schema specifically because the client-details rule --
+  // apps/mobile/lib/client-details.ts and apps/supervisor-web/lib/client-details.ts,
+  // which are byte-identical copies diffed by ci.sh -- decides whether a row
+  // renders by trimming and testing for empty. A value
+  // stored as "   " renders on a surface that does not trim and vanishes on one
+  // that does, so whether the client has an address depends on which screen is
+  // asked -- which is the worst of the three available outcomes.
+  const PHYSICAL = "12 Kerbside Lane\nNewtown\nWellington 6021";
+
+  const created = await seed<{ client: XeroClient }>(
+    "POST", "/clients",
+    {
+      name: `  Trimmed Co ${++idSeq}  `,
+      contactName: "  Ana Petrov  ",
+      contactEmail: "  ana@example.test  ",
+      contactPhone: "  +64 21 555 0100  ",
+      physicalAddress: `  ${PHYSICAL}  `,
+      postalAddress: "   ",
+      taxNumber: "  123-456-789  ",
+      companyNumber: "  9429041234567  ",
+      notes: "  watch the dog  ",
+    },
+    ownerToken
+  );
+  const id = created.body.client.id;
+
+  // Read back through the list route, not off the create response, for the same
+  // reason the round-trip test above does: a store can return a correct object
+  // and persist a different one.
+  const listed = await req<{ clients: XeroClient[] }>("GET", "/clients", undefined, ownerToken);
+  const c = listed.body.clients.find((x) => x.id === id);
+  assert.ok(c, "the client was created but is not in the list");
+
+  assert.equal(c.contactName, "Ana Petrov", "contactName kept its padding");
+  assert.equal(c.contactEmail, "ana@example.test", "contactEmail kept its padding");
+  assert.equal(c.contactPhone, "+64 21 555 0100", "contactPhone kept its padding");
+  assert.equal(c.physicalAddress, PHYSICAL, "physicalAddress kept its padding");
+  assert.equal(c.taxNumber, "123-456-789", "taxNumber kept its padding");
+  assert.equal(c.companyNumber, "9429041234567", "companyNumber kept its padding");
+  assert.equal(c.notes, "watch the dog", "notes kept its padding");
+  // A whitespace-only field becomes empty, which is what makes it skippable
+  // rather than a blank row with a label and nothing after it.
+  assert.equal(c.postalAddress, "", "a whitespace-only address was stored verbatim");
+
+  // POSITIVE CONTROL, same endpoint, same test, and it is the control that
+  // matters: `.trim()` must not be `.replace(/\s/g, "")`. Every assertion
+  // above would also pass against a schema that stripped ALL whitespace, which
+  // would turn a three-line address into one unreadable word and a phone number
+  // into a different phone number.
+  assert.equal(c.contactPhone.includes(" "), true, "trimming ate the internal spaces");
+  assert.equal(c.physicalAddress.split("\n").length, 3, "trimming collapsed the address lines");
+  assert.equal(c.notes, "watch the dog", "trimming ate the internal spaces in notes");
+  assert.equal(c.name, `Trimmed Co ${idSeq}`, "name's own trim regressed");
+
+  // And the patch route, which parses through the same schema by way of
+  // `.partial()` -- the one place a `.trim()` could be present on create and
+  // absent on edit without anything above noticing.
+  const patched = await seed<{ client: XeroClient }>(
+    "PATCH", `/clients/${id}`, { taxNumber: "  987-654-321  ", postalAddress: "  PO Box 4417  " }, ownerToken
+  );
+  assert.equal(patched.body.client.taxNumber, "987-654-321", "PATCH does not trim");
+  assert.equal(patched.body.client.postalAddress, "PO Box 4417", "PATCH does not trim");
+});
+
+test("xero_contact_id cannot be written through the API, and stays null", async () => {
+  const posted = await seed<{ client: XeroClient }>(
+    "POST", "/clients",
+    { name: `Xero Link Post ${++idSeq}`, xeroContactId: "xero-contact-forged" },
+    ownerToken
+  );
+  // POST strips the unknown key (ClientSchema is not strict) ...
+  assert.equal(posted.body.client.xeroContactId, null, "POST set the Xero contact id");
+
+  // ... and PATCH refuses it, because ClientPatchSchema is `.strict()`.
+  const patched = await req("PATCH", `/clients/${posted.body.client.id}`, { xeroContactId: "forged" }, ownerToken);
+  assert.equal(patched.status, 400, "PATCH accepted a key that is not in the patch schema");
+
+  // POSITIVE CONTROL, same endpoint, same test: a route that 400s on every
+  // body would satisfy the line above having tested nothing.
+  const legitimate = await req<{ client: XeroClient }>(
+    "PATCH", `/clients/${posted.body.client.id}`, { taxNumber: "111-222-333" }, ownerToken
+  );
+  assert.equal(legitimate.status, 200, "the patch route refuses everything, so the 400 above proves nothing");
+  assert.equal(legitimate.body.client.taxNumber, "111-222-333");
+  assert.equal(legitimate.body.client.xeroContactId, null, "the legitimate patch linked a Xero contact as a side effect");
+});

@@ -19,6 +19,7 @@ import { canManageClients, describeFailure } from "@/lib/permissions";
 import { isSessionExpired } from "@/lib/session";
 import Colors from "@/constants/colors";
 import { Client } from "@/lib/types";
+import { clientDetailRows, type ClientDetailKey } from "@/lib/client-details";
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════
@@ -98,6 +99,10 @@ export function ClientsView({
       contactName: client.contactName,
       contactEmail: client.contactEmail,
       contactPhone: client.contactPhone,
+      physicalAddress: client.physicalAddress,
+      postalAddress: client.postalAddress,
+      taxNumber: client.taxNumber,
+      companyNumber: client.companyNumber,
       notes: client.notes,
     });
     setEditing(client);
@@ -122,6 +127,10 @@ export function ClientsView({
         contactName: form.contactName.trim(),
         contactEmail: form.contactEmail.trim(),
         contactPhone: form.contactPhone.trim(),
+        physicalAddress: form.physicalAddress.trim(),
+        postalAddress: form.postalAddress.trim(),
+        taxNumber: form.taxNumber.trim(),
+        companyNumber: form.companyNumber.trim(),
         notes: form.notes.trim(),
       };
       if (editing) {
@@ -220,7 +229,9 @@ export function ClientsView({
             </Text>
           </View>
         ) : (
-          clients.map((client) => (
+          clients.map((client) => {
+            const detailRows = clientDetailRows(client);
+            return (
             <View key={client.id} style={styles.card} testID={`client-card-${client.id}`}>
               <View style={styles.cardHeader}>
                 <View style={styles.cardIcon}>
@@ -254,26 +265,26 @@ export function ClientsView({
                 )}
               </View>
 
-              {/* Every contact line is conditional. A client added mid-job has a
-                  name and nothing else — ClientSchema requires only the name —
-                  and empty rows with icons beside them read as missing data
-                  rather than as data nobody entered. */}
-              {(client.contactName || client.contactEmail || client.contactPhone || client.notes) && (
+              {/* Rendered from lib/client-details.ts rather than from a chain
+                  of `&&`s, so the phone and the portal cannot disagree about
+                  which rows a client has. The invoice fields show here and not
+                  only in the edit form because the reason a manager opens this
+                  screen on a phone is to read an address out to somebody. */}
+              {detailRows.length > 0 && (
                 <View style={styles.cardBody}>
-                  {!!client.contactName && (
-                    <Detail icon="person-outline" text={client.contactName} />
-                  )}
-                  {!!client.contactEmail && (
-                    <Detail icon="mail-outline" text={client.contactEmail} />
-                  )}
-                  {!!client.contactPhone && (
-                    <Detail icon="call-outline" text={client.contactPhone} />
-                  )}
-                  {!!client.notes && <Detail icon="document-text-outline" text={client.notes} lines={3} />}
+                  {detailRows.map((row) => (
+                    <Detail
+                      key={row.key}
+                      icon={DETAIL_ICONS[row.key]}
+                      text={DETAIL_PREFIX[row.key] ? `${DETAIL_PREFIX[row.key]} ${row.value}` : row.value}
+                      lines={MULTILINE_DETAILS.has(row.key) ? 3 : 1}
+                    />
+                  ))}
                 </View>
               )}
             </View>
-          ))
+          );
+          })
         )}
 
         {clients.length > 0 && (
@@ -319,6 +330,43 @@ export function ClientsView({
                 placeholder="Optional"
                 keyboardType="phone-pad"
               />
+              {/* ── The invoice details ───────────────────────────────────
+                  Below the contact, because the contact is what the person
+                  adding a client mid-job has to hand and these are what the
+                  office fills in later. Every one optional; `name` is still
+                  the only required field.
+
+                  The addresses are one multiline box each rather than four
+                  boxes for line/suburb/city/postcode. On a phone, four
+                  optional boxes for one optional field get three left empty
+                  and the whole address typed into the first — see migration
+                  036, which chose the column shape for the same reason. */}
+              <Field
+                label="Street address"
+                value={form.physicalAddress}
+                onChangeText={(physicalAddress) => setForm((f) => ({ ...f, physicalAddress }))}
+                placeholder="Optional — where the work is invoiced from"
+                multiline
+              />
+              <Field
+                label="Postal address"
+                value={form.postalAddress}
+                onChangeText={(postalAddress) => setForm((f) => ({ ...f, postalAddress }))}
+                placeholder="Optional — if different"
+                multiline
+              />
+              <Field
+                label="GST number"
+                value={form.taxNumber}
+                onChangeText={(taxNumber) => setForm((f) => ({ ...f, taxNumber }))}
+                placeholder="Optional"
+              />
+              <Field
+                label="NZBN"
+                value={form.companyNumber}
+                onChangeText={(companyNumber) => setForm((f) => ({ ...f, companyNumber }))}
+                placeholder="Optional"
+              />
               <Field
                 label="Notes"
                 value={form.notes}
@@ -348,8 +396,57 @@ export function ClientsView({
   );
 }
 
+/**
+ * Key → Ionicon. A `Record`, not a function with a `switch` and a default:
+ * `ClientDetailKey` is a union, so adding a field to lib/client-details.ts
+ * fails the compile HERE until an icon is chosen for it. A default would have
+ * made the new row render with the wrong icon and no error.
+ */
+const DETAIL_ICONS: Record<ClientDetailKey, React.ComponentProps<typeof Ionicons>["name"]> = {
+  contactName: "person-outline",
+  contactEmail: "mail-outline",
+  contactPhone: "call-outline",
+  physicalAddress: "location-outline",
+  postalAddress: "mail-open-outline",
+  taxNumber: "receipt-outline",
+  companyNumber: "business-outline",
+  notes: "document-text-outline",
+};
+
+/**
+ * The two rows that mean nothing as a bare string of digits. "123-456-789" on
+ * its own is not identifiable as a GST number by anyone reading the card.
+ *
+ * The empty strings are deliberate rather than an optional key: the same
+ * exhaustiveness argument as the icons above — a new field has to be given an
+ * answer here, even if the answer is "no prefix".
+ */
+const DETAIL_PREFIX: Record<ClientDetailKey, string> = {
+  contactName: "",
+  contactEmail: "",
+  contactPhone: "",
+  physicalAddress: "",
+  postalAddress: "",
+  taxNumber: "GST",
+  companyNumber: "NZBN",
+  notes: "",
+};
+
+/** Addresses and notes wrap; a phone number on three lines is a bug. */
+const MULTILINE_DETAILS = new Set<ClientDetailKey>(["physicalAddress", "postalAddress", "notes"]);
+
 function emptyForm(): ClientInput {
-  return { name: "", contactName: "", contactEmail: "", contactPhone: "", notes: "" };
+  return {
+    name: "",
+    contactName: "",
+    contactEmail: "",
+    contactPhone: "",
+    physicalAddress: "",
+    postalAddress: "",
+    taxNumber: "",
+    companyNumber: "",
+    notes: "",
+  };
 }
 
 function Detail({

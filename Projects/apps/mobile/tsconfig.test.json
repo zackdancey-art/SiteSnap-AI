@@ -88,6 +88,8 @@
     "lib/portfolio-metrics.test.ts",
     "lib/client-site-counts.ts",
     "lib/client-site-counts.test.ts",
+    "lib/client-details.ts",
+    "lib/client-details.test.ts",
     "lib/job-number.ts",
     "lib/job-number.test.ts",
     "lib/annotation-render.ts",

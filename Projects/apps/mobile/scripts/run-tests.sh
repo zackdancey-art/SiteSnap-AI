@@ -49,7 +49,11 @@ cd "$(dirname "$0")/.."
 #
 # 30 on fix/pr2b-annotation-save, MEASURED: +2 for lib/annotation-render.test.ts
 # and lib/annotation-render-audit.test.ts.
-EXPECTED_TEST_FILES=30
+#
+# 31 on feat/pr3-client-information, MEASURED: +1 for lib/client-details.test.ts.
+# The guard refused this commit first, reporting 31 found against 30 expected,
+# which is the number arriving by measurement rather than by my arithmetic.
+EXPECTED_TEST_FILES=31
 # 214, MEASURED on this branch: 207 on main, +7 from
 # lib/client-site-counts.test.ts. The historical derivation of the 207 is in
 # docs/NINE-WORKSTREAMS-HANDOVER.md.
@@ -59,7 +63,10 @@ EXPECTED_TEST_FILES=30
 #
 # 234 on fix/pr2b-annotation-save, MEASURED: 222 + 6 from
 # lib/annotation-render.test.ts + 6 from lib/annotation-render-audit.test.ts.
-EXPECTED_TESTS=234
+#
+# 241 on feat/pr3-client-information, MEASURED: 234 + 7 from
+# lib/client-details.test.ts.
+EXPECTED_TESTS=241
 
 FILE_LIST=$(find dist-test -name '*.test.js' | sort)
 

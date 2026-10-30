@@ -184,11 +184,20 @@ export interface CompanyInviteResult {
  * `name` is the only required one — a builder adding a client mid-job has the
  * name and nothing else to hand.
  */
+/**
+ * The nine writable client fields. Spelled out rather than derived from
+ * `Client`, so neither `siteCount` (server-computed) nor `xeroContactId`
+ * (migration 036, read-only, and refused by the API) can be sent from a form.
+ */
 export interface ClientInput {
   name: string;
   contactName: string;
   contactEmail: string;
   contactPhone: string;
+  physicalAddress: string;
+  postalAddress: string;
+  taxNumber: string;
+  companyNumber: string;
   notes: string;
 }
 
@@ -307,7 +316,7 @@ async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
     // it was written for: a stored token the server rejects while a newer one
     // exists. It CANNOT rescue an EXPIRED token, and that is worth stating here
     // rather than rediscovering: `/api/auth/refresh` is itself mounted behind
-    // requireAuth (routes/auth.ts), so the request that would mint a new token
+    // requireAuth (services/api/src/routes/auth.ts), so the request that would mint a new token
     // is refused by the same check that refused the original. The recovery path
     // cannot work in the one situation it exists for. doFetch has already
     // raised the session notice by this point, so the failure is reported
@@ -1007,7 +1016,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   };
 
   /**
-   * The PATCH response carries no `siteCount` — routes/clients.ts returns the
+   * The PATCH response carries no `siteCount` — services/api/src/routes/clients.ts returns the
    * store record, and the count is computed only by the list route. So the
    * local count is CARRIED OVER rather than taken from the response, which
    * would otherwise write `undefined` into a field the delete confirmation
@@ -1310,7 +1319,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
    * THE TOKEN REFRESH IS LOAD-BEARING, NOT HYGIENE
    *
    * Every route derives the acting company from the bearer token's CLAIMS, not
-   * from the user row (`middleware/auth.ts` sets `req.auth` from the verified
+   * from the user row (`services/api/src/middleware/auth.ts` sets `req.auth` from the verified
    * token; each router's `getActor` copies `companyId`/`companyRole` straight
    * off it). An invitee's pre-acceptance token carries `companyId: ""` and
    * `companyRole: "crew"`, so holding onto it after a successful acceptance

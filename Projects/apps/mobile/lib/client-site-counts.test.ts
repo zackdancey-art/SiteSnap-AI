@@ -26,7 +26,16 @@ function client(id: string, siteCount: number): Client {
     contactName: "",
     contactEmail: "",
     contactPhone: "",
+    // The migration-036 fields, all empty. Spelled out rather than cast,
+    // because a cast here is what let a missing column go unnoticed in L118:
+    // adding a field to `Client` must break this fixture and make someone
+    // decide what the fixture's value for it is.
+    physicalAddress: "",
+    postalAddress: "",
+    taxNumber: "",
+    companyNumber: "",
     notes: "",
+    xeroContactId: null,
     createdAt: "2026-01-05T00:00:00.000Z",
     updatedAt: "2026-01-05T00:00:00.000Z",
     siteCount,

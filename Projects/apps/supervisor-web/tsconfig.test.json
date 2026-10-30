@@ -40,6 +40,8 @@
     "lib/job-number.ts",
     "lib/job-number.test.ts",
     "lib/annotation-render.ts",
-    "lib/annotation-render.test.ts"
+    "lib/annotation-render.test.ts",
+    "lib/client-details.ts",
+    "lib/client-details.test.ts"
   ]
 }
