@@ -51,8 +51,9 @@ EXPECTED_TEST_FILES=28
 # lib/client-site-counts.test.ts. The historical derivation of the 207 is in
 # docs/NINE-WORKSTREAMS-HANDOVER.md.
 #
-# 221 on feat/pr2-job-number, MEASURED: 214 + 7 from lib/job-number.test.ts.
-EXPECTED_TESTS=221
+# 222 on feat/pr2-job-number, MEASURED: 214 + 7 from lib/job-number.test.ts,
+# +1 for the canSetSiteJobNumber test in lib/permissions.test.ts.
+EXPECTED_TESTS=222
 
 FILE_LIST=$(find dist-test -name '*.test.js' | sort)
 

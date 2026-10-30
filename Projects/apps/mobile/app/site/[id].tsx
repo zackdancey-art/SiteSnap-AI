@@ -19,6 +19,7 @@ import Colors from "@/constants/colors";
 import {
   canDeleteSite,
   canFileSiteUnderClient,
+  canSetSiteJobNumber,
   canInvite,
   canManageSiteMembers,
   describeFailure,
@@ -156,18 +157,22 @@ export default function SiteDetailScreen() {
    */
   const canFile = canFileSiteUnderClient(user?.companyRole);
   /**
-   * The same predicate as filing, deliberately, and said once here rather than
-   * reused from `canFile` above.
+   * Its own predicate, resolving the same way as `canFile` today.
    *
-   * PATCH /projects/sites/:id/job-number is gated requireAtLeast("manager") --
-   * the filing gate, not the progress one. Progress is a field observation a
-   * crew member makes standing on the site; a job number comes off a contract
-   * and is what the contractor quotes on an invoice. They agree today, as
-   * canInvite and canFile do, and are written separately for the same reason:
-   * collapsing predicates that answer to different routes is how the delete
-   * control on this screen came to consult no permission at all.
+   * This line first read `canFileSiteUnderClient(...)`, reusing the filing
+   * gate because the two agree. That was wrong in the way this file keeps
+   * finding: PATCH /projects/sites/:id/job-number is its own route with its own
+   * requireAtLeast("manager"), the portal had already given it
+   * canSetSiteJobNumber of its own, and whoever next moved the filing gate
+   * would have moved who can set a job number HERE and not there, with nothing
+   * reporting the disagreement.
+   *
+   * Why manager+ at all: progress is a field observation a crew member makes
+   * standing on the site; a job number comes off a contract and is what the
+   * contractor quotes on an invoice. Crew still READ it -- there is no read
+   * gate, which lib/permissions.test.ts asserts from the module's exports.
    */
-  const canEditJobNumber = canFileSiteUnderClient(user?.companyRole);
+  const canEditJobNumber = canSetSiteJobNumber(user?.companyRole);
 
   /**
    * Null for every form of absence, never the empty string -- so the header

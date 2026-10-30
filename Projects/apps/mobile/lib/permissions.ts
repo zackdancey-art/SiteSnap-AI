@@ -181,6 +181,29 @@ export function canFileSiteUnderClient(companyRole: unknown): boolean {
 }
 
 /**
+ * Setting or clearing a site's job number. Manager+, matching
+ * requireAtLeast("manager") on PATCH /projects/sites/:id/job-number.
+ *
+ * Its own predicate for the same reason canFileSiteUnderClient is separate from
+ * canManageClients: these are different controls on different routes, and this
+ * one is on a route of its own. Reusing the filing predicate — which is what
+ * the site screen did first — would mean that whoever next moves the filing
+ * gate silently moves who can set a job number on the phone, while the
+ * portal's canSetSiteJobNumber stayed where it was. The two clients would then
+ * disagree with nothing reporting it.
+ *
+ * Manager+ rather than crew is a decision PR 2's brief did not make, and it is
+ * stated in that PR's body as reversible. The reasoning: progress is a field
+ * observation a crew member makes standing on the site, whereas a job number
+ * comes off a contract and is the reference the contractor quotes on an
+ * invoice. Refusing it refuses an administrative edit, not anything a person
+ * can see — crew still read the job number, which is the point of showing it.
+ */
+export function canSetSiteJobNumber(companyRole: unknown): boolean {
+  return isManagerOrAbove(companyRole);
+}
+
+/**
  * APPROVING a timesheet. Manager+, and the same shape as canApproveDiary for
  * the same reason: a timecard a crew member approved themselves is a payroll
  * claim with no second pair of eyes on it, and the row carries `approved_by`

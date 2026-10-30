@@ -11,6 +11,7 @@ import {
   canChangeCompanySettings,
   canDeleteSite,
   canFileSiteUnderClient,
+  canSetSiteJobNumber,
   canInvite,
   canManageClients,
   canSeeSiteBin,
@@ -135,14 +136,18 @@ test("crew are the only operational role refused nothing else — every predicat
   // population something a human has to look at. Update the number in the same
   // commit that adds the predicate.
   //
-  // MEASURED 11 on this tree: canSeeSupervisorDashboard, canInvite,
+  // MEASURED 12 on feat/pr2-job-number: canSeeSupervisorDashboard, canInvite,
   // canDeleteSite, canSeeSiteBin, canManageSiteMembers, canApproveDiary,
   // canManageClients, canFileSiteUnderClient, canApproveTimesheet,
-  // canVoidSignature, canChangeCompanySettings.
+  // canVoidSignature, canChangeCompanySettings, canSetSiteJobNumber.
+  //
+  // 11 -> 12 for canSetSiteJobNumber. The branches in this batch stack, so this
+  // is measured at its real position (PR 0 -> PR 1 -> PR 2) rather than needing
+  // a back-port when the ones ahead of it land.
   assert.equal(
     predicates.length,
-    11,
-    `expected exactly 11 permission predicates, found ${predicates.length} — ` +
+    12,
+    `expected exactly 12 permission predicates, found ${predicates.length} — ` +
       "if you added or removed one, update this count in the same commit"
   );
   assert.ok(
@@ -220,6 +225,34 @@ test("managing clients and filing a site are manager+, and READING the client li
       .sort(),
     ["canFileSiteUnderClient", "canManageClients"],
     "two client predicates, both about WRITING — a third is probably a read gate the API has not got"
+  );
+});
+
+test("setting a job number is manager+, and READING one is not gated at all", () => {
+  // Matches requireAtLeast("manager") on PATCH /projects/sites/:id/job-number.
+  // Both directions, every role: "crew are refused" and "everybody is refused"
+  // are the same assertion when only crew is checked, and a predicate that
+  // refuses everybody would hide the editor from the managers it is for.
+  assert.equal(canSetSiteJobNumber("crew"), false);
+  assert.equal(canSetSiteJobNumber("viewer"), false);
+  assert.equal(canSetSiteJobNumber("manager"), true);
+  assert.equal(canSetSiteJobNumber("owner"), true);
+
+  // THE NEGATIVE ROW, and it is the same trap as the client list above.
+  //
+  // The wrong fix here is a canSeeJobNumber predicate. A crew member standing
+  // on a site needs to read the job number — it is the reference they are asked
+  // for on the phone — and GET /projects/sites is behind identity alone, so a
+  // read gate on the client would hide something the API hands over freely and
+  // turn an administrative edit into an access boundary. There must be no read
+  // predicate to find, measured from the module's own exports rather than
+  // claimed.
+  assert.deepEqual(
+    Object.keys(permissionsModule)
+      .filter((k) => /job/i.test(k))
+      .sort(),
+    ["canSetSiteJobNumber"],
+    "exactly one job-number predicate — a second is probably a read gate the API has not got"
   );
 });
 
