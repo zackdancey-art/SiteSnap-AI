@@ -46,14 +46,20 @@ cd "$(dirname "$0")/.."
 # 28 on feat/pr2-job-number, MEASURED: +1 for lib/job-number.test.ts. The
 # branches in this batch STACK, so this is measured at its real position in the
 # stack and needs no back-porting when the branches ahead of it land.
-EXPECTED_TEST_FILES=28
+#
+# 30 on fix/pr2b-annotation-save, MEASURED: +2 for lib/annotation-render.test.ts
+# and lib/annotation-render-audit.test.ts.
+EXPECTED_TEST_FILES=30
 # 214, MEASURED on this branch: 207 on main, +7 from
 # lib/client-site-counts.test.ts. The historical derivation of the 207 is in
 # docs/NINE-WORKSTREAMS-HANDOVER.md.
 #
 # 222 on feat/pr2-job-number, MEASURED: 214 + 7 from lib/job-number.test.ts,
 # +1 for the canSetSiteJobNumber test in lib/permissions.test.ts.
-EXPECTED_TESTS=222
+#
+# 234 on fix/pr2b-annotation-save, MEASURED: 222 + 6 from
+# lib/annotation-render.test.ts + 6 from lib/annotation-render-audit.test.ts.
+EXPECTED_TESTS=234
 
 FILE_LIST=$(find dist-test -name '*.test.js' | sort)
 

@@ -89,6 +89,10 @@
     "lib/client-site-counts.ts",
     "lib/client-site-counts.test.ts",
     "lib/job-number.ts",
-    "lib/job-number.test.ts"
+    "lib/job-number.test.ts",
+    "lib/annotation-render.ts",
+    "lib/annotation-render.test.ts",
+    "lib/annotation-render-audit.ts",
+    "lib/annotation-render-audit.test.ts"
   ]
 }

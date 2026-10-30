@@ -365,6 +365,13 @@ assert_legal_copy_census() {
 #                  each. Two identical copies of a WRONG rule diff clean, so
 #                  here the diff proves agreement and each package's own suite
 #                  proves behaviour.
+#   annotation-    BOTH sides — apps/mobile/lib/annotation-render.test.ts (six
+#   render         tests, driving the real photo-payload round trip) and
+#                  apps/supervisor-web/lib/annotation-render.test.ts (five,
+#                  driving the real buildAnnotationDerivative output). The two
+#                  suites deliberately enter the same rule from opposite ends:
+#                  mobile asks whether a saved annotation reads back, the
+#                  portal whether a freshly built one is drawable at all.
 #
 # An earlier version of this comment said the portal "has no test harness".
 # That was false when written — apps/supervisor-web/scripts/run-tests.sh
@@ -383,7 +390,8 @@ assert_legal_copy_census() {
 # vacuous pass: an extract missing its region is empty, and two empty extracts
 # diff clean.
 SHARED_LOGIC_GROUPS="site-grouping|export function groupSitesByClient|apps/mobile/lib/site-grouping.ts,apps/supervisor-web/lib/site-grouping.ts
-job-number|export const JOB_NUMBER_MAX_LENGTH|apps/mobile/lib/job-number.ts,apps/supervisor-web/lib/job-number.ts"
+job-number|export const JOB_NUMBER_MAX_LENGTH|apps/mobile/lib/job-number.ts,apps/supervisor-web/lib/job-number.ts
+annotation-render|export function selectAnnotationOverlay|apps/mobile/lib/annotation-render.ts,apps/supervisor-web/lib/annotation-render.ts"
 
 # $1 label, $2 sentinel, $3 comma-separated paths
 assert_shared_logic_copies() {
@@ -457,12 +465,12 @@ assert_all_shared_logic_copies() {
       "$(printf '%s' "$entry" | cut -d'|' -f2)" \
       "$(printf '%s' "$entry" | cut -d'|' -f3)"
   done
-  # An equality, not a floor (AUDIT L112). Two groups are enumerated above; a
-  # list emptied or truncated to one by an edit would otherwise pass having
-  # checked less than it claims, and the per-group `$i -lt 2` guard cannot see
-  # a group that is no longer there at all.
-  if [ "$groups" -ne 2 ]; then
-    echo "ci.sh: examined $groups shared-logic group(s), expected 2." >&2
+  # An equality, not a floor (AUDIT L112). Three groups are enumerated above; a
+  # list emptied or truncated by an edit would otherwise pass having checked
+  # less than it claims, and the per-group `$i -lt 2` guard cannot see a group
+  # that is no longer there at all.
+  if [ "$groups" -ne 3 ]; then
+    echo "ci.sh: examined $groups shared-logic group(s), expected 3." >&2
     echo "  If you added or removed a duplicated client rule, change this" >&2
     echo "  number in the same commit as SHARED_LOGIC_GROUPS." >&2
     exit 1

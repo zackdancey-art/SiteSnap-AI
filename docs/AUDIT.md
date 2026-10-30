@@ -4802,3 +4802,89 @@ are legitimately written only by SQL in a migration, and the exemption list is t
 that grows until the check means nothing. Filed as a candidate, not a decision. The cheap half is
 already in place for the one column PR 2 touches: `assert_job_number_cap_agrees` in
 `Projects/scripts/ci.sh` proves the three tiers that state the field's cap agree with each other.
+
+---
+
+### L119 — both clients save photo annotations and neither has ever drawn one: four of mobile's six photo surfaces and both of the portal's render evidence through a component with no vector support, so the annotation persists correctly and is invisible — HIGH (in a site diary the annotation is frequently the evidence itself, and the symptom reports success)
+
+**The report.** Creating a site entry, tapping the uploaded photo, annotating it, saving: "the photo saves again and the annotation is gone. No error. Mobile only — I have not tried the portal."
+
+**Every word of that is an accurate description of what the user can see, and none of it is what happened.** Nothing was lost. The annotation was saved, transmitted, stored, returned, and held in client state with its stroke data intact — and then handed to a React component that has no code path capable of drawing a stroke. "The photo saves again" is also literally true and is the same cause: the derivative is a correct *second* `Photo` record sharing the original's pixels, so it appears as a second tile, drawn without strokes, indistinguishable from a duplicate upload.
+
+**Where the annotation is lost, of the four candidates put to this investigation:**
+
+| candidate | verdict |
+|---|---|
+| never sent | No. The derivative is in the save payload. |
+| sent and not persisted | No — and this half already had a test, see below. |
+| **persisted and not read back** | **Yes, in the precise sense that it is read back and then not rendered.** |
+| persisted against the wrong record | No. `derivedFromId` and `annotatedBy` are both written and both correct. |
+
+The word "read back" deserves the narrowing. The vector is read back — `GET` returns it and the screen's state holds it. The failure is one layer further in than any of the four categories anticipated: **the last six inches, again.** The data arrives and the final component discards it by having no use for it.
+
+**The population, and it is a population rather than a sample.** `apps/mobile/lib/annotation-render-audit.ts` walks `app/` and `components/` — 56 files — and finds 7 photo render sites, 6 of them screen surfaces:
+
+| surface | rendered through | could draw an annotation |
+|---|---|---|
+| `app/new-entry.tsx:807` | `AnnotatedImage` | yes |
+| `app/inspections/[siteId].tsx` | `AnnotatedImage` | yes |
+| `app/entry/[id].tsx` grid | `EvidenceImage` | **no** |
+| `app/entry/[id].tsx` preview | `EvidenceImage` | **no** |
+| `app/diary-gallery/[siteId].tsx` grid | `EvidenceImage` | **no** |
+| `app/diary-gallery/[siteId].tsx` preview | `EvidenceImage` | **no** |
+
+Four of six. The seventh site is `EvidenceImage` *inside* `AnnotatedImage`, which is the wrapper delegating the photograph to it, and is exempt by construction.
+
+**The portal has the same defect, and in one respect a worse one.** Both of its surfaces — the grid and the lightbox in `app/sites/[id]/page.tsx` — were a bare `<img>`. The only `<svg>`/`<path>` anywhere in the portal outside icon components was inside `PhotoAnnotator`'s own live drawing canvas, which shows the stroke being drawn and then hands it off. So a manager could annotate a photograph in the portal and the portal has never, at any point, displayed the result. The answer to "I have not tried the portal" is that it is broken in the same way.
+
+**This is not a regression, and the honest version of that sentence is harder than it sounds**, because the user's recollection is also correct. Mobile annotation *was* confirmed working in the early-October device round. Both statements hold at once:
+
+```
+$ git log --oneline -S"AnnotatedImage" -- 'Projects/apps/mobile/app/entry/[id].tsx'
+$ echo $?
+0
+```
+
+Empty. The vector-capable renderer was never on that screen, so no commit can have removed it. Likewise `-S"react-native-svg"` on the same path: empty.
+
+```
+$ git log --format='%h %ad %s' --date=short -S"annotationVector" -- 'Projects/apps/mobile/app/'
+d633ed5 2026-10-05 feat(mobile): route the entry detail view to the photo annotator
+de9a420 2026-08-30 feat(inspections): Part B — per-item checklist photo evidence
+e7556a2 2026-08-22 feat(entries): Part 5 — photo annotation (vector derivative) + optional hourly notes
+```
+
+`d633ed5` added `handleSaveAnnotation` and the Annotate button to the entry detail screen and **changed no render code**. Its own commit comment reads "The route to the annotator that never existed." So the entry-detail annotate capability shipped **write-only on 5 October** and has never displayed a stroke — 25 days. The device round that confirmed annotation working exercised the capture screen (`new-entry.tsx`, `AnnotatedImage` since `e7556a2`, 22 August), which still works today. The portal's equivalent shipped write-only in `912602a` on 21 October — 9 days.
+
+**Neither of the two candidates named up front survives, and both were ruled out on evidence rather than on reading.**
+
+- **`3461a58`, WS3's on-device payload cap.** Ruled out by the architecture. `PhotoAnnotator` emits a *stroke vector*, not an image; the derivative copies the original's `uri`/`base64`/`storageKey` so `uploadPhotoOnce` short-circuits on `isManagedMediaUri`. There is no annotated image for a cap to re-upload from — one copy of the pixels, two records.
+- **WS5's `derivedFromId` / `annotatedBy` lineage.** Ruled out by the data. Both fields are written and persisted correctly; the round-trip test added here asserts it.
+
+**A second defect, found while fixing the first, latent since 22 August.** `AnnotatedImage` overlaid its SVG with the default `preserveAspectRatio`, which is `meet` — SVG's *contain* — over an image fitted `cover`. On any non-square box every stroke therefore landed inboard of the thing it points at. This was silently true on the two surfaces that *did* draw strokes, from the day they shipped, and it is the more insidious of the two findings: an arrow in the wrong place is worse evidence than no arrow, because it is believed. `overlayPreserveAspectRatio(fit)` now derives it from the image's own fit.
+
+**Why the existing tests did not catch this, exactly.** The "sent and not persisted" category was already covered — the deliberate revert of `stripPhotoPayloads` below was caught by pre-existing test 76 as well as by the new suite. It is specifically the *render* half that had nothing: no test anywhere asserted that a saved annotation is subsequently drawable. That is why this defect and not another one got through, and it is the reason the new test is written as a round trip ending in `selectAnnotationOverlay` rather than ending at storage.
+
+**Red-on-revert, both directions.**
+
+```
+A. EvidenceImage put back on the entry-detail grid (the defect, restored):
+   2 red / 232 stayed green
+   "app/entry/[id].tsx:445 renders a Photo through EvidenceImage, so an
+    annotation saved against it is stored and never drawn"
+
+B. stripPhotoPayloads rebuilding photos from an explicit field list:
+   3 red / 231 stayed green
+   "the vector was stripped on the way out"
+```
+
+**A fourth false comment naming a file that does not exist**, found in passing and feeding the structural check planned for PR 3: `apps/supervisor-web/lib/annotation-derivative.ts:39` instructs the reader to change `components/AnnotatedImage.tsx` alongside a type change. The portal has never had that file. It joins `app-config-permissions.test.ts`, `useRole.ts`'s `isAtLeast` line, and `ci.sh`'s "the portal, which has no test harness" (L117) — and like two of those three, it is mechanically checkable.
+
+**Two events during the work, recorded because both are the kind of thing that otherwise becomes a silent hole.**
+
+1. **My own matcher would have corrupted the population it pins.** `React.useState<EvidenceImageStatus>(…)` contains the literal text `<EvidenceImage`, so the auditor booked it as a render site. Fixed with a trailing `(?![A-Za-z0-9_])`, and the comment above it says it is load-bearing rather than defensive padding, because a future tidy-up would remove it.
+2. **A fixture that tested nothing, caught by its own refusal assertion.** `derivative(undefined)` re-triggers the default parameter, so the "the vector did not survive" fixture had a fully intact vector. The parameter is now typed `Photo["annotationVector"] | null = VECTOR` and the test passes `null`. Recorded in the fixture's own doc comment as a real event.
+
+**What the new check cannot see**, stated so the number is not mistaken for more than it is: it cannot prove the strokes are drawn *correctly* (only that a component capable of drawing them is mounted); it cannot see a third render mechanism arriving under a new name; it does not cover the portal, whose own join is covered by `apps/supervisor-web/lib/annotation-render.test.ts` instead; and it says nothing about whether a given surface *should* display photographs at all. The two bare `<Image>` renders it does find — `app/(tabs)/settings.tsx:149` and `app/profile.tsx:78` — are both `profile.avatarUri` avatars, and are **enumerated rather than regex-excluded**. An exemption list fails when it grows, which is visible; a narrowed regex fails silently, which is the whole mechanism of this finding.
+
+**Disposition:** Fixed on both clients. Mobile's four defective surfaces now render through `AnnotatedImage`, which was rewritten as a strict superset of `EvidenceImage` — every prop forwarded including `onStatusChange`, so moving a surface across costs nothing and the "2 of 6 images unavailable" banner survives. The cheapness of *not* moving them is how four of six ended up this way. The portal gets an `AnnotationOverlay` on both surfaces, with the lightbox's zoom/pan transform moved off the `<img>` onto a shrink-wrapping wrapper so the overlay shares the image's box and its transform. The decision of whether, which and how is in `lib/annotation-render.ts` on both sides, duplicated inside `// SHARED-LOGIC-BEGIN/END` markers and diffed byte-identical by `ci.sh` as the third registered shared-logic group. **The portal's lightbox geometry has been read, not seen** — this environment has no browser — and that is the one claim here that wants a human eye.

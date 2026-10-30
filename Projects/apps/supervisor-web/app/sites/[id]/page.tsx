@@ -34,6 +34,7 @@ import {
 import { buildViewerShots, buildViewerShotsForRecords } from "@/lib/photo-viewer-set";
 import PhotoAnnotator from "@/components/PhotoAnnotator";
 import { buildAnnotationDerivative, type AnnotationVector } from "@/lib/annotation-derivative";
+import { selectAnnotationOverlay, overlayPreserveAspectRatio } from "@/lib/annotation-render";
 import type { ViewerShot as LibViewerShot } from "@/lib/photo-viewer-set";
 
 type Tab = "overview" | "entries" | "timesheets" | "incidents" | "inspections" | "dockets" | "photos" | "reports";
@@ -185,6 +186,57 @@ const clampZoom = (value: number) => Math.min(MAX_ZOOM, Math.max(1, value));
  * one would still be saying "Loading…" over a finished failure long after the
  * other had stopped.
  */
+/**
+ * The saved annotation, drawn over the photograph it was drawn on.
+ *
+ * The portal could create annotations and could not show one: both photo
+ * surfaces rendered a bare `<img>`, so a manager annotated a photograph, was
+ * told it saved, and then saw the unmarked original. Same defect as mobile's,
+ * same cause, same sweep. AUDIT L119.
+ *
+ * `fit` MUST match the `objectFit` of the `<img>` this sits over. `cover` crops
+ * and `contain` letterboxes, and an SVG viewBox defaults to the latter, so an
+ * overlay on a cropped tile that did not say `slice` would put every stroke
+ * inboard of the thing it points at. `pointerEvents: none` so the tile's own
+ * click-to-open still works through it.
+ */
+function AnnotationOverlay({
+  photo,
+  fit,
+}: {
+  photo: { kind?: "original" | "annotated"; annotationVector?: AnnotationVector };
+  fit: "cover" | "contain";
+}) {
+  // `displayable` is the caller's assertion, not a guess: both call sites render
+  // this only inside the `signedUrl ?` branch, which is the portal's equivalent
+  // of mobile's "the image is on screen".
+  const vector = selectAnnotationOverlay(photo, "displayable");
+  if (!vector) return null;
+  return (
+    <svg
+      viewBox={vector.viewBox}
+      preserveAspectRatio={overlayPreserveAspectRatio(fit)}
+      style={{
+        position: "absolute", inset: 0, width: "100%", height: "100%",
+        pointerEvents: "none",
+      }}
+      aria-hidden="true"
+    >
+      {vector.strokes.map((stroke, i) => (
+        <path
+          key={i}
+          d={stroke.path}
+          stroke={stroke.color}
+          strokeWidth={stroke.width}
+          fill="none"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      ))}
+    </svg>
+  );
+}
+
 function PhotoTile({
   photo, index, signedUrls, errors, compact, onOpen,
 }: {
@@ -223,13 +275,19 @@ function PhotoTile({
       onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.transform = "scale(1)"; (e.currentTarget as HTMLDivElement).style.boxShadow = "none"; }}
     >
       {signedUrl ? (
-        <img
-          src={signedUrl}
-          alt={photo.caption ?? `Photo ${index + 1}`}
-          loading="lazy"
-          decoding="async"
-          style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-        />
+        <>
+          <img
+            src={signedUrl}
+            alt={photo.caption ?? `Photo ${index + 1}`}
+            loading="lazy"
+            decoding="async"
+            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+          />
+          {/* The tile is `position: relative` and the img fills it exactly, so
+              the overlay's box IS the img's box. `cover` because the img says
+              `cover`. */}
+          <AnnotationOverlay photo={photo} fit="cover" />
+        </>
       ) : (
         // "Loading…" under a load that has finished and failed is the defect,
         // not the styling: it tells a manager to wait for something that is
@@ -559,18 +617,36 @@ function PhotoLightbox({
         }}
       >
         {signedUrl ? (
-          <img
-            src={signedUrl}
-            alt={shot.photo.caption ?? `Photograph ${index + 1}`}
-            draggable={false}
+          /*
+            THE TRANSFORM MOVED OFF THE IMG AND ONTO A WRAPPER, and that is the
+            whole trick. The overlay has to share the photograph's box and its
+            zoom/pan, or the strokes drift away from what they point at the
+            moment somebody zooms. A wrapper that shrink-wraps the img gives
+            both: `maxWidth/maxHeight: 100%` on the img means the wrapper ends
+            up exactly the fitted image box, so an overlay filling the wrapper
+            is registered with the pixels, and the transform applied once to
+            the wrapper carries image and strokes together.
+          */
+          <div
             style={{
-              maxWidth: "100%", maxHeight: "100%", objectFit: "contain",
+              position: "relative", display: "inline-block",
+              maxWidth: "100%", maxHeight: "100%", lineHeight: 0,
               transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
               transformOrigin: "center center",
               transition: dragging ? "none" : "transform 0.08s linear",
-              userSelect: "none",
             }}
-          />
+          >
+            <img
+              src={signedUrl}
+              alt={shot.photo.caption ?? `Photograph ${index + 1}`}
+              draggable={false}
+              style={{
+                maxWidth: "100%", maxHeight: "100%", objectFit: "contain",
+                display: "block", userSelect: "none",
+              }}
+            />
+            <AnnotationOverlay photo={shot.photo} fit="contain" />
+          </div>
         ) : (
           // The grid can show a refused photograph as unavailable; so must this,
           // rather than an empty black rectangle that reads as a slow load.

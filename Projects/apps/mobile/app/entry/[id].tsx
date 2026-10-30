@@ -38,7 +38,8 @@ import {
   type ExportPhoto,
 } from "@/lib/export-utils";
 import { BackButton } from "@/components/BackButton";
-import { EvidenceImage, type EvidenceImageStatus } from "@/components/EvidenceImage";
+import { type EvidenceImageStatus } from "@/components/EvidenceImage";
+import { AnnotatedImage } from "@/components/AnnotatedImage";
 import { PhotoAnnotator } from "@/components/PhotoAnnotator";
 
 export default function EntryDetailScreen() {
@@ -427,7 +428,21 @@ export default function EntryDetailScreen() {
                   style={styles.photoThumb}
                   onPress={() => setPreviewIndex(index)}
                 >
-                  <EvidenceImage
+                  {/*
+                    `AnnotatedImage`, NOT `EvidenceImage`. This screen is where
+                    a saved photograph is annotated -- the Annotate button below
+                    opens the annotator and `handleSaveAnnotation` stores the
+                    derivative -- and it rendered through a component that
+                    cannot draw a stroke. So the annotation saved, came back
+                    from the server with its vector intact, appeared here as a
+                    second tile, and showed the unmarked original. Reported as
+                    saved, and the marks gone. AUDIT L119.
+
+                    `AnnotatedImage` wraps `EvidenceImage` and forwards every
+                    prop, so the unavailable tile and the status count this
+                    screen's banner depends on behave exactly as before.
+                  */}
+                  <AnnotatedImage
                     photo={photo}
                     style={styles.photoImage}
                     variant="thumb"
@@ -508,7 +523,13 @@ export default function EntryDetailScreen() {
                     showsHorizontalScrollIndicator={false}
                     showsVerticalScrollIndicator={false}
                   >
-                    <EvidenceImage
+                    {/*
+                      The full-screen read of the evidence, so this is the one
+                      that matters most: `resizeMode="contain"` here means the
+                      overlay fits `meet` and the strokes land exactly on the
+                      pixels they were drawn over.
+                    */}
+                    <AnnotatedImage
                       photo={item}
                       style={styles.previewImage}
                       resizeMode="contain"

@@ -25,7 +25,8 @@ import {
   writeSharablePhotoFile,
 } from "@/lib/export-utils";
 import { ScreenHeader } from "@/components/ScreenHeader";
-import { EvidenceImage, type EvidenceImageStatus } from "@/components/EvidenceImage";
+import { type EvidenceImageStatus } from "@/components/EvidenceImage";
+import { AnnotatedImage } from "@/components/AnnotatedImage";
 
 type GalleryItem = {
   id: string;
@@ -241,7 +242,14 @@ export default function DiaryGalleryScreen() {
             {galleryItems.map((item) => (
             <View key={item.id} style={styles.card}>
               <Pressable onPress={() => openPreview(item)}>
-                <EvidenceImage
+                {/*
+                  `AnnotatedImage`, NOT `EvidenceImage` -- same defect as the
+                  entry detail screen (AUDIT L119). The gallery cannot create an
+                  annotation, but it is the surface a reader browses a site's
+                  evidence on, so an annotated derivative shown here as the bare
+                  original is the same false statement about the record.
+                */}
+                <AnnotatedImage
                   photo={item.photo}
                   style={styles.photo}
                   variant="thumb"
@@ -303,7 +311,7 @@ export default function DiaryGalleryScreen() {
                 showsHorizontalScrollIndicator={false}
                 showsVerticalScrollIndicator={false}
               >
-                <EvidenceImage
+                <AnnotatedImage
                   photo={selectedItem.photo}
                   style={styles.previewImage}
                   resizeMode="contain"

@@ -61,10 +61,18 @@ cd "$(dirname "$0")/.."
 # since the L115 guard below was ported to it -- so the guard's first real job
 # was refusing the commit that registered the file in tsconfig.test.json but
 # had not yet raised this number.
-EXPECTED_TEST_FILES=5
+#
+# 6 on fix/pr2b-annotation-save, MEASURED: +1 for lib/annotation-render.test.ts,
+# the portal half of the annotation overlay rule. The guard refused this commit
+# too, in exactly the same way, and for the same reason: the file was registered
+# in tsconfig.test.json before this number was raised.
+EXPECTED_TEST_FILES=6
 #
 # 43 on feat/pr2-job-number, MEASURED: 36 + 7 from lib/job-number.test.ts.
-EXPECTED_TESTS=43
+#
+# 48 on fix/pr2b-annotation-save, MEASURED: 43 + 5 from
+# lib/annotation-render.test.ts.
+EXPECTED_TESTS=48
 
 FILE_LIST=$(find dist-test -name '*.test.js' | sort)
 
