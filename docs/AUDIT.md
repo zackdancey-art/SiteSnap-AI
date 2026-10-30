@@ -4948,4 +4948,54 @@ An API test file citing `lib/client-details.ts`, which exists twice — in `apps
 
 **One further limit, recorded because it is a fair criticism and not a bug to be fixed.** `KNOWN_ABSENT` is an exemption list, and exemption lists are where exemptions quietly accumulate. It is pinned in both directions: an entry nothing references is a failure, exactly as an unresolved path is. Five entries, each with a stated reason — two are dependency sources cited for their behaviour, two are files removed under A6, one was never created and the comment explains why.
 
-**Disposition:** Fixed, and wired into `ci.sh` as a step ahead of the shared-logic diff. Forty-nine comments corrected across the tree, of which five were false and forty-four ambiguous. The limit above is not a residual defect — it is the boundary of what a path checker can be, and the reason the finding is recorded at MEDIUM rather than closed as solved: **the larger half of the original report is still unverifiable, and nothing in this entry changes that.**
+**Disposition:** Fixed, and wired into `ci.sh` as a step ahead of the shared-logic diff. Forty-nine comments corrected across the tree, of which five were false and forty-four ambiguous. The limit above is not a residual defect — it is the boundary of what a path checker can be, and the reason the finding is recorded at MEDIUM rather than closed as solved: **the larger half of the original report is still unverifiable, and nothing in this entry changes that.** The two vacuous versions of this check's own population guard are recorded as their own class in **L121**, because the lesson generalises past comment paths: a check is meaningful only if its two sides can disagree.
+
+---
+
+### L121 — a check whose two sides come from one source cannot fail, and four shipped in one PR — two of them inside the tool built to catch unverified claims — HIGH (this is the class the vacuity audit found in tests, recurring in the checks that police the tests, where nothing was looking for it)
+
+**The rule, stated first because it is the only part worth carrying forward:**
+
+> **A check is meaningful only if its two sides can disagree.** Anything that derives both sides from one source cannot fail. Anything whose population can be empty will report success for an empty population.
+
+Both halves are the same error wearing different clothes: the check has no way to tell "I examined the thing and it was correct" from "I did not examine the thing".
+
+**This repository already knew the first half and had written it down.** `CLAUDE.md` §6: *"Every negative assertion needs a positive control in the same test. `length === 0`, `=== null`, `doesNotMatch`, `!list.includes(x)` — each passes both when the code ran and correctly produced nothing and when the code never ran at all."* `docs/VACUITY-AUDIT.md` records M7, where mutating `/uploads/sign` to deny every caller left all 126 tests green.
+
+**The rule was written for tests. Every one of the four failures below is in a *check* or a *script* — the layer that polices the tests — where it had never been applied.** Two are in `scripts/assert-comment-paths.mjs`, which exists specifically to catch claims nothing verifies. A tool built to detect unverified assertions, shipping unverified assertions, is the cleanest available statement of why a rule confined to one layer does not hold.
+
+#### The four, in the order they were found
+
+| # | where | the mechanism | how it presented | how it was caught |
+|---|---|---|---|---|
+| 1 | `assert-comment-paths.mjs`, population guard v0 | none existed; a broken file walk was fatal only *incidentally*, via the `KNOWN_ABSENT` reverse pin | EXIT=1 reporting *five unused exemptions* and nothing whatever about having examined zero files | a deliberate negative control (breaking `SCANNED`) |
+| 2 | `assert-comment-paths.mjs`, population guard v1 | the fix for #1 compared the walk against `git ls-files` — **then filtered the git side through the walk's own `SCANNED` and `SKIP_DIRS`** | `0 file(s) walked, agreeing exactly with git ls-files` — a green line asserting agreement between two empty sets | re-running the same negative control on the fix |
+| 3 | PR 3's secret scan, untracked files, attempt 1 | `for f in $FILES; cat "$f"` under **zsh**, which does not word-split unquoted parameters, so `cat` received one 300-character non-existent filename | `cat: ...: No such file or directory` on stderr, then four consecutive `(none)` clean verdicts over a **0-line** file | noticing the scan file's line count was 0 |
+| 4 | PR 3's secret scan, untracked files, attempt 2 | `xargs -a` — **BSD xargs has no `-a`** | `xargs: invalid option -- a`, then the same four `(none)` clean verdicts over the same empty file | the line count again |
+
+**#3 and #4 are the more alarming pair, and not because of the shell traps.** Both printed a visible error to the same terminal, immediately above a clean verdict, and the clean verdict was believed. The error was treated as noise because the summary line said what was expected. A check that reports success loudly and fails quietly will be believed over its own stderr — which is an argument for making the population a *printed, asserted number* rather than something a reader is trusted to notice the absence of.
+
+**#1 is a near-miss variant worth naming separately: a check that fails for the *wrong reason*.** It was not vacuous — it did exit non-zero. But it sent the next person to the exemption list when the fault was in the file walk. A misdirected failure costs the same debugging hour as a silent pass and is harder to recognise, because the check appears to be working.
+
+#### The detection rule, operationally
+
+Three questions, each answerable mechanically, to be asked of any new check:
+
+1. **Can the two sides disagree?** Write down where each side's data comes from. If one definition feeds both, there is one side, not two. In #2 the remedy was a **deliberate duplicate** of `SCANNED` and `SKIP_DIRS` on the git side, marked in the source as a duplicate that must not be consolidated into a shared constant — because consolidating it is precisely what made the check vacuous. This inverts the usual instinct: *here the duplication is the mechanism*, and a future tidy-up removing it would silently delete the check while leaving the code that looks like one.
+2. **What does the check print about its own population?** Not whether it found faults — how many things it looked at. `assert-comment-paths.mjs` now prints `407 file(s) walked, agreeing exactly with git ls-files` and `407 file(s) scanned, 660 path reference(s)`; the secret scan now prints the file count, the line count, and a positive-control match count (`35`) proving it is reading real content. A clean verdict over a stated population of 0 is self-evidently nothing; a clean verdict alone is not.
+3. **Does it fail for the right reason when deliberately broken?** Not just non-zero — the *message* must name the actual fault. This is two conditions, and #1 met the first and failed the second: it exited non-zero on a broken walk, and told the reader the exemption list was the problem.
+
+#### Why HIGH
+
+Not for the damage done — nothing shipped wrong because of these four, since all four were caught in the same session. It is HIGH because of what the population implies. These were found by deliberately breaking things in **one** check in **one** PR.
+
+`ci.sh` runs **14** steps labelled `Structural:` (`/usr/bin/grep -c '^step "Structural' Projects/scripts/ci.sh`, 31 October 2026), of which the comment-path check is one. **Two of the 14 have been observed to fail** — the comment-path check itself and one other — and both failures were real faults rather than deliberate controls:
+
+| step | how it was seen to fail | did the message name the real fault |
+|---|---|---|
+| "no duplicated client rule has drifted between its copies" | a cross-package comment edit touched one copy of a byte-identical pair | yes — `the site-grouping rule has drifted between its copies`, and the named group was the drifted one |
+| "every file path named in a comment points at a file that exists" | a comment written four minutes earlier named `lib/client-details.ts` from the API | yes — file, line and unresolved path |
+
+**The remaining 12 have never been observed to produce any outcome but success.** That is not evidence they are vacuous; it is the absence of evidence either way, which is the whole point of the entry. The measured rate in the only check subjected to deliberate negative controls was **two vacuous versions out of two attempts** — the first guard had none, and the guard written to fix it was vacuous in a second way. A prior for the unexamined 12 set from that number looks very different from one set from their having never complained, and it is the first that is justified.
+
+**Disposition: the rule is recorded; the sweep is NOT done.** Both instances in `assert-comment-paths.mjs` are fixed, with the controls pasted into L120 and the duplication documented in the script. The secret scan now carries a positive control. **What remains open is applying question 3 to the 12 `ci.sh` structural checks that have never been seen to fail** — a negative control each, confirming it fails and fails with a message naming the real fault. That is a discrete piece of work and it is not in this PR. Until it is done, "`ci.sh` passed" means 14 structural checks reported success and 2 of them have been shown capable of reporting anything else.
